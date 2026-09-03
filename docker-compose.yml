@@ -1,0 +1,208 @@
+# Read The Fine Corpus — Docker Compose stack (Phase 0 wiring proof)
+#
+# Bring-up: cp .env.example .env && docker compose up
+#
+# Constraint C-2: Qdrant has NO host port mapping — it is accessible only
+# within the `rtfc-internal` network, by retrieval-api and ingest-worker.
+#
+# Host-exposed ports:
+#   8080  retrieval-api
+#   8081  control-api
+#   9001  minio console
+
+networks:
+  rtfc-internal:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  qdrant-data:
+  minio-data:
+
+services:
+  # ---------------------------------------------------------------------------
+  # Backing stores
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-finecorpus}
+      POSTGRES_USER: ${POSTGRES_USER:-finecorpus}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - rtfc-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-finecorpus} -d ${POSTGRES_DB:-finecorpus}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # C-2: no `ports:` block — Qdrant is internal-only
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: unless-stopped
+    volumes:
+      - qdrant-data:/qdrant/storage
+    networks:
+      - rtfc-internal
+    # Qdrant exposes a REST API on 6333 internally; probe readiness via bash /dev/tcp
+    # (no curl/wget in the official qdrant image)
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/localhost/6333 && echo -e \"GET /healthz HTTP/1.0\\r\\n\\r\\n\" >&3 && grep -q \"200 OK\" <&3' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD must be set in .env}
+    volumes:
+      - minio-data:/data
+    networks:
+      - rtfc-internal
+    ports:
+      - "9001:9001"   # console only; S3 API (9000) stays internal
+    healthcheck:
+      test: ["CMD-SHELL", "mc ready local || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # One-shot job: create the default bucket after MinIO is healthy
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - rtfc-internal
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD must be set in .env}
+      MINIO_BUCKET: ${MINIO_BUCKET:-finecorpus}
+    entrypoint: >
+      /bin/sh -c "
+        mc alias set local http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD &&
+        mc mb --ignore-existing local/$$MINIO_BUCKET &&
+        echo 'bucket ready: '$$MINIO_BUCKET
+      "
+    restart: "no"
+
+  # ---------------------------------------------------------------------------
+  # Application services
+  # ---------------------------------------------------------------------------
+  retrieval-api:
+    build:
+      context: .
+      args:
+        SERVICE: retrieval-api
+    image: rtfc/retrieval-api:dev
+    restart: unless-stopped
+    environment:
+      SERVICE: retrieval-api
+      POSTGRES_DSN: postgresql://${POSTGRES_USER:-finecorpus}:${POSTGRES_PASSWORD:?}@postgres:5432/${POSTGRES_DB:-finecorpus}
+      QDRANT_URL: http://qdrant:6333
+    networks:
+      - rtfc-internal
+    ports:
+      - "8080:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz', timeout=4)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  control-api:
+    build:
+      context: .
+      args:
+        SERVICE: control-api
+    image: rtfc/control-api:dev
+    restart: unless-stopped
+    environment:
+      SERVICE: control-api
+      POSTGRES_DSN: postgresql://${POSTGRES_USER:-finecorpus}:${POSTGRES_PASSWORD:?}@postgres:5432/${POSTGRES_DB:-finecorpus}
+    networks:
+      - rtfc-internal
+    ports:
+      - "8081:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz', timeout=4)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  embedding-service:
+    build:
+      context: .
+      args:
+        SERVICE: embedding-service
+    image: rtfc/embedding-service:dev
+    restart: unless-stopped
+    environment:
+      SERVICE: embedding-service
+    networks:
+      - rtfc-internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz', timeout=4)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  ingest-worker:
+    build:
+      context: .
+      args:
+        SERVICE: ingest-worker
+    image: rtfc/ingest-worker:dev
+    restart: unless-stopped
+    environment:
+      SERVICE: ingest-worker
+      POSTGRES_DSN: postgresql://${POSTGRES_USER:-finecorpus}:${POSTGRES_PASSWORD:?}@postgres:5432/${POSTGRES_DB:-finecorpus}
+      QDRANT_URL: http://qdrant:6333
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?}
+      MINIO_BUCKET: ${MINIO_BUCKET:-finecorpus}
+    networks:
+      - rtfc-internal
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      embedding-service:
+        condition: service_healthy
+    # Worker has no HTTP server; check that the process is alive via pgrep
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'finecorpus.services.ingest_worker' > /dev/null"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
