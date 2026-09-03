@@ -518,14 +518,15 @@ class TestEdgeCases:
         cfg = load_config()  # no explicit path
         assert cfg.platform.instance_name == "env-path-test"
 
-    def test_ingestion_dedup_field_via_alias(self, tmp_path: Path) -> None:
-        """ingestion.'dedup.index_superseded_versions' can be loaded from YAML."""
+    def test_ingestion_dedup_field_nested(self, tmp_path: Path) -> None:
+        """ingestion.dedup.index_superseded_versions can be set via nested YAML maps."""
         cfg_file = write_yaml(
             tmp_path,
             """
             ingestion:
-              "dedup.index_superseded_versions": true
+              dedup:
+                index_superseded_versions: true
             """,
         )
         cfg = load_config(cfg_file)
-        assert cfg.ingestion.dedup_index_superseded_versions is True
+        assert cfg.ingestion.dedup.index_superseded_versions is True

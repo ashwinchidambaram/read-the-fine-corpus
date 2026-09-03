@@ -282,11 +282,12 @@ assessment:
 # §2.5 Ingestion
 # ---------------------------------------------------------------------------
 ingestion:
-  # When false (default), superseded near-duplicate documents produce no
-  # segments and no chunks (inventory-only).  When true, they are indexed at
-  # salience tier "excluded".  (§6.1, §6.3)
-  # Default: false
-  "dedup.index_superseded_versions": false
+  dedup:
+    # When false (default), superseded near-duplicate documents produce no
+    # segments and no chunks (inventory-only).  When true, they are indexed at
+    # salience tier "excluded".  (§6.1, §6.3, owner ruling D-25)
+    # Default: false
+    index_superseded_versions: false
 
 # ---------------------------------------------------------------------------
 # §2.6 Index lifecycle and retention

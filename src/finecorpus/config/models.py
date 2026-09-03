@@ -498,21 +498,24 @@ class AssessmentConfig(BaseModel):
     )
 
 
-class IngestionConfig(BaseModel):
-    """Platform-level ingestion settings (§6.1)."""
+class DedupSettings(BaseModel):
+    """Deduplication sub-settings for the ingestion section (§6.1, §6.3)."""
 
-    dedup_index_superseded_versions: bool = Field(
+    index_superseded_versions: bool = Field(
         default=False,
         description=(
             "§6.1, §6.3 — When ``false`` (default), superseded near-duplicate documents "
             "are inventoried but produce no segments and no chunks. When ``true``, "
             "superseded documents are indexed at salience tier ``excluded``. "
-            "Source: owner ruling 2026-09-03 (D-25)."
+            "Source: owner ruling D-25, spec §6.1/§6.3."
         ),
-        alias="dedup.index_superseded_versions",
     )
 
-    model_config = {"populate_by_name": True}
+
+class IngestionConfig(BaseModel):
+    """Platform-level ingestion settings (§6.1)."""
+
+    dedup: DedupSettings = Field(default_factory=DedupSettings)
 
 
 # ---------------------------------------------------------------------------
@@ -782,16 +785,6 @@ class ObservabilityConfig(BaseModel):
 # ---------------------------------------------------------------------------
 # Secret-detection helpers
 # ---------------------------------------------------------------------------
-
-# Field names that are credential-bearing.  Values for these keys must come from
-# env vars (or a secrets-manager reference string), never from the YAML file.
-_SECRET_FIELD_NAMES: frozenset[str] = frozenset(
-    {
-        "url",  # postgres URL (contains password)
-        "api_key",  # Qdrant, generic
-        "cache_url",  # cache backend URL
-    }
-)
 
 # Heuristic patterns that look like plaintext credentials.
 # A match triggers a hard validation error.
