@@ -112,6 +112,9 @@ class TestDefaults:
         assert cfg.budgets.sweep_confirmation_threshold_usd == Decimal("5.00")
         assert cfg.budgets.scheduled_reindex_cap_hit_alert_count == 3
 
+        # Ingestion (CORR-1)
+        assert cfg.ingestion.dedup.index_superseded_versions is False
+
         # Observability
         assert cfg.observability.metrics_port == 9090
         assert cfg.observability.otel_service_name == "rtfc"
@@ -530,3 +533,193 @@ class TestEdgeCases:
         )
         cfg = load_config(cfg_file)
         assert cfg.ingestion.dedup.index_superseded_versions is True
+
+
+# ---------------------------------------------------------------------------
+# 11. SEC-1 — export() pattern sweep (redaction by construction)
+# ---------------------------------------------------------------------------
+
+
+class TestExportPatternSweep:
+    """SEC-1: export() must redact ANY string matching secret patterns, not just known paths."""
+
+    def test_export_redacts_secret_in_unknown_path_via_pattern(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A secret-looking value in a non-denylist field must still be redacted."""
+        cfg_file = write_yaml(tmp_path, "{}\n")
+        # endpoint_url is NOT in the three-path denylist; a postgres DSN with
+        # embedded password must still be caught by the pattern sweep (SEC-1).
+        monkeypatch.setenv(
+            "FINECORPUS_STORAGE__OBJECT_STORE__ENDPOINT_URL",
+            "postgresql://admin:s3cr3t@minio:9000",
+        )
+        cfg = load_config(cfg_file)
+        exported = cfg.export()
+        endpoint = exported["storage"]["object_store"]["endpoint_url"]
+        assert endpoint == "<redacted>", (
+            f"endpoint_url with embedded password should be redacted; got {endpoint!r}"
+        )
+
+    def test_export_redacts_sk_style_key_in_any_field(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An sk-... API key injected into any string field must be redacted."""
+        cfg_file = write_yaml(tmp_path, "{}\n")
+        # otel_endpoint is an arbitrary string field — inject an sk- style token
+        monkeypatch.setenv(
+            "FINECORPUS_OBSERVABILITY__OTEL_ENDPOINT",
+            "sk-proj-abcdefghijklmnopqrstuvwx12345678",
+        )
+        cfg = load_config(cfg_file)
+        exported = cfg.export()
+        otel = exported["observability"]["otel_endpoint"]
+        assert otel == "<redacted>", (
+            f"sk-style key in otel_endpoint should be redacted; got {otel!r}"
+        )
+
+    def test_export_does_not_redact_normal_url(self, tmp_path: Path) -> None:
+        """A plain URL without credentials must NOT be redacted by the sweep."""
+        cfg_file = write_yaml(tmp_path, "{}\n")
+        cfg = load_config(cfg_file)
+        exported = cfg.export()
+        assert exported["storage"]["qdrant"]["url"] == "http://qdrant:6333"
+
+    def test_export_redacts_postgres_url_pattern_sweep(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """postgres.url with embedded creds is caught by BOTH known-path and pattern sweep."""
+        cfg_file = write_yaml(tmp_path, "{}\n")
+        monkeypatch.setenv(
+            "FINECORPUS_STORAGE__POSTGRES__URL",
+            "postgresql://user:topsecret@host/db",
+        )
+        cfg = load_config(cfg_file)
+        exported = cfg.export()
+        assert exported["storage"]["postgres"]["url"] == "<redacted>"
+        assert "topsecret" not in str(exported)
+
+
+# ---------------------------------------------------------------------------
+# 12. SEC-2 — _check_secrets_in_dict handles lists
+# ---------------------------------------------------------------------------
+
+
+class TestListSecretDetection:
+    """SEC-2: secret scan must recurse into list elements."""
+
+    def test_secret_string_in_list_is_rejected(self, tmp_path: Path) -> None:
+        """A plaintext credential inside a YAML list must be caught."""
+        from finecorpus.config.models import _check_secrets_in_dict
+
+        data: dict = {
+            "tags": ["postgresql://u:secret@host/db", "other-tag"],
+        }
+        with pytest.raises(ValueError, match="plaintext credential"):
+            _check_secrets_in_dict(data, path="")
+
+    def test_secret_dict_nested_in_list_is_rejected(self, tmp_path: Path) -> None:
+        """A dict containing a secret, nested inside a list, must be caught."""
+        from finecorpus.config.models import _check_secrets_in_dict
+
+        data: dict = {
+            "providers": [
+                {"api_key": "sk-abcdefghijklmnopqrstuvwx12345678"},
+            ],
+        }
+        with pytest.raises(ValueError, match="plaintext credential"):
+            _check_secrets_in_dict(data, path="")
+
+    def test_clean_list_is_accepted(self, tmp_path: Path) -> None:
+        """A list of non-secret strings must not raise."""
+        from finecorpus.config.models import _check_secrets_in_dict
+
+        data: dict = {
+            "tags": ["production", "us-east-1", "rtfc"],
+        }
+        # Must not raise
+        _check_secrets_in_dict(data, path="")
+
+
+# ---------------------------------------------------------------------------
+# 13. SEC-3 — expanded _HIGH_ENTROPY_SECRET_FIELDS
+# ---------------------------------------------------------------------------
+
+
+class TestHighEntropySecretFields:
+    """SEC-3: access_key, secret_key, api_token are now treated as high-entropy fields."""
+
+    def test_high_entropy_hex_in_access_key_rejected(self, tmp_path: Path) -> None:
+        from finecorpus.config.models import _is_secret_value
+
+        # 32-char hex token in an access_key field must be detected
+        assert _is_secret_value("access_key", "a" * 32) is True
+
+    def test_high_entropy_hex_in_secret_key_rejected(self, tmp_path: Path) -> None:
+        from finecorpus.config.models import _is_secret_value
+
+        assert _is_secret_value("secret_key", "deadbeef" * 4) is True
+
+    def test_high_entropy_hex_in_api_token_rejected(self, tmp_path: Path) -> None:
+        from finecorpus.config.models import _is_secret_value
+
+        assert _is_secret_value("api_token", "f0f0f0f0" * 4) is True
+
+    def test_high_entropy_hex_in_normal_field_not_rejected(self, tmp_path: Path) -> None:
+        """A 32-char hex in a non-secret-named field must NOT be flagged."""
+        from finecorpus.config.models import _is_secret_value
+
+        assert _is_secret_value("bucket_name", "a" * 32) is False
+
+
+# ---------------------------------------------------------------------------
+# 14. SEC-4 — model_validator rejects secrets on direct Config construction
+# ---------------------------------------------------------------------------
+
+
+class TestModelValidatorSecretRejection:
+    """SEC-4 (simpler-honest option): model_validator sweeps all non-exempt fields."""
+
+    def test_direct_config_construction_with_sk_key_rejected(self) -> None:
+        """Config(...) with an sk-style key in a non-exempt field must raise."""
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            Config(
+                observability={"otel_endpoint": "sk-proj-abcdefghijklmnopqrstuvwx12345678"},
+            )
+
+    def test_direct_config_construction_with_postgres_dsn_exempt(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """storage.postgres.url is an exempt path; direct construction must NOT raise."""
+        # This is the env-only credential path — validator skips it
+        cfg = Config(
+            storage={"postgres": {"url": "postgresql://user:pass@host/db"}},
+        )
+        assert cfg.storage.postgres.url == "postgresql://user:pass@host/db"
+
+    def test_direct_config_construction_with_qdrant_api_key_exempt(self) -> None:
+        """storage.qdrant.api_key is an exempt path; direct construction must NOT raise."""
+        cfg = Config(
+            storage={"qdrant": {"api_key": "postgresql://u:secret@host/db"}},
+        )
+        assert cfg.storage.qdrant.api_key == "postgresql://u:secret@host/db"
+
+    def test_direct_config_construction_clean_succeeds(self) -> None:
+        """Clean Config construction must succeed without errors."""
+        cfg = Config()
+        assert cfg.platform.instance_name == "rtfc"
+
+    def test_load_config_still_rejects_yaml_secret_on_exempt_path(self, tmp_path: Path) -> None:
+        """YAML-sourced secret on an exempt path is caught by load_config file scan."""
+        cfg_file = write_yaml(
+            tmp_path,
+            """
+            storage:
+              postgres:
+                url: "postgresql://user:secretpassword@host/db"
+            """,
+        )
+        with pytest.raises(ValueError, match="plaintext credential"):
+            load_config(cfg_file)

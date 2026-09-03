@@ -8,16 +8,33 @@ Secret-bearing fields (API keys, database passwords) are intentionally typed
 ``Optional[str] = None``.  A ``model_validator`` in ``Config`` rejects any
 field whose value looks like a plaintext credential — secrets must arrive via
 environment variables, never the YAML file.
+
+The ``Config`` model carries a ``@model_validator(mode="after")`` that sweeps
+the dumped dict and rejects plaintext credentials regardless of how the model
+was constructed.  The known env-only credential fields
+(``storage.postgres.url``, ``storage.qdrant.api_key``, ``storage.cache.url``)
+are **exempt** from the model-validator sweep because the validator cannot
+distinguish an env-supplied secret from a YAML-supplied one — the file-level
+scan in ``load_config()`` (which runs *before* env-var merging) is the
+authoritative gate for YAML-sourced secrets on those fields.  All other string
+fields are checked by both the model validator and ``load_config()``.
 """
 
 from __future__ import annotations
 
+import contextvars
 import re
 from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+# Context variable used by load_config() to suppress the model-validator secret
+# sweep (load_config already ran the file-level scan before env-var merging).
+_SKIP_MODEL_SECRET_CHECK: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "_rtfc_skip_model_secret_check", default=False
+)
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -804,7 +821,9 @@ _SECRET_PATTERNS: list[re.Pattern[str]] = [
 ]
 
 # Field names that use the high-entropy pattern as a signal (more aggressive check)
-_HIGH_ENTROPY_SECRET_FIELDS: frozenset[str] = frozenset({"api_key"})
+_HIGH_ENTROPY_SECRET_FIELDS: frozenset[str] = frozenset(
+    {"api_key", "access_key", "secret_key", "api_token"}
+)
 
 
 def _is_secret_value(field_name: str, value: str) -> bool:
@@ -855,7 +874,33 @@ class Config(BaseModel):
     budgets: BudgetsConfig = Field(default_factory=BudgetsConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
 
-    pass  # secret validation is performed in load_config() before env-var merging
+    @model_validator(mode="after")
+    def _reject_plaintext_secrets(self) -> Config:
+        """Sweep the dumped config dict for plaintext credentials (§14.2).
+
+        This catches direct ``Config(...)`` construction with plaintext secrets
+        as well as any code path that bypasses ``load_config()``.
+
+        **Exempted paths**: ``storage.postgres.url``, ``storage.qdrant.api_key``,
+        and ``storage.cache.url`` are skipped by this validator.  Those three
+        fields are the only documented env-only credential paths; the validator
+        cannot distinguish a value that arrived from the YAML file versus one
+        injected by the OS environment.  ``load_config()`` runs the authoritative
+        YAML-only secret scan *before* env-var merging, so YAML-sourced secrets
+        on those paths are caught there with a clearer "key came from YAML" error.
+        All other string fields are swept here.
+
+        ``load_config()`` sets ``_SKIP_MODEL_SECRET_CHECK`` (a
+        ``contextvars.ContextVar``) to ``True`` before calling
+        ``model_validate()``, so the file-level scan is not duplicated for the
+        env-merge path.  Direct callers do not set the flag, so the validator
+        fires normally.
+        """
+        if _SKIP_MODEL_SECRET_CHECK.get():
+            return self
+        dumped = self.model_dump(mode="python")
+        _check_secrets_in_dict_skip_paths(dumped, path="", skip=_ENV_ONLY_SECRET_PATHS)
+        return self
 
     def export(self) -> dict[str, Any]:
         """Return a secret-free representation of this configuration.
@@ -864,21 +909,41 @@ class Config(BaseModel):
         ``"<redacted>"`` so the result can be logged, exported, or committed to
         version control (§14.2).
 
-        Secret fields are: ``storage.postgres.url``,
-        ``storage.qdrant.api_key``, ``storage.cache.url``.
+        Redaction uses two complementary strategies (spec §14.2
+        "secret-free by construction"):
+
+        1. **Pattern sweep** — every string value in the exported dict is
+           tested against ``_is_secret_value``; any match is redacted
+           regardless of field path.  This is the primary backstop that catches
+           future credential fields automatically.
+
+        2. **Known-path redaction** — the three known credential paths
+           (``storage.postgres.url``, ``storage.qdrant.api_key``,
+           ``storage.cache.url``) are unconditionally redacted when non-null,
+           covering short/low-entropy secrets (e.g. a plain API token) that the
+           pattern sweep might not catch.
         """
         raw = self.model_dump(mode="python")
-        # Redact known secret paths
-        _redact_dict(raw)
+        # Apply known-path redaction first (covers low-entropy secrets)
+        _redact_known_paths(raw)
+        # Then sweep every string value for secret patterns (SEC-1 backstop)
+        _redact_secret_values(raw)
         return raw
 
 
 def _check_secrets_in_dict(data: dict[str, Any], path: str) -> None:
-    """Recursively walk *data* and raise if any value looks like a plaintext secret."""
+    """Recursively walk *data* and raise if any value looks like a plaintext secret.
+
+    Handles nested dicts and lists.  List elements are iterated; dicts within
+    lists are recursed into, and strings within lists are checked using the
+    parent key as the field-name hint (SEC-2).
+    """
     for key, value in data.items():
         current_path = f"{path}.{key}" if path else key
         if isinstance(value, dict):
             _check_secrets_in_dict(value, current_path)
+        elif isinstance(value, list):
+            _check_secrets_in_list(value, current_path, key)
         elif isinstance(value, str) and value:
             if _is_secret_value(key, value):
                 raise ValueError(
@@ -889,17 +954,42 @@ def _check_secrets_in_dict(data: dict[str, Any], path: str) -> None:
                 )
 
 
-# Secret field paths to redact in export()
-_SECRET_EXPORT_PATHS: list[tuple[str, ...]] = [
-    ("storage", "postgres", "url"),
-    ("storage", "qdrant", "api_key"),
-    ("storage", "cache", "url"),
-]
+def _check_secrets_in_list(items: list[Any], path: str, parent_key: str) -> None:
+    """Recursively check list elements for plaintext secrets (SEC-2).
+
+    Dicts within the list are recursed into; plain strings are checked using
+    *parent_key* as the field-name hint.
+    """
+    for i, item in enumerate(items):
+        element_path = f"{path}[{i}]"
+        if isinstance(item, dict):
+            _check_secrets_in_dict(item, element_path)
+        elif isinstance(item, list):
+            _check_secrets_in_list(item, element_path, parent_key)
+        elif isinstance(item, str) and item:
+            if _is_secret_value(parent_key, item):
+                raise ValueError(
+                    f"Config key '{element_path}' appears to contain a plaintext "
+                    f"credential. Supply secrets via environment variables "
+                    f"(FINECORPUS_<PATH>) or a secrets-manager reference, "
+                    f"never in corpus.yaml (§14.2)."
+                )
 
 
-def _redact_dict(data: dict[str, Any]) -> None:
-    """In-place redact known secret paths."""
-    for path in _SECRET_EXPORT_PATHS:
+# Known credential paths: documented env-only fields that export() always redacts
+# and that the model-validator exempts (it cannot distinguish env vs YAML origin).
+_ENV_ONLY_SECRET_PATHS: frozenset[tuple[str, ...]] = frozenset(
+    {
+        ("storage", "postgres", "url"),
+        ("storage", "qdrant", "api_key"),
+        ("storage", "cache", "url"),
+    }
+)
+
+
+def _redact_known_paths(data: dict[str, Any]) -> None:
+    """In-place redact known credential paths in *data* (first pass in export)."""
+    for path in _ENV_ONLY_SECRET_PATHS:
         node = data
         for part in path[:-1]:
             if not isinstance(node, dict) or part not in node:
@@ -909,3 +999,58 @@ def _redact_dict(data: dict[str, Any]) -> None:
             leaf = path[-1]
             if isinstance(node, dict) and node.get(leaf) is not None:
                 node[leaf] = "<redacted>"
+
+
+def _redact_secret_values(data: dict[str, Any]) -> None:
+    """In-place sweep *data* and redact any string value matching secret patterns (SEC-1).
+
+    Walks the entire dict recursively so that future credential fields are
+    automatically covered without updating a denylist.
+    """
+    for key, value in data.items():
+        if isinstance(value, dict):
+            _redact_secret_values(value)
+        elif isinstance(value, list):
+            _redact_secret_values_in_list(data, key, value)
+        elif isinstance(value, str) and value != "<redacted>" and _is_secret_value(key, value):
+            data[key] = "<redacted>"
+
+
+def _redact_secret_values_in_list(parent: dict[str, Any], key: str, items: list[Any]) -> None:
+    """Walk list elements and redact secret strings in-place."""
+    for i, item in enumerate(items):
+        if isinstance(item, dict):
+            _redact_secret_values(item)
+        elif isinstance(item, list):
+            _redact_secret_values_in_list(parent, key, item)
+        elif isinstance(item, str) and item != "<redacted>" and _is_secret_value(key, item):
+            items[i] = "<redacted>"
+
+
+def _check_secrets_in_dict_skip_paths(
+    data: dict[str, Any],
+    path: str,
+    skip: frozenset[tuple[str, ...]],
+) -> None:
+    """Like ``_check_secrets_in_dict`` but skips field paths listed in *skip*.
+
+    Used by the ``Config`` model validator to exempt documented env-only
+    credential paths from the sweep (SEC-4).
+    """
+    for key, value in data.items():
+        current_path = f"{path}.{key}" if path else key
+        current_tuple = tuple(current_path.split("."))
+        if current_tuple in skip:
+            continue
+        if isinstance(value, dict):
+            _check_secrets_in_dict_skip_paths(value, current_path, skip)
+        elif isinstance(value, list):
+            _check_secrets_in_list(value, current_path, key)
+        elif isinstance(value, str) and value:
+            if _is_secret_value(key, value):
+                raise ValueError(
+                    f"Config key '{current_path}' appears to contain a plaintext "
+                    f"credential. Supply secrets via environment variables "
+                    f"(FINECORPUS_<PATH>) or a secrets-manager reference, "
+                    f"never in corpus.yaml (§14.2)."
+                )

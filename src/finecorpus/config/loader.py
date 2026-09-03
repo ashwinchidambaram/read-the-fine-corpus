@@ -42,7 +42,7 @@ from typing import Any
 import yaml
 from pydantic import ValidationError
 
-from .models import Config
+from .models import _SKIP_MODEL_SECRET_CHECK, Config
 
 ENV_PREFIX = "FINECORPUS_"
 PATH_SEP = "__"
@@ -236,8 +236,14 @@ def load_config(path: str | Path | None = None) -> Config:
     env_vars.pop("CONFIG_PATH", None)
     _apply_env_to_dict(file_data, env_vars)
 
+    # Suppress the model-validator secret sweep: load_config already ran the
+    # file-level scan before env-var merging, so the validator would fire on
+    # env-sourced secrets (which are trusted at the OS level).
+    token = _SKIP_MODEL_SECRET_CHECK.set(True)
     try:
         config = Config.model_validate(file_data)
     except ValidationError:
         raise
+    finally:
+        _SKIP_MODEL_SECRET_CHECK.reset(token)
     return config
