@@ -11,12 +11,16 @@ Run: uv run python tests/fixtures/golden/generators/gen_scanned_pdf.py
 
 import io
 import random
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fpdf import FPDF
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 OUTPUT = Path(__file__).parent.parent / "corpus" / "scanned_poor.pdf"
+
+# Fixed creation date — keeps /CreationDate deterministic across regenerations.
+FIXED_DATE = datetime(2026, 1, 1, tzinfo=UTC)
 
 # Fixed seed - deterministic output
 RNG = random.Random(42)
@@ -246,6 +250,7 @@ def render_page(text: str, degraded: bool) -> bytes:
 
 def build() -> None:
     pdf = FPDF(unit="pt", format=(PAGE_W_PX, PAGE_H_PX))
+    pdf.set_creation_date(FIXED_DATE)
     pdf.set_auto_page_break(auto=False)
 
     for _page_num, text, degraded in PAGE_CONTENT:

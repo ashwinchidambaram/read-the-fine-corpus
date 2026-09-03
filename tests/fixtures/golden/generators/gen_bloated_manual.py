@@ -13,10 +13,14 @@ Run: uv run python tests/fixtures/golden/generators/gen_bloated_manual.py
 
 import io
 import random
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fpdf import FPDF
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
+
+# Fixed creation date — keeps /CreationDate deterministic across regenerations.
+FIXED_DATE = datetime(2026, 1, 1, tzinfo=UTC)
 
 OUTPUT = Path(__file__).parent.parent / "corpus" / "bloated_manual.pdf"
 
@@ -94,6 +98,7 @@ def render_scanned_appendix() -> bytes:
 
 def build() -> None:
     pdf = FPDF()
+    pdf.set_creation_date(FIXED_DATE)
     pdf.set_auto_page_break(auto=True, margin=15)
 
     # === PAGE 1: Legal preamble (part 1) ===

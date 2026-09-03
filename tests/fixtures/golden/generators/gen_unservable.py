@@ -19,10 +19,14 @@ Run: uv run python tests/fixtures/golden/generators/gen_unservable.py
 
 import io
 import struct
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fpdf import FPDF
 from PIL import Image, ImageDraw
+
+# Fixed creation date — keeps /CreationDate deterministic across regenerations.
+FIXED_DATE = datetime(2026, 1, 1, tzinfo=UTC)
 
 CORPUS = Path(__file__).parent.parent / "corpus"
 
@@ -190,6 +194,7 @@ def build_image_only_pdf() -> None:
     buf.seek(0)
 
     pdf = FPDF(unit="pt", format=(850, 1100))
+    pdf.set_creation_date(FIXED_DATE)
     pdf.set_auto_page_break(auto=False)
     pdf.add_page()
     pdf.image(buf, x=0, y=0, w=850, h=1100)

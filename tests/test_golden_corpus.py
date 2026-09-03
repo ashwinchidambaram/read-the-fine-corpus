@@ -7,6 +7,7 @@ Validates:
   3. Every file's sha256 matches the manifest entry.
   4. The corpus covers all §18.1 mandatory categories.
   5. Every §18.1 mandatory category maps to at least one fixture.
+  6. Generator determinism: regenerating a cheap fixture produces the same hash.
 
 These tests do NOT run the pipeline. They verify only that the fixture corpus
 is present, intact, and categorically complete — the prerequisite for any
@@ -14,6 +15,9 @@ integration test to be meaningful.
 """
 
 import hashlib
+import importlib
+import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -293,3 +297,64 @@ class TestGeneratorsExist:
         assert not missing, (
             "Missing generator scripts:\n" + "\n".join(f"  {m}" for m in missing)
         )
+
+
+# ---------------------------------------------------------------------------
+# Test 6: generator determinism
+# ---------------------------------------------------------------------------
+
+class TestGeneratorDeterminism:
+    def test_clean_pdf_generator_is_deterministic(
+        self, fixture_entries: list[dict[str, Any]]
+    ) -> None:
+        """
+        Regenerating clean_native.pdf into a temp dir twice must produce byte-identical
+        output that matches the manifest sha256.  This guards against future generators
+        accidentally embedding wall-clock timestamps (fpdf2 /CreationDate, openpyxl
+        dcterms:modified, zip entry mtimes, etc.).
+        """
+        # Find the manifest entry for clean_native.pdf
+        entry = next(
+            (e for e in fixture_entries if e["file"] == "corpus/clean_native.pdf"),
+            None,
+        )
+        assert entry is not None, "corpus/clean_native.pdf not found in manifest"
+
+        generators_dir = GOLDEN_DIR / "generators"
+        gen_module_name = "gen_clean_pdf"
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_corpus = Path(tmp_dir) / "corpus"
+            tmp_corpus.mkdir()
+
+            # Temporarily redirect generator OUTPUT to tmp_corpus
+            if generators_dir not in sys.path:
+                sys.path.insert(0, str(generators_dir))
+
+            # Clear cached module so we get a fresh import each run
+            for _ in range(2):
+                if gen_module_name in sys.modules:
+                    del sys.modules[gen_module_name]
+                mod = importlib.import_module(gen_module_name)
+
+                # Patch the output path to write into tmp_corpus
+                original_output = mod.OUTPUT
+                mod.OUTPUT = tmp_corpus / "clean_native.pdf"
+                try:
+                    mod.build()
+                finally:
+                    mod.OUTPUT = original_output
+
+            # Both regenerations should land in the same file; read it
+            regen_path = tmp_corpus / "clean_native.pdf"
+            assert regen_path.exists(), "Regenerated file not found"
+
+            actual_hash = hashlib.sha256(regen_path.read_bytes()).hexdigest()
+            expected_hash = entry["sha256"]
+
+            assert actual_hash == expected_hash, (
+                f"Determinism failure: regenerated clean_native.pdf hash {actual_hash!r} "
+                f"does not match manifest sha256 {expected_hash!r}. "
+                "The generator is producing non-deterministic output. "
+                "Check for wall-clock timestamps in /CreationDate, zip entry mtimes, etc."
+            )

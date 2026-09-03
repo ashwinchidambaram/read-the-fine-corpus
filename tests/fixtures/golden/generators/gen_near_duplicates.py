@@ -6,9 +6,13 @@ Walkthrough Case 5.
 Run: uv run python tests/fixtures/golden/generators/gen_near_duplicates.py
 """
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fpdf import FPDF
+
+# Fixed creation date — keeps /CreationDate deterministic across regenerations.
+FIXED_DATE = datetime(2026, 1, 1, tzinfo=UTC)
 
 CORPUS = Path(__file__).parent.parent / "corpus"
 
@@ -91,6 +95,7 @@ def build_version(
     output: Path,
 ) -> None:
     pdf = FPDF()
+    pdf.set_creation_date(FIXED_DATE)
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
 

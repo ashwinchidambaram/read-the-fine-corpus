@@ -5,11 +5,15 @@ Covers the form_field segment type - the only type not covered by the original Â
 Run: uv run python tests/fixtures/golden/generators/gen_form_pdf.py
 """
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fpdf import FPDF
 
 OUTPUT = Path(__file__).parent.parent / "corpus" / "form_filled.pdf"
+
+# Fixed creation date â€” keeps /CreationDate deterministic across regenerations.
+FIXED_DATE = datetime(2026, 1, 1, tzinfo=UTC)
 
 # Filled form data - deterministic, no wall-clock dependency
 FORM_DATA = {
@@ -44,6 +48,7 @@ def draw_field(pdf: FPDF, label: str, value: str, y: float) -> float:
 
 def build() -> None:
     pdf = FPDF()
+    pdf.set_creation_date(FIXED_DATE)
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
 

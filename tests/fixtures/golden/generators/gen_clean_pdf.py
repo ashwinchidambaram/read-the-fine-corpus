@@ -5,11 +5,15 @@ Reproducible: no wall-clock-dependent content, fixed seed not needed (determinis
 Run: uv run python tests/fixtures/golden/generators/gen_clean_pdf.py
 """
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fpdf import FPDF
 
 OUTPUT = Path(__file__).parent.parent / "corpus" / "clean_native.pdf"
+
+# Fixed creation date — keeps /CreationDate deterministic across regenerations.
+FIXED_DATE = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 def mc(pdf: FPDF, text: str, h: float = 6) -> None:
@@ -20,6 +24,7 @@ def mc(pdf: FPDF, text: str, h: float = 6) -> None:
 
 def build() -> None:
     pdf = FPDF()
+    pdf.set_creation_date(FIXED_DATE)
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
 

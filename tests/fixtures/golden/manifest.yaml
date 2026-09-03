@@ -21,7 +21,7 @@ fixtures:
   expected_triage_class: native_pdf
   expected_findings: []
   flags: []
-  sha256: ea690f4e3885d05c2a7a374af60b85dc41e6a566d7dfcf133716a1a4bc0132bc
+  sha256: ff5829d59ef3af5697e631604c4b359c2f980c791da6bef2a623be54fd6a41bc
 - file: corpus/scanned_poor.pdf
   role: §18.1 — poorly scanned PDF with known-degraded regions
   generator: generators/gen_scanned_pdf.py
@@ -43,7 +43,7 @@ fixtures:
     location: page 3
   flags:
   - low_ocr_confidence_page_3
-  sha256: e96b7b344823fbf32f4227c136202f8a7fee016481b8ff7ab98b4041e9128e40
+  sha256: 0f2f1aae07bca02a8c0e4ee93153957c75b06215156efd80064a52eac239917b
 - file: corpus/bloated_manual.pdf
   role: §18.1 — bloated manual with cross-references, boilerplate, mixed content types
   generator: generators/gen_bloated_manual.py
@@ -81,7 +81,7 @@ fixtures:
   - boilerplate_legal_preamble
   - cross_reference_see_section_4_2
   - scanned_appendix
-  sha256: 0e5bf493ead42e1e513d34e27a94bc8873a75260fa8f766f9abf390a6c340e1d
+  sha256: 40304331a4a65042746e5afad838d336e73d9952593790b076e5ba85d4f27fdb
 - file: corpus/boilerplate_a.pdf
   role: §18.1 auxiliary — corpus boilerplate detection support (shares preamble with
     bloated_manual.pdf)
@@ -105,7 +105,7 @@ fixtures:
     severity: info
   flags:
   - boilerplate_legal_preamble
-  sha256: f7f481362e42ca9268687816f008bbeb557eedf6b43591a72b48be2122019715
+  sha256: 815f983925154301809ff5ee514046db9381d529788056c653b3430f30d4633b
 - file: corpus/boilerplate_b.pdf
   role: §18.1 auxiliary — corpus boilerplate detection support (shares preamble with
     bloated_manual.pdf)
@@ -129,7 +129,7 @@ fixtures:
     severity: info
   flags:
   - boilerplate_legal_preamble
-  sha256: 4c8e8331f0bcb6e9f117cd64968034426c38efc8549c2fea98bf879b2dab3a90
+  sha256: 3ef2bfebd976798635c8a490c27fffb58c8e3678e6abb661d6c8631153d983e7
 - file: corpus/nested_tables.html
   role: §18.1 — document with complex and nested tables
   generator: generators/gen_nested_tables.py
@@ -158,10 +158,10 @@ fixtures:
   role: '§18.1 — spreadsheet: report kind'
   generator: generators/gen_spreadsheets.py
   content_summary: 'Q4 2025 revenue report. Three sheets: Executive Summary (metadata
-    + key metrics table), Revenue Analysis (narrative prose + revenue table), Commentary
-    (outlook prose + risk list). Contains narrative text, formatted tables, and chart-adjacent
-    commentary. Must be triaged as Report kind and ingested as a document. Walkthrough
-    Case 3.
+    + key metrics table), Revenue Analysis (narrative prose + revenue table + embedded
+    BarChart of Q4 revenue by product line), Commentary (outlook prose + risk list).
+    Contains narrative text, formatted tables, and a real openpyxl BarChart. Must be
+    triaged as Report kind and ingested as a document. Walkthrough Case 3.
 
     '
   expected_segment_types:
@@ -178,7 +178,7 @@ fixtures:
     kind: report
     disposition: ingest
   flags: []
-  sha256: 5b5aee4038ae669d4b4f7834073ac6558673ec3501a041d49f4ae753e44a1a36
+  sha256: 4dfcb62e1fb53ea7be1ed2908b82d5de212f1ae5bb875be8fcb787b1cc9ba120
 - file: corpus/database_spreadsheet.xlsx
   role: '§18.1 — spreadsheet: database kind'
   generator: generators/gen_spreadsheets.py
@@ -199,7 +199,7 @@ fixtures:
   flags:
   - document_level_exclusion
   - zero_chunks_expected
-  sha256: 8d9c80a50293184ae2736d4d8c44cd7d70150103f823e7f110bd99b5b6c67338
+  sha256: 3e4841db92125d20869316aeae87e2edab41000d0cb450d2913518182fb38da4
 - file: corpus/model_spreadsheet.xlsx
   role: '§18.1 — spreadsheet: model kind'
   generator: generators/gen_spreadsheets.py
@@ -222,7 +222,7 @@ fixtures:
   - document_level_exclusion
   - zero_chunks_expected
   - formula_dense
-  sha256: a49b569fc9b0d38187c1d2d982ed657411a72be70778ed3c64e51b8f258918ee
+  sha256: fa80a61a9c23e0d530ce4e80084e26c219110f76dc1a978971638e7fa5947c3f
 - file: corpus/confluence_export.html
   role: §18.1 — Confluence-style HTML export
   generator: generators/gen_confluence_html.py
@@ -276,14 +276,14 @@ fixtures:
   - near_duplicate
   - dedup_role_superseded
   - default_no_segments
-  sha256: ff201e5a03671c66128d0ad12c5a3570bbeaa307183d9552c91f4af454dc9702
+  sha256: 7871f563247a93b54450557cc3002c6d2592301354dd59a0adf576ae68d82b06
 - file: corpus/policy_v2.pdf
   role: '§18.1 — near-duplicate family: policy version 2 (intermediate, superseded)'
   generator: generators/gen_near_duplicates.py
   content_summary: 'ACME Leave Policy Rev. 2, effective 2025-03-15. Adds bereavement
     leave section. Shared common body with v1 and v3. Near-duplicate similarity to
-    v3: ~0.94. Default behaviour: superseded, produces no segments (D-25 ruling).
-    Walkthrough Case 5.
+    v3: SequenceMatcher ~0.80 (measured). Default behaviour: superseded, produces no
+    segments (D-25 ruling). Walkthrough Case 5.
 
     '
   expected_segment_types: []
@@ -297,7 +297,7 @@ fixtures:
   - near_duplicate
   - dedup_role_superseded
   - default_no_segments
-  sha256: 92f753553981d9354883453d53a40981abc2325bb7f69acfc2ca7b98462a073b
+  sha256: 8d39980eaf3c5bc205356d274aa1e6db2a2527000b93f9253d912e0d72df2147
 - file: corpus/policy_v3.pdf
   role: '§18.1 — near-duplicate family: policy version 3 (newest, primary)'
   generator: generators/gen_near_duplicates.py
@@ -319,7 +319,7 @@ fixtures:
   flags:
   - near_duplicate
   - dedup_role_primary
-  sha256: 3bd87bbc6a607167ba3db9c8ce6380b274b06a637ae6cf82dc0df27e718915fd
+  sha256: 8497b16eea9a456f0999455d40640f836c4411d8a28051ddd5220ab93fd674e8
 - file: corpus/password_protected.pdf
   role: '§18.1 — unservable: password-protected PDF'
   generator: generators/gen_unservable.py
@@ -398,7 +398,7 @@ fixtures:
   flags:
   - document_level_exclusion
   - no_text_layer
-  sha256: 6a539a31d1b43add761ef3be8f4a7d4327b95e9934cc27be1fbccf99be8c62fa
+  sha256: 7ddfe5289a1c41a373a58a56163b6343acf16437f975e3eb9c7d3b680bb3ff23
 - file: corpus/cad_binary.dwg
   role: '§18.1 — unservable: CAD/binary file with plausible magic bytes'
   generator: generators/gen_unservable.py
@@ -427,10 +427,11 @@ fixtures:
     (page 2, injection_suspicion >= 0.9); (2) fake SYSTEM: message block (page 3,
     injection_suspicion >= 0.9); (3) exfiltration instruction referencing evil.example
     (page 4); (4) white-on-white hidden text on page 5 (invisible_content_flags: white_on_white);
-    (5) near-zero-size font run on page 6 (invisible_content_flags: zero_size_font);
-    (6) off-page text at y=1mm on page 7 (invisible_content_flags: off_page). All
-    injection text RETAINED not stripped (§14.1 labelled-not-sanitized). Non-negotiable
-    test 9 fixture.
+    (5) tiny-font run at font size 1pt on page 6 (invisible_content_flags: tiny_font);
+    (6) genuinely off-page text injected into page 7 content stream at PDF y=-50pt,
+    structurally outside the A4 MediaBox (0 0 595.28 841.89 pt) (invisible_content_flags:
+    off_page). All injection text RETAINED not stripped (§14.1 labelled-not-sanitized).
+    Non-negotiable test 9 fixture.
 
     '
   expected_segment_types:
@@ -449,7 +450,7 @@ fixtures:
   - code: invisible_content_detected
     severity: warning
     location: page 6
-    kind: zero_size_font
+    kind: tiny_font
   - code: invisible_content_detected
     severity: warning
     location: page 7
@@ -468,10 +469,10 @@ fixtures:
   - injection_system_message_page_3
   - injection_exfiltration_page_4
   - invisible_white_on_white_page_5
-  - invisible_zero_size_font_page_6
+  - invisible_tiny_font_page_6
   - invisible_off_page_page_7
   - all_text_retained_not_stripped
-  sha256: 97049fe8cced61e81520880ea8814a4bb012f753b56c9b908ccdfe47119951b2
+  sha256: ff04be503f7c2c2e8cfa65c19cedf0714d4a80893b921e412dd54c0bfbe20927
 - file: corpus/form_filled.pdf
   role: §18.1 Finding F-1 — filled form PDF with label/value pairs (form_field coverage)
   generator: generators/gen_form_pdf.py
@@ -494,16 +495,18 @@ fixtures:
   flags:
   - form_filled
   - label_value_pairs
-  sha256: 591bab75ded72ac0e920160be376b99d0883ca33a64efe5b047e18f7b310dbc3
+  sha256: e4848120d053d55df4d907a40233adf05a775ae442acc6fb0c4264fc1c7516af
 - file: corpus/malformed_structure.pdf
-  role: §18.1 Finding F-2 — PDF with deliberately corrupted object stream (unknown
-    segment type coverage)
+  role: §18.1 Finding F-2 — PDF with deliberately corrupted FlateDecode content stream
+    (unknown segment type coverage)
   generator: generators/gen_malformed_pdf.py
   content_summary: '2-page PDF (incident report). Page 1 (Incident Report content)
-    is valid and should parse normally. Page 2''s content stream has 32 bytes of garbage
-    inserted at offset ~20 inside the stream body, making the stream parser fail on
-    that object while the cross-reference table remains intact. The document partially
-    parses. Tests the unknown segment type and parser robustness (§5.3 Finding F-2).
+    is valid and should parse normally. Page 2''s FlateDecode content stream has 32 bytes
+    of garbage injected at byte offset +8 inside the compressed body, causing the zlib
+    decompressor itself to fail with an invalid-code-lengths error. The xref table
+    remains intact so the file opens, but xref-following parsers cannot sidestep the
+    broken filter. Tests the unknown segment type and parser robustness (§5.3 Finding
+    F-2).
 
     '
   expected_segment_types:
@@ -520,5 +523,5 @@ fixtures:
     location: page 2
   flags:
   - partial_parse
-  - corrupted_stream_page_2
-  sha256: 308a8b38e106adbcb9c60deca23377e52b3efa3f821e90d5d7b21813552454c2
+  - corrupted_content_stream_page_2
+  sha256: d494775231248ad511b41fb0067b891da69cd1c9a0310a2a2c07154393138cfe

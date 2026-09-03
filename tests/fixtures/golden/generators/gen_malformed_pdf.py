@@ -1,33 +1,41 @@
 """
 Generator: malformed_structure.pdf
-§18.1 + Segment taxonomy Finding F-2 role: PDF with a deliberately corrupted object stream
+§18.1 + Segment taxonomy Finding F-2 role: PDF with a deliberately corrupted content stream
 that still partially parses - provides a cleaner test for the `unknown` segment type
 and for parser robustness.
 
 Strategy:
   1. Build a valid PDF using fpdf2.
   2. Read the raw bytes back.
-  3. Locate the object stream for a content object and corrupt part of it:
-     - Replace a valid stream operator sequence with garbage bytes.
-     - Leave the cross-reference table intact so the reader can still open the file.
+  3. Locate the FlateDecode content stream for page 2 by finding the second decompressible
+     stream and injecting garbage inside it so the decompressor itself fails.
+     - This is stronger than corrupting a page-dictionary object: xref-following parsers
+       cannot sidestep it because the filter itself breaks.
   4. Write the mutated bytes as the output.
 
-Result: a PDF that most readers will partially open (the uncorrupted pages display normally)
-but that has an invalid content stream on one page, triggering parse errors.
+Result: a PDF that readers can partially open (page 1 content stream is valid and page 1
+displays normally) but page 2's FlateDecode stream is broken, triggering parse errors
+on that page.
 
 Run: uv run python tests/fixtures/golden/generators/gen_malformed_pdf.py
 """
 
+import zlib
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fpdf import FPDF
 
 OUTPUT = Path(__file__).parent.parent / "corpus" / "malformed_structure.pdf"
 
+# Fixed creation date — keeps /CreationDate deterministic across regenerations.
+FIXED_DATE = datetime(2026, 1, 1, tzinfo=UTC)
+
 
 def build() -> None:
     # Step 1: build a clean PDF with two pages
     pdf = FPDF()
+    pdf.set_creation_date(FIXED_DATE)
     pdf.set_auto_page_break(auto=True, margin=15)
 
     pdf.add_page()
@@ -79,33 +87,56 @@ def build() -> None:
     # Get the PDF as bytes (before writing to disk)
     raw: bytes = bytes(pdf.output())
 
-    # Step 2: corrupt the content stream of the second page
-    # We look for the second occurrence of "stream\r\n" or "stream\n" - this is the
-    # content stream for page 2. We corrupt a few bytes inside it.
-    # This makes the stream parser fail on that object while leaving the xref intact.
+    # Step 2: locate and corrupt the FlateDecode content stream of page 2.
+    # We scan for all "stream\n" markers and verify each by attempting zlib decompress.
+    # The FIRST decompressible stream = page 1 content (keep intact).
+    # The SECOND decompressible stream = page 2 content (corrupt its body).
 
-    marker = b"stream\n"
-    first_idx = raw.find(marker)
-    second_idx = raw.find(marker, first_idx + 1) if first_idx >= 0 else -1
+    stream_marker = b"stream\n"
+    decompressible_found = 0
+    corruption_applied = False
+    idx = 0
 
-    if second_idx >= 0:
-        # Replace 32 bytes at offset +20 inside the stream with garbage
-        corrupt_start = second_idx + len(marker) + 20
-        corrupt_end = corrupt_start + 32
-        if corrupt_end < len(raw):
-            garbage = b"\x00\xff\xfe\xfd\xfc\xfb\xfa\xf9" * 4  # 32 bytes of garbage
-            raw = raw[:corrupt_start] + garbage + raw[corrupt_end:]
-            corruption_applied = True
-        else:
-            corruption_applied = False
-    else:
-        corruption_applied = False
+    while idx < len(raw):
+        pos = raw.find(stream_marker, idx)
+        if pos < 0:
+            break
+        stream_start = pos + len(stream_marker)
+        stream_end = raw.find(b"endstream", stream_start)
+        if stream_end < 0:
+            idx = pos + 1
+            continue
+
+        content = raw[stream_start:stream_end]
+        try:
+            zlib.decompress(content)
+            decompressible_found += 1
+        except Exception:
+            idx = pos + 1
+            continue
+
+        if decompressible_found == 2:
+            # This is page 2's content stream — inject garbage mid-body.
+            # We place garbage at offset +8 inside the compressed data to break the
+            # zlib header/body so the decompressor itself raises an error.
+            corrupt_offset = stream_start + 8
+            corrupt_end = corrupt_offset + 32
+            if corrupt_end <= stream_end:
+                garbage = b"\x00\xff\xfe\xfd\xfc\xfb\xfa\xf9" * 4  # 32 bytes
+                raw = raw[:corrupt_offset] + garbage + raw[corrupt_end:]
+                corruption_applied = True
+            break
+
+        idx = pos + 1
 
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     OUTPUT.write_bytes(raw)
 
     if corruption_applied:
-        print(f"Written: {OUTPUT}  (stream corruption applied at byte offset ~{second_idx})")
+        print(
+            f"Written: {OUTPUT}  "
+            "(FlateDecode content stream corruption applied to page 2 body)"
+        )
     else:
         print(
             f"Written: {OUTPUT}  "

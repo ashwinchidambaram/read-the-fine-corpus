@@ -5,17 +5,69 @@ Walkthrough Case 3 — all three triage paths.
 Run: uv run python tests/fixtures/golden/generators/gen_spreadsheets.py
 """
 
+import io
+import re
+import zipfile
+from datetime import UTC, datetime
 from pathlib import Path
 
 import openpyxl
+from openpyxl.chart import BarChart, Reference
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 CORPUS = Path(__file__).parent.parent / "corpus"
 
+# Fixed timestamps — openpyxl embeds dcterms:created/modified and zip entry mtimes;
+# both are pinned here to ensure byte-identical output across regenerations.
+FIXED_DT = datetime(2026, 1, 1, tzinfo=UTC)
+FIXED_DT_STR = "2026-01-01T00:00:00Z"
+FIXED_ZIP_DATE = (2026, 1, 1, 0, 0, 0)
+
+
+def _save_deterministic(wb: openpyxl.Workbook, dest: "Path | io.RawIOBase") -> None:
+    """
+    Save *wb* to *dest* (a Path or writable binary stream) with all timestamps
+    pinned so the output bytes are identical on every run.
+
+    openpyxl resets ``properties.modified`` to now() inside ``save()``, so we
+    patch the XML directly after the initial serialise step.  Zip entry mtimes
+    are also fixed, and entries are sorted to avoid ordering non-determinism.
+    """
+    wb.properties.created = FIXED_DT
+    wb.properties.modified = FIXED_DT  # overwritten by openpyxl; patched below
+
+    raw_buf = io.BytesIO()
+    wb.save(raw_buf)
+    raw_buf.seek(0)
+
+    out_buf = io.BytesIO()
+    with zipfile.ZipFile(raw_buf) as zin, \
+         zipfile.ZipFile(out_buf, "w", zipfile.ZIP_STORED) as zout:
+        for item in sorted(zin.infolist(), key=lambda x: x.filename):
+            data = zin.read(item.filename)
+            if item.filename == "docProps/core.xml":
+                # Replace both dcterms:created and dcterms:modified values.
+                text = data.decode("utf-8")
+                text = re.sub(
+                    r"(<dcterms:(?:created|modified)[^>]*>)[^<]*(</dcterms:(?:created|modified)>)",
+                    rf"\g<1>{FIXED_DT_STR}\2",
+                    text,
+                )
+                data = text.encode("utf-8")
+            new_info = zipfile.ZipInfo(item.filename, date_time=FIXED_ZIP_DATE)
+            new_info.compress_type = zipfile.ZIP_STORED
+            zout.writestr(new_info, data)
+
+    val = out_buf.getvalue()
+    if isinstance(dest, Path):
+        dest.write_bytes(val)
+    else:
+        dest.write(val)
+
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Report spreadsheet: formatted sheets, commentary, summary tables
+# Report spreadsheet: formatted sheets, commentary, summary tables, BarChart
 # ──────────────────────────────────────────────────────────────────────────────
 
 def build_report() -> None:
@@ -61,7 +113,7 @@ def build_report() -> None:
                 cell.font = Font(bold=True)
                 cell.fill = header_fill
 
-    # Sheet 2: Revenue Analysis
+    # Sheet 2: Revenue Analysis with BarChart
     ws2 = wb.create_sheet("Revenue Analysis")
     ws2["A1"] = "Revenue Analysis — Q4 2025"
     ws2["A1"].font = Font(bold=True, size=13)
@@ -105,6 +157,48 @@ def build_report() -> None:
     ws2.row_dimensions[12].height = 48
     ws2.column_dimensions["A"].width = 80
 
+    # BarChart — Q4 Total revenue by product line (rows 7-9, col E = Q4 Total)
+    # Data: Widget=6340, Gadget=3600, Service=2460 (numeric equivalents for chart)
+    # Write numeric values alongside the text table for the chart reference.
+    chart_data_start_row = 15
+    ws2["A14"] = "Chart Data (numeric $000)"
+    ws2["A14"].font = Font(bold=True, italic=True)
+    chart_rows = [
+        ("Product Line", "Q4 Total ($000)"),
+        ("Widget", 6340),
+        ("Gadget", 3600),
+        ("Service", 2460),
+    ]
+    for r_idx, (label, val) in enumerate(chart_rows, start=chart_data_start_row):
+        ws2.cell(row=r_idx, column=1, value=label)
+        ws2.cell(row=r_idx, column=2, value=val)
+
+    chart = BarChart()
+    chart.type = "col"
+    chart.grouping = "clustered"
+    chart.title = "Q4 2025 Revenue by Product Line ($000)"
+    chart.y_axis.title = "Revenue ($000)"
+    chart.x_axis.title = "Product Line"
+    chart.style = 10
+    chart.width = 15
+    chart.height = 10
+
+    data_ref = Reference(
+        ws2,
+        min_col=2,
+        min_row=chart_data_start_row,
+        max_row=chart_data_start_row + len(chart_rows) - 1,
+    )
+    cats_ref = Reference(
+        ws2,
+        min_col=1,
+        min_row=chart_data_start_row + 1,
+        max_row=chart_data_start_row + len(chart_rows) - 1,
+    )
+    chart.add_data(data_ref, titles_from_data=True)
+    chart.set_categories(cats_ref)
+    ws2.add_chart(chart, "D14")
+
     # Sheet 3: Commentary
     ws3 = wb.create_sheet("Commentary")
     ws3["A1"] = "Analyst Commentary — Q4 2025"
@@ -139,7 +233,7 @@ def build_report() -> None:
 
     out = CORPUS / "report_spreadsheet.xlsx"
     out.parent.mkdir(parents=True, exist_ok=True)
-    wb.save(str(out))
+    _save_deterministic(wb, out)
     print(f"Written: {out}")
 
 
@@ -196,7 +290,7 @@ def build_database() -> None:
 
     out = CORPUS / "database_spreadsheet.xlsx"
     out.parent.mkdir(parents=True, exist_ok=True)
-    wb.save(str(out))
+    _save_deterministic(wb, out)
     print(f"Written: {out}")
 
 
@@ -267,7 +361,7 @@ def build_model() -> None:
 
     out = CORPUS / "model_spreadsheet.xlsx"
     out.parent.mkdir(parents=True, exist_ok=True)
-    wb.save(str(out))
+    _save_deterministic(wb, out)
     print(f"Written: {out}")
 
 
