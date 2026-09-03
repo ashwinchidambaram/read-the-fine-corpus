@@ -1,0 +1,524 @@
+schema_version: 1.0.0
+fixtures:
+- file: corpus/clean_native.pdf
+  role: §18.1 — clean native-text PDF
+  generator: generators/gen_clean_pdf.py
+  content_summary: 'Single-page-range native PDF. Headings (h1, h2, h3), intro prose,
+    bulleted list, specifications table (5 components, 5 columns), revision history
+    table. All content is machine-readable native text — no OCR required.
+
+    '
+  expected_segment_types:
+  - prose
+  - heading
+  - table
+  - list
+  - revision_history
+  - front_matter
+  expected_tiers:
+  - primary
+  - supporting
+  expected_triage_class: native_pdf
+  expected_findings: []
+  flags: []
+  sha256: ea690f4e3885d05c2a7a374af60b85dc41e6a566d7dfcf133716a1a4bc0132bc
+- file: corpus/scanned_poor.pdf
+  role: §18.1 — poorly scanned PDF with known-degraded regions
+  generator: generators/gen_scanned_pdf.py
+  content_summary: '12-page fully rasterized PDF (JPEG pages). Page 3 is heavily degraded
+    (simulated OCR confidence ~0.42 — garbled text). Pages 1-2, 4-12 have mild noise/blur
+    (simulated OCR confidence 0.88-0.94). Walkthrough Case 2''s OCR profile. Fixed
+    random seed (42) — deterministic noise pattern.
+
+    '
+  expected_segment_types:
+  - scanned_region
+  expected_tiers:
+  - supporting
+  - excluded
+  expected_triage_class: scanned_pdf
+  expected_findings:
+  - code: low_ocr_confidence
+    severity: warning
+    location: page 3
+  flags:
+  - low_ocr_confidence_page_3
+  sha256: e96b7b344823fbf32f4227c136202f8a7fee016481b8ff7ab98b4041e9128e40
+- file: corpus/bloated_manual.pdf
+  role: §18.1 — bloated manual with cross-references, boilerplate, mixed content types
+  generator: generators/gen_bloated_manual.py
+  content_summary: 'Multi-page operating manual. Contains: legal preamble (pages 1-2,
+    verbatim text also in boilerplate_a.pdf and boilerplate_b.pdf — triggers corpus
+    boilerplate detection), revision history (page 3), prose procedures with "See
+    section 4.2" cross-reference (page 4), specifications table + torque table (page
+    5), maintenance prose (page 6), rasterized scanned appendix (final page). Primary
+    integration test for the full segment-type taxonomy. Walkthrough Case 1.
+
+    '
+  expected_segment_types:
+  - boilerplate
+  - revision_history
+  - prose
+  - cross_reference
+  - table
+  - scanned_region
+  - heading
+  - front_matter
+  expected_tiers:
+  - primary
+  - supporting
+  - boilerplate
+  expected_triage_class: mixed_pdf
+  expected_findings:
+  - code: boilerplate_detected
+    severity: info
+    location: pages 1-2
+  - code: mixed_pdf
+    severity: info
+  - code: table_structure_retained
+    severity: info
+  flags:
+  - boilerplate_legal_preamble
+  - cross_reference_see_section_4_2
+  - scanned_appendix
+  sha256: 0e5bf493ead42e1e513d34e27a94bc8873a75260fa8f766f9abf390a6c340e1d
+- file: corpus/boilerplate_a.pdf
+  role: §18.1 auxiliary — corpus boilerplate detection support (shares preamble with
+    bloated_manual.pdf)
+  generator: generators/gen_boilerplate_docs.py
+  content_summary: 'ACME Safety Procedures v2. Contains identical legal preamble to
+    bloated_manual.pdf and boilerplate_b.pdf. Three documents sharing this preamble
+    text triggers corpus-level boilerplate detection (>30% of relevant corpus documents).
+
+    '
+  expected_segment_types:
+  - boilerplate
+  - prose
+  - heading
+  expected_tiers:
+  - boilerplate
+  - primary
+  - supporting
+  expected_triage_class: native_pdf
+  expected_findings:
+  - code: boilerplate_detected
+    severity: info
+  flags:
+  - boilerplate_legal_preamble
+  sha256: f7f481362e42ca9268687816f008bbeb557eedf6b43591a72b48be2122019715
+- file: corpus/boilerplate_b.pdf
+  role: §18.1 auxiliary — corpus boilerplate detection support (shares preamble with
+    bloated_manual.pdf)
+  generator: generators/gen_boilerplate_docs.py
+  content_summary: 'ACME Quality Management Handbook v1. Contains identical legal
+    preamble to bloated_manual.pdf and boilerplate_a.pdf. Third document sharing preamble,
+    crossing the boilerplate detection threshold.
+
+    '
+  expected_segment_types:
+  - boilerplate
+  - prose
+  - heading
+  expected_tiers:
+  - boilerplate
+  - primary
+  - supporting
+  expected_triage_class: native_pdf
+  expected_findings:
+  - code: boilerplate_detected
+    severity: info
+  flags:
+  - boilerplate_legal_preamble
+  sha256: 4c8e8331f0bcb6e9f117cd64968034426c38efc8549c2fea98bf879b2dab3a90
+- file: corpus/nested_tables.html
+  role: §18.1 — document with complex and nested tables
+  generator: generators/gen_nested_tables.py
+  content_summary: 'HTML document with three tables: (1) 2-row merged header spanning
+    columns, (2) inner table nested inside a cell of an outer table (3 rows, each
+    cell containing its own inner table), (3) table with both rowspan and colspan.
+    Tests OQ-9 (nested table segment representation). Each logical table should produce
+    one table segment with separate structural paths.
+
+    '
+  expected_segment_types:
+  - table
+  - prose
+  - heading
+  expected_tiers:
+  - primary
+  - supporting
+  expected_triage_class: html
+  expected_findings: []
+  flags:
+  - nested_inner_table
+  - merged_headers_colspan
+  - merged_headers_rowspan
+  sha256: 8fc2d0c93ab656e0740312b6f799e17fe11aa9e0bc32c10cd76faa998ff143ff
+- file: corpus/report_spreadsheet.xlsx
+  role: '§18.1 — spreadsheet: report kind'
+  generator: generators/gen_spreadsheets.py
+  content_summary: 'Q4 2025 revenue report. Three sheets: Executive Summary (metadata
+    + key metrics table), Revenue Analysis (narrative prose + revenue table), Commentary
+    (outlook prose + risk list). Contains narrative text, formatted tables, and chart-adjacent
+    commentary. Must be triaged as Report kind and ingested as a document. Walkthrough
+    Case 3.
+
+    '
+  expected_segment_types:
+  - front_matter
+  - prose
+  - table
+  - figure_caption
+  expected_tiers:
+  - primary
+  - supporting
+  expected_triage_class: spreadsheet_report
+  expected_findings:
+  - code: spreadsheet_triage
+    kind: report
+    disposition: ingest
+  flags: []
+  sha256: 5b5aee4038ae669d4b4f7834073ac6558673ec3501a041d49f4ae753e44a1a36
+- file: corpus/database_spreadsheet.xlsx
+  role: '§18.1 — spreadsheet: database kind'
+  generator: generators/gen_spreadsheets.py
+  content_summary: 'Customer database with 501 uniform rows (customer_id, company_name,
+    contact, country, segment, revenue, etc). Row-per-record structure — no narrative
+    content. Must be triaged as Database kind and excluded with no chunks produced.
+    Walkthrough Case 3 — database path.
+
+    '
+  expected_segment_types: []
+  expected_tiers:
+  - excluded
+  expected_triage_class: spreadsheet_database
+  expected_findings:
+  - code: spreadsheet_triage
+    kind: database
+    disposition: exclude_unservable
+  flags:
+  - document_level_exclusion
+  - zero_chunks_expected
+  sha256: 8d9c80a50293184ae2736d4d8c44cd7d70150103f823e7f110bd99b5b6c67338
+- file: corpus/model_spreadsheet.xlsx
+  role: '§18.1 — spreadsheet: model kind'
+  generator: generators/gen_spreadsheets.py
+  content_summary: 'Loan amortization model. Input parameters (principal, rate, term),
+    monthly payment formula, 120-row amortization schedule with formula-driven cells
+    (principal, interest, balance all derived). Summary row with SUM formulas. Must
+    be triaged as Model kind and excluded with no chunks produced. Walkthrough Case
+    3 — model path.
+
+    '
+  expected_segment_types: []
+  expected_tiers:
+  - excluded
+  expected_triage_class: spreadsheet_model
+  expected_findings:
+  - code: spreadsheet_triage
+    kind: model
+    disposition: exclude_unservable
+  flags:
+  - document_level_exclusion
+  - zero_chunks_expected
+  - formula_dense
+  sha256: a49b569fc9b0d38187c1d2d982ed657411a72be70778ed3c64e51b8f258918ee
+- file: corpus/confluence_export.html
+  role: §18.1 — Confluence-style HTML export
+  generator: generators/gen_confluence_html.py
+  content_summary: 'Two-page Confluence wiki export (Deployment Runbook + Architecture
+    Overview). Nav chrome (sidebar + breadcrumb) repeats verbatim across both pages
+    — triggers boilerplate detection. Internal wiki links (cross_reference). Code
+    blocks in bash, Python, yaml. Macro-style deployment status table. Page metadata
+    blocks.
+
+    '
+  expected_segment_types:
+  - boilerplate
+  - prose
+  - heading
+  - code
+  - table
+  - cross_reference
+  - front_matter
+  expected_tiers:
+  - boilerplate
+  - primary
+  - supporting
+  expected_triage_class: html
+  expected_findings:
+  - code: boilerplate_detected
+    severity: info
+    location: navigation chrome
+  flags:
+  - boilerplate_nav_chrome
+  - internal_wiki_links
+  - code_blocks_bash_python_yaml
+  sha256: 5077f036888ee401d5ab15540106d440622a298e0c24baa7b77ecf572a5ec0ff
+- file: corpus/policy_v1.pdf
+  role: '§18.1 — near-duplicate family: policy version 1 (oldest, superseded)'
+  generator: generators/gen_near_duplicates.py
+  content_summary: 'ACME Leave Policy Rev. 1, effective 2024-01-10. Shared common
+    body (annual leave, sick leave, parental leave) with v2 and v3. V1-specific sections:
+    initial version note, public holidays only. Near-duplicate similarity to v2: ~0.87.
+    Default behaviour: superseded, produces no segments (D-25 ruling). Walkthrough
+    Case 5.
+
+    '
+  expected_segment_types: []
+  expected_tiers:
+  - excluded
+  expected_triage_class: native_pdf
+  expected_findings:
+  - code: dedup_superseded
+    severity: info
+  flags:
+  - near_duplicate
+  - dedup_role_superseded
+  - default_no_segments
+  sha256: ff201e5a03671c66128d0ad12c5a3570bbeaa307183d9552c91f4af454dc9702
+- file: corpus/policy_v2.pdf
+  role: '§18.1 — near-duplicate family: policy version 2 (intermediate, superseded)'
+  generator: generators/gen_near_duplicates.py
+  content_summary: 'ACME Leave Policy Rev. 2, effective 2025-03-15. Adds bereavement
+    leave section. Shared common body with v1 and v3. Near-duplicate similarity to
+    v3: ~0.94. Default behaviour: superseded, produces no segments (D-25 ruling).
+    Walkthrough Case 5.
+
+    '
+  expected_segment_types: []
+  expected_tiers:
+  - excluded
+  expected_triage_class: native_pdf
+  expected_findings:
+  - code: dedup_superseded
+    severity: info
+  flags:
+  - near_duplicate
+  - dedup_role_superseded
+  - default_no_segments
+  sha256: 92f753553981d9354883453d53a40981abc2325bb7f69acfc2ca7b98462a073b
+- file: corpus/policy_v3.pdf
+  role: '§18.1 — near-duplicate family: policy version 3 (newest, primary)'
+  generator: generators/gen_near_duplicates.py
+  content_summary: 'ACME Leave Policy Rev. 3, effective 2026-07-01 (newest by source_modified_at).
+    Adds mental health leave, extended bereavement leave. This is the primary version
+    — produces full segments and chunks at primary/supporting tiers. Walkthrough Case
+    5.
+
+    '
+  expected_segment_types:
+  - prose
+  - heading
+  - front_matter
+  expected_tiers:
+  - primary
+  - supporting
+  expected_triage_class: native_pdf
+  expected_findings: []
+  flags:
+  - near_duplicate
+  - dedup_role_primary
+  sha256: 3bd87bbc6a607167ba3db9c8ce6380b274b06a637ae6cf82dc0df27e718915fd
+- file: corpus/password_protected.pdf
+  role: '§18.1 — unservable: password-protected PDF'
+  generator: generators/gen_unservable.py
+  content_summary: 'Minimal PDF with /Encrypt dictionary (Standard /V 2 /R 3 encryption
+    markers). Contains encryption markers that make conforming readers treat it as
+    password-protected. Must produce an exclusion record with reason encrypted/password_protected.
+    No text extraction possible without password.
+
+    '
+  expected_segment_types: []
+  expected_tiers:
+  - excluded
+  expected_triage_class: encrypted_pdf
+  expected_findings:
+  - code: unservable_encrypted
+    severity: error
+  flags:
+  - document_level_exclusion
+  - unservable_encrypted
+  sha256: 21e88b2f4ca8cd5cc3e8c2a09334697957948cee002670a8dc63fcdc811b66c0
+- file: corpus/audio_stub.wav
+  role: '§18.1 — unservable: audio file'
+  generator: generators/gen_unservable.py
+  content_summary: 'Valid RIFF/WAVE file, 44100 Hz, 16-bit mono, 1 second of silence
+    (PCM zeros). 88244 bytes. Correct magic bytes (RIFF...WAVE). Must produce an exclusion
+    record with reason audio/unservable. No text extraction possible.
+
+    '
+  expected_segment_types: []
+  expected_tiers:
+  - excluded
+  expected_triage_class: audio
+  expected_findings:
+  - code: unservable_audio
+    severity: error
+  flags:
+  - document_level_exclusion
+  - unservable_audio
+  sha256: 3fa20276d8a4131431490ed129d0b05fafa4e9c82d4339b5cf635512103d6615
+- file: corpus/video_stub.mp4
+  role: '§18.1 — unservable: video file'
+  generator: generators/gen_unservable.py
+  content_summary: 'Minimal ISO Base Media file (MP4). Contains ftyp box (major brand:
+    isom), minimal moov/mvhd box, and empty mdat box. 152 bytes. Correct ftyp magic
+    bytes. Must produce an exclusion record with reason video/unservable.
+
+    '
+  expected_segment_types: []
+  expected_tiers:
+  - excluded
+  expected_triage_class: video
+  expected_findings:
+  - code: unservable_video
+    severity: error
+  flags:
+  - document_level_exclusion
+  - unservable_video
+  sha256: 9a4b8abae4dae7f59f4872ab80f61f774f5c3ad01c957819baf4ebcd964a2edf
+- file: corpus/image_only.pdf
+  role: '§18.1 — unservable: image-only PDF (no text layer)'
+  generator: generators/gen_unservable.py
+  content_summary: 'Single-page PDF whose only content is a rasterized JPEG image
+    showing a synthetic diagram/schematic. No text layer, no native text objects.
+    OCR cannot recover machine-readable text without a vision model. Must produce
+    an exclusion record (or scanned_region with no recoverable text) flagged as unservable.
+
+    '
+  expected_segment_types:
+  - scanned_region
+  expected_tiers:
+  - excluded
+  expected_triage_class: image_only_pdf
+  expected_findings:
+  - code: unservable_image_only
+    severity: warning
+  flags:
+  - document_level_exclusion
+  - no_text_layer
+  sha256: 6a539a31d1b43add761ef3be8f4a7d4327b95e9934cc27be1fbccf99be8c62fa
+- file: corpus/cad_binary.dwg
+  role: '§18.1 — unservable: CAD/binary file with plausible magic bytes'
+  generator: generators/gen_unservable.py
+  content_summary: 'File with .dwg extension and AC1015 magic bytes (AutoCAD 2000
+    format sentinel) followed by 2048 bytes of deterministic binary content. Not a
+    real DWG file but has correct magic bytes for format detection. Must produce an
+    exclusion record with reason cad/unservable.
+
+    '
+  expected_segment_types: []
+  expected_tiers:
+  - excluded
+  expected_triage_class: cad_binary
+  expected_findings:
+  - code: unservable_cad
+    severity: error
+  flags:
+  - document_level_exclusion
+  - unservable_cad
+  sha256: 755644163743d2d6c6d3fe91da0b272bebd86b8a377de1166382fc0e92ef20d8
+- file: corpus/adversarial.pdf
+  role: §18.1 + §14.1 — adversarial PDF with injection-shaped text and invisible content
+  generator: generators/gen_adversarial_pdf.py
+  content_summary: '7-page document styled as an employee handbook. Contains six §14.1
+    injection vectors: (1) visible prose injection "Ignore previous instructions..."
+    (page 2, injection_suspicion >= 0.9); (2) fake SYSTEM: message block (page 3,
+    injection_suspicion >= 0.9); (3) exfiltration instruction referencing evil.example
+    (page 4); (4) white-on-white hidden text on page 5 (invisible_content_flags: white_on_white);
+    (5) near-zero-size font run on page 6 (invisible_content_flags: zero_size_font);
+    (6) off-page text at y=1mm on page 7 (invisible_content_flags: off_page). All
+    injection text RETAINED not stripped (§14.1 labelled-not-sanitized). Non-negotiable
+    test 9 fixture.
+
+    '
+  expected_segment_types:
+  - prose
+  - heading
+  - front_matter
+  expected_tiers:
+  - primary
+  - supporting
+  expected_triage_class: native_pdf
+  expected_findings:
+  - code: invisible_content_detected
+    severity: warning
+    location: page 5
+    kind: white_on_white
+  - code: invisible_content_detected
+    severity: warning
+    location: page 6
+    kind: zero_size_font
+  - code: invisible_content_detected
+    severity: warning
+    location: page 7
+    kind: off_page
+  - code: injection_suspicion_high
+    severity: warning
+    location: page 2
+  - code: injection_suspicion_high
+    severity: warning
+    location: page 3
+  - code: injection_suspicion_high
+    severity: warning
+    location: page 4
+  flags:
+  - injection_visible_text_page_2
+  - injection_system_message_page_3
+  - injection_exfiltration_page_4
+  - invisible_white_on_white_page_5
+  - invisible_zero_size_font_page_6
+  - invisible_off_page_page_7
+  - all_text_retained_not_stripped
+  sha256: 97049fe8cced61e81520880ea8814a4bb012f753b56c9b908ccdfe47119951b2
+- file: corpus/form_filled.pdf
+  role: §18.1 Finding F-1 — filled form PDF with label/value pairs (form_field coverage)
+  generator: generators/gen_form_pdf.py
+  content_summary: 'ACME Corp Leave Request Form (HR-F-001 Rev. 2). Filled out with
+    deterministic values for Alex Johnson (EMP-00417). Three sections: Employee Information
+    (5 fields), Leave Details (6 fields), Authorisation (4 fields). Label-value pairs
+    for each field. Covers the form_field segment type identified as missing in §5.3
+    Finding F-1.
+
+    '
+  expected_segment_types:
+  - form_field
+  - front_matter
+  - prose
+  expected_tiers:
+  - primary
+  - supporting
+  expected_triage_class: native_pdf
+  expected_findings: []
+  flags:
+  - form_filled
+  - label_value_pairs
+  sha256: 591bab75ded72ac0e920160be376b99d0883ca33a64efe5b047e18f7b310dbc3
+- file: corpus/malformed_structure.pdf
+  role: §18.1 Finding F-2 — PDF with deliberately corrupted object stream (unknown
+    segment type coverage)
+  generator: generators/gen_malformed_pdf.py
+  content_summary: '2-page PDF (incident report). Page 1 (Incident Report content)
+    is valid and should parse normally. Page 2''s content stream has 32 bytes of garbage
+    inserted at offset ~20 inside the stream body, making the stream parser fail on
+    that object while the cross-reference table remains intact. The document partially
+    parses. Tests the unknown segment type and parser robustness (§5.3 Finding F-2).
+
+    '
+  expected_segment_types:
+  - prose
+  - heading
+  - unknown
+  expected_tiers:
+  - primary
+  - supporting
+  expected_triage_class: native_pdf
+  expected_findings:
+  - code: parse_error
+    severity: warning
+    location: page 2
+  flags:
+  - partial_parse
+  - corrupted_stream_page_2
+  sha256: 308a8b38e106adbcb9c60deca23377e52b3efa3f821e90d5d7b21813552454c2

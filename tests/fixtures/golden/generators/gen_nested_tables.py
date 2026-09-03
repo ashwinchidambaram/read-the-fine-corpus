@@ -1,0 +1,252 @@
+"""
+Generator: nested_tables.html
+§18.1 role: complex/nested tables document — inner table inside a cell, merged headers.
+HTML format (simpler than PDF for true nested table representation).
+Run: uv run python tests/fixtures/golden/generators/gen_nested_tables.py
+"""
+
+from pathlib import Path
+
+OUTPUT = Path(__file__).parent.parent / "corpus" / "nested_tables.html"
+
+HTML = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>ACME Component Matrix — Complex Nested Tables</title>
+<style>
+  body { font-family: Helvetica, Arial, sans-serif; font-size: 13px; margin: 40px; }
+  h1 { font-size: 18px; }
+  h2 { font-size: 15px; margin-top: 24px; }
+  table { border-collapse: collapse; margin-bottom: 16px; }
+  th, td { border: 1px solid #555; padding: 6px 10px; vertical-align: top; }
+  th { background: #ddd; text-align: left; }
+  caption { font-weight: bold; text-align: left; margin-bottom: 4px; }
+</style>
+</head>
+<body>
+
+<h1>ACME Component Matrix — Complex Nested Tables</h1>
+
+<p>This document contains tables with merged headers and nested inner tables,
+for testing complex table decomposition in the RTFC pipeline.</p>
+
+<h2>1. Component Specification Matrix (merged column headers)</h2>
+
+<p>Table 1 uses a two-row header where the top row spans multiple columns.</p>
+
+<table>
+  <caption>Table 1: Component Specifications by Category</caption>
+  <thead>
+    <tr>
+      <th rowspan="2">Component</th>
+      <th rowspan="2">Part No.</th>
+      <th colspan="3">Mechanical Properties</th>
+      <th colspan="2">Electrical Properties</th>
+      <th rowspan="2">Notes</th>
+    </tr>
+    <tr>
+      <th>Tolerance (mm)</th>
+      <th>Weight (g)</th>
+      <th>Rating (kN)</th>
+      <th>Voltage (V)</th>
+      <th>Current (A)</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Bearing A</td>
+      <td>PN-2041</td>
+      <td>&plusmn;0.05</td>
+      <td>142</td>
+      <td>5</td>
+      <td>N/A</td>
+      <td>N/A</td>
+      <td>Deep groove ball</td>
+    </tr>
+    <tr>
+      <td>Bearing B</td>
+      <td>PN-2042</td>
+      <td>&plusmn;0.05</td>
+      <td>198</td>
+      <td>8</td>
+      <td>N/A</td>
+      <td>N/A</td>
+      <td>Cylindrical roller</td>
+    </tr>
+    <tr>
+      <td>Motor Ctrl</td>
+      <td>PN-5001</td>
+      <td>N/A</td>
+      <td>310</td>
+      <td>N/A</td>
+      <td>24</td>
+      <td>5.0</td>
+      <td>Brushless DC driver</td>
+    </tr>
+    <tr>
+      <td>Shaft Seal</td>
+      <td>PN-3011</td>
+      <td>&plusmn;0.02</td>
+      <td>28</td>
+      <td>N/A</td>
+      <td>N/A</td>
+      <td>N/A</td>
+      <td>IP65 rated</td>
+    </tr>
+    <tr>
+      <td>Drive Gear</td>
+      <td>PN-4017</td>
+      <td>&plusmn;0.10</td>
+      <td>520</td>
+      <td>N/A</td>
+      <td>N/A</td>
+      <td>N/A</td>
+      <td>Module 2.5, 40 teeth</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>2. Regional Supplier Matrix (nested inner table in a cell)</h2>
+
+<p>Table 2 contains a nested table inside a cell, mapping suppliers to their
+approved components and certifications.</p>
+
+<table>
+  <caption>Table 2: Approved Suppliers by Region (with component sub-list)</caption>
+  <thead>
+    <tr>
+      <th>Region</th>
+      <th>Supplier Name</th>
+      <th>Approved Components</th>
+      <th>Certifications</th>
+      <th>Lead Time (days)</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>North America</td>
+      <td>Acme Supply Co.</td>
+      <td>
+        <!-- Inner table inside a cell — the key nested table structure -->
+        <table>
+          <thead>
+            <tr><th>Part No.</th><th>Qty Limit</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>PN-2041</td><td>500/mo</td></tr>
+            <tr><td>PN-2042</td><td>300/mo</td></tr>
+            <tr><td>PN-3011</td><td>1000/mo</td></tr>
+          </tbody>
+        </table>
+      </td>
+      <td>ISO 9001, AS9100</td>
+      <td>14</td>
+    </tr>
+    <tr>
+      <td>Europe</td>
+      <td>EuroTech GmbH</td>
+      <td>
+        <table>
+          <thead>
+            <tr><th>Part No.</th><th>Qty Limit</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>PN-4017</td><td>200/mo</td></tr>
+            <tr><td>PN-5001</td><td>150/mo</td></tr>
+          </tbody>
+        </table>
+      </td>
+      <td>ISO 9001, CE, RoHS</td>
+      <td>21</td>
+    </tr>
+    <tr>
+      <td>Asia-Pacific</td>
+      <td>APac Components Ltd.</td>
+      <td>
+        <table>
+          <thead>
+            <tr><th>Part No.</th><th>Qty Limit</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>PN-2041</td><td>800/mo</td></tr>
+            <tr><td>PN-2042</td><td>600/mo</td></tr>
+            <tr><td>PN-4017</td><td>400/mo</td></tr>
+            <tr><td>PN-5001</td><td>250/mo</td></tr>
+          </tbody>
+        </table>
+      </td>
+      <td>ISO 9001, JIS</td>
+      <td>28</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>3. Test Coverage Matrix (both rowspan and colspan)</h2>
+
+<table>
+  <caption>Table 3: Test Coverage by Stage and Document Type</caption>
+  <thead>
+    <tr>
+      <th rowspan="2">Document Type</th>
+      <th colspan="3">Stage Coverage</th>
+      <th rowspan="2">Overall</th>
+    </tr>
+    <tr>
+      <th>Assess</th>
+      <th>Decompose</th>
+      <th>Build</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Native PDF</td>
+      <td>Full</td>
+      <td>Full</td>
+      <td>Full</td>
+      <td>Pass</td>
+    </tr>
+    <tr>
+      <td>Scanned PDF</td>
+      <td>Full</td>
+      <td>Partial</td>
+      <td>Partial</td>
+      <td>Warning</td>
+    </tr>
+    <tr>
+      <td>Spreadsheet (Report)</td>
+      <td>Full</td>
+      <td>Full</td>
+      <td>Full</td>
+      <td>Pass</td>
+    </tr>
+    <tr>
+      <td>Spreadsheet (Database)</td>
+      <td>Full</td>
+      <td colspan="2" style="text-align:center">Excluded (document level)</td>
+      <td>Excluded</td>
+    </tr>
+    <tr>
+      <td>HTML Export</td>
+      <td>Full</td>
+      <td>Full</td>
+      <td>Full</td>
+      <td>Pass</td>
+    </tr>
+  </tbody>
+</table>
+
+</body>
+</html>
+"""
+
+
+def build() -> None:
+    OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+    OUTPUT.write_text(HTML, encoding="utf-8")
+    print(f"Written: {OUTPUT}")
+
+
+if __name__ == "__main__":
+    build()

@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>ACME Engineering Wiki Export</title>
+<style>
+  body { font-family: -apple-system, Helvetica, Arial, sans-serif; font-size: 13px;
+         margin: 0; padding: 0; display: flex; }
+  .confluence-nav { width: 220px; min-height: 100vh; background: #f4f5f7;
+                     padding: 16px; border-right: 1px solid #ddd; flex-shrink: 0; }
+  .space-nav-links { list-style: none; padding: 0; margin: 8px 0; }
+  .space-nav-links li { margin: 4px 0; }
+  .page-tree ul { list-style: disc; padding-left: 16px; margin: 4px 0; }
+  .page-content { flex: 1; padding: 24px 40px; }
+  .confluence-breadcrumb { font-size: 11px; color: #555; margin-bottom: 16px; padding: 8px 16px;
+                            background: #f8f9fa; border-bottom: 1px solid #eee; width: 100%; }
+  h1 { font-size: 20px; }
+  h2 { font-size: 16px; margin-top: 24px; }
+  h3 { font-size: 14px; margin-top: 16px; }
+  table { border-collapse: collapse; margin: 12px 0; }
+  th, td { border: 1px solid #bbb; padding: 6px 10px; }
+  th { background: #e3e8f0; font-weight: bold; }
+  pre { background: #1e1e1e; color: #d4d4d4; padding: 16px; border-radius: 4px;
+         font-family: 'Courier New', monospace; font-size: 12px; overflow-x: auto; }
+  .page-metadata { font-size: 11px; color: #666; border-top: 1px solid #eee;
+                    margin-top: 32px; padding-top: 8px; }
+  .macro-table { background: #f0f4ff; border: 1px solid #b0bfdf; }
+  .macro-table th { background: #d0dcf0; }
+  .wiki-link { color: #0052cc; text-decoration: none; }
+  .page-separator { border: none; border-top: 2px solid #0052cc; margin: 48px 0; }
+  .last-edit { font-size: 11px; color: #888; }
+</style>
+</head>
+<body>
+
+<!-- ===== PAGE 1: Deployment Runbook ===== -->
+<div style="display:flex; flex-direction:column; width:100%;">
+  <div style="display:flex;">
+    <nav class="confluence-nav" aria-label="Space navigation">
+  <div class="space-nav-header">
+    <span class="space-logo">ACME Engineering Wiki</span>
+  </div>
+  <ul class="space-nav-links">
+    <li><a href="/wiki/spaces/ENG/overview">Space Home</a></li>
+    <li><a href="/wiki/spaces/ENG/pages">All Pages</a></li>
+    <li><a href="/wiki/spaces/ENG/blogposts">Blog</a></li>
+    <li><a href="/wiki/spaces/ENG/calendars">Calendar</a></li>
+  </ul>
+  <div class="page-tree">
+    <span class="tree-header">Engineering</span>
+    <ul>
+      <li><a href="/wiki/spaces/ENG/pages/100001">Architecture</a></li>
+      <li><a href="/wiki/spaces/ENG/pages/100002">API Reference</a></li>
+      <li><a href="/wiki/spaces/ENG/pages/100003">Runbooks</a></li>
+      <li><a href="/wiki/spaces/ENG/pages/100004">Onboarding</a></li>
+    </ul>
+  </div>
+</nav>
+<div class="confluence-breadcrumb">
+  <a href="/wiki">Home</a> &rsaquo;
+  <a href="/wiki/spaces/ENG">Engineering</a> &rsaquo;
+  <a href="/wiki/spaces/ENG/pages/100003">Runbooks</a>
+</div>
+
+    <div class="page-content">
+      <div class="confluence-breadcrumb">
+        <a href="/wiki">Home</a> &rsaquo;
+        <a href="/wiki/spaces/ENG">Engineering</a> &rsaquo;
+        <a href="/wiki/spaces/ENG/pages/100003">Runbooks</a>
+      </div>
+
+      <h1>Deployment Runbook - Widget Service v3</h1>
+      <div class="last-edit">Last edited by <strong>J. Smith</strong> on 2025-09-15
+       &bull; Page ID: 100101</div>
+
+      <h2>Overview</h2>
+      <p>
+        This runbook describes the deployment procedure for the Widget Service v3. It covers
+        pre-deployment checks, deployment steps, and rollback procedures. For the Widget Service
+        architecture, see
+        <a class="wiki-link" href="/wiki/spaces/ENG/pages/100001">Architecture Overview</a>.
+        For API details, see
+        <a class="wiki-link" href="/wiki/spaces/ENG/pages/100002">API Reference</a>.
+      </p>
+
+      <h2>Pre-Deployment Checklist</h2>
+      <p>Complete all items below before initiating a deployment:</p>
+      <ul>
+        <li>CI pipeline passes on the release branch (all stages green).</li>
+        <li>Release candidate Docker image tagged and pushed to registry.</li>
+        <li>Database migrations reviewed and approved by DBA.</li>
+        <li>Feature flags for new features set to <code>disabled</code> in production.</li>
+        <li>On-call engineer notified and available for the deployment window.</li>
+        <li>Rollback procedure reviewed
+            (see <a class="wiki-link" href="#rollback">Rollback section</a>).</li>
+      </ul>
+
+      <h2>Deployment Steps</h2>
+      <h3>Step 1 — Database Migration</h3>
+      <p>Run the migration from the deploy host using the following command:</p>
+      <pre><code class="language-bash">
+# Connect to the deploy host
+ssh deploy@widget-deploy.internal
+
+# Run database migration
+cd /opt/widget-service
+uv run alembic upgrade head
+
+# Verify migration completed
+uv run alembic current
+      </code></pre>
+
+      <h3>Step 2 — Rolling Container Update</h3>
+      <p>
+        Trigger the rolling update via the deployment pipeline. The Kubernetes deployment
+        uses <code>RollingUpdate</code> strategy with <code>maxUnavailable: 0</code> and
+        <code>maxSurge: 1</code> to ensure zero-downtime deployment.
+      </p>
+      <pre><code class="language-bash">
+# Tag the release
+git tag -s v3.2.1 -m "Release v3.2.1 — improved throughput"
+git push origin v3.2.1
+
+# Trigger the deployment pipeline
+gh workflow run deploy.yml -f environment=production -f version=v3.2.1
+
+# Monitor the rollout
+kubectl rollout status deployment/widget-service -n production --timeout=10m
+      </code></pre>
+
+      <h3>Step 3 — Smoke Tests</h3>
+      <p>After deployment, run the smoke test suite to verify basic functionality:</p>
+      <pre><code class="language-python">
+# smoke_test.py — run against production endpoint
+import httpx
+
+BASE_URL = "https://api.widget.acme.example/v3"
+
+def test_health():
+    r = httpx.get(f"{BASE_URL}/health")
+    assert r.status_code == 200
+    assert r.json()["status"] == "ok"
+
+def test_widget_list():
+    r = httpx.get(f"{BASE_URL}/widgets", headers={"Authorization": "Bearer $TOKEN"})
+    assert r.status_code == 200
+    assert "items" in r.json()
+      </code></pre>
+
+      <h2>Deployment Status Tracking</h2>
+      <p>
+        This macro table (rendered by the Confluence Status macro) shows the current
+        deployment status across environments:
+      </p>
+      <!-- Confluence macro-style table -->
+      <table class="macro-table">
+        <thead>
+          <tr>
+            <th>Environment</th>
+            <th>Current Version</th>
+            <th>Target Version</th>
+            <th>Status</th>
+            <th>Last Deployed</th>
+            <th>Owner</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Development</td>
+            <td>v3.2.1</td>
+            <td>v3.2.1</td>
+            <td><span style="color:green">&#x2713; Current</span></td>
+            <td>2025-09-14 14:22 UTC</td>
+            <td>Dev Team</td>
+          </tr>
+          <tr>
+            <td>Staging</td>
+            <td>v3.2.0</td>
+            <td>v3.2.1</td>
+            <td><span style="color:orange">&#x25B2; Pending</span></td>
+            <td>2025-09-10 09:15 UTC</td>
+            <td>QA Team</td>
+          </tr>
+          <tr>
+            <td>Production</td>
+            <td>v3.1.4</td>
+            <td>v3.2.1</td>
+            <td><span style="color:red">&#x25CF; Not deployed</span></td>
+            <td>2025-08-20 18:45 UTC</td>
+            <td>Ops Team</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2 id="rollback">Rollback Procedure</h2>
+      <p>
+        If the deployment fails or post-deployment smoke tests fail, roll back immediately.
+        Do not attempt to fix forward during a production incident.
+      </p>
+      <pre><code class="language-bash">
+# Roll back to the previous deployment
+kubectl rollout undo deployment/widget-service -n production
+
+# Verify rollback completed
+kubectl rollout status deployment/widget-service -n production
+
+# If database migration must be reversed:
+uv run alembic downgrade -1
+      </code></pre>
+
+      <div class="page-metadata">
+        Created: 2025-06-01 &bull; Last modified: 2025-09-15 &bull; J. Smith &bull;
+        <a href="/wiki/spaces/ENG/pages/100101/history">Page history</a> &bull;
+        Labels: runbook, deployment, widget-service
+      </div>
+    </div>
+  </div>
+
+  <hr class="page-separator">
+
+  <!-- ===== PAGE 2: Widget Service Architecture ===== -->
+  <div style="display:flex;">
+    <nav class="confluence-nav" aria-label="Space navigation">
+  <div class="space-nav-header">
+    <span class="space-logo">ACME Engineering Wiki</span>
+  </div>
+  <ul class="space-nav-links">
+    <li><a href="/wiki/spaces/ENG/overview">Space Home</a></li>
+    <li><a href="/wiki/spaces/ENG/pages">All Pages</a></li>
+    <li><a href="/wiki/spaces/ENG/blogposts">Blog</a></li>
+    <li><a href="/wiki/spaces/ENG/calendars">Calendar</a></li>
+  </ul>
+  <div class="page-tree">
+    <span class="tree-header">Engineering</span>
+    <ul>
+      <li><a href="/wiki/spaces/ENG/pages/100001">Architecture</a></li>
+      <li><a href="/wiki/spaces/ENG/pages/100002">API Reference</a></li>
+      <li><a href="/wiki/spaces/ENG/pages/100003">Runbooks</a></li>
+      <li><a href="/wiki/spaces/ENG/pages/100004">Onboarding</a></li>
+    </ul>
+  </div>
+</nav>
+<div class="confluence-breadcrumb">
+  <a href="/wiki">Home</a> &rsaquo;
+  <a href="/wiki/spaces/ENG">Engineering</a> &rsaquo;
+  <a href="/wiki/spaces/ENG/pages/100003">Runbooks</a>
+</div>
+
+    <div class="page-content">
+      <div class="confluence-breadcrumb">
+        <a href="/wiki">Home</a> &rsaquo;
+        <a href="/wiki/spaces/ENG">Engineering</a> &rsaquo;
+        <a href="/wiki/spaces/ENG/pages/100001">Architecture</a>
+      </div>
+
+      <h1>Widget Service Architecture Overview</h1>
+      <div class="last-edit">Last edited by <strong>A. Chen</strong> on 2025-09-01
+       &bull; Page ID: 100001</div>
+
+      <h2>System Components</h2>
+      <p>
+        The Widget Service consists of three main components. For deployment instructions,
+        see <a class="wiki-link" href="/wiki/spaces/ENG/pages/100101">Deployment Runbook</a>.
+        For the API contract, see
+        <a class="wiki-link" href="/wiki/spaces/ENG/pages/100002">API Reference</a>.
+      </p>
+      <ul>
+        <li><strong>API Gateway</strong> - handles authentication, rate limiting, routing.</li>
+        <li><strong>Widget Service</strong> - core business logic; stateless; scalable.</li>
+        <li><strong>Widget Database</strong> — PostgreSQL 16; primary with one read replica.</li>
+      </ul>
+
+      <h2>Data Flow</h2>
+      <p>
+        All client requests enter via the API Gateway over HTTPS (TLS 1.3 required). The
+        gateway validates the JWT token, applies rate limits (100 req/min per token by default),
+        and routes to the Widget Service. The Widget Service never writes directly to the replica;
+        reads are routed to the replica for non-transactional queries.
+      </p>
+
+      <h2>Configuration Reference</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Setting</th>
+            <th>Env Var</th>
+            <th>Default</th>
+            <th>Description</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Database URL</td>
+            <td><code>WIDGET_DB_URL</code></td>
+            <td>(required)</td>
+            <td>PostgreSQL connection string for the primary database.</td>
+          </tr>
+          <tr>
+            <td>Replica URL</td>
+            <td><code>WIDGET_DB_REPLICA_URL</code></td>
+            <td>same as primary</td>
+            <td>Optional read-replica URL. Falls back to primary if not set.</td>
+          </tr>
+          <tr>
+            <td>Rate limit</td>
+            <td><code>WIDGET_RATE_LIMIT</code></td>
+            <td>100</td>
+            <td>Requests per minute per API token.</td>
+          </tr>
+          <tr>
+            <td>Log level</td>
+            <td><code>WIDGET_LOG_LEVEL</code></td>
+            <td>INFO</td>
+            <td>Python logging level: DEBUG, INFO, WARNING, ERROR.</td>
+          </tr>
+          <tr>
+            <td>CORS origins</td>
+            <td><code>WIDGET_CORS_ORIGINS</code></td>
+            <td>*</td>
+            <td>Comma-separated list of allowed origins. Use * to allow all (dev only).</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2>Kubernetes Resource Allocation</h2>
+      <pre><code class="language-yaml">
+# widget-service deployment resource spec
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+
+# Horizontal Pod Autoscaler
+minReplicas: 2
+maxReplicas: 10
+targetCPUUtilizationPercentage: 70
+      </code></pre>
+
+      <div class="page-metadata">
+        Created: 2025-03-10 &bull; Last modified: 2025-09-01 &bull; A. Chen &bull;
+        <a href="/wiki/spaces/ENG/pages/100001/history">Page history</a> &bull;
+        Labels: architecture, widget-service, infrastructure
+      </div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
