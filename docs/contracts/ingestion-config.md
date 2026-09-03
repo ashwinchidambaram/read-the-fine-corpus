@@ -43,7 +43,7 @@ treatment (§6.4). Complete — no field is optional-with-implicit-build-default
 |---|---|---|---|
 | `segment_class` | `enum` (segment type) | yes | The class this rule governs. |
 | `transformation` | `TransformationSettings` | yes | Which tiers are on and their parameters. |
-| `chunking` | `ChunkingStrategy` | yes | Strategy + parameters (§6.4). |
+| `chunking` | `ChunkingConfig` | yes | Strategy + parameters (§6.4). |
 | `embedding_override` | `EmbeddingConfig` | no | Overrides the KB default embedding for this class, if any. |
 | `metadata_schema` | `list[MetadataField]` | yes | The metadata fields chunks of this class carry, beyond mandatory provenance (§6.4). |
 | `retrieval_treatment` | `RetrievalTreatment` | yes | Default salience weighting, filters, rerank eligibility for this class (§6.4). |
@@ -59,7 +59,7 @@ treatment (§6.4). Complete — no field is optional-with-implicit-build-default
 | `tier3_enabled` | `bool` | yes | Full rewriting (default off, §7.2). Per-class opt-in only. |
 | `tier3_settings` | `Tier3Settings` | no | Required when `tier3_enabled`; carries the opt-in acknowledgement and model ref. Absent when off. |
 
-## `ChunkingStrategy`
+## `ChunkingConfig`
 
 | Field | Type | Required | Semantics |
 |---|---|---|---|

@@ -20,7 +20,7 @@ The taxonomy is intentionally small. Types that cannot be given meaningfully dif
 
 ### 2.1 Closed type list
 
-Twelve content types plus one sentinel, for a total of **13 types**.
+Thirteen content types plus one sentinel (`unknown`), for a total of **14 types**.
 
 | Identifier | Definition | Concrete example | Default handling notes |
 |---|---|---|---|
