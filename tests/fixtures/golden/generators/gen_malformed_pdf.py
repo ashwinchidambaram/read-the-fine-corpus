@@ -45,7 +45,8 @@ def build() -> None:
     pdf.set_font("Helvetica", "", 11)
     pdf.set_x(pdf.l_margin)
     pdf.multi_cell(
-        0, 6,
+        0,
+        6,
         "Incident date: 2025-07-14\n"
         "Reported by: J. Martinez\n"
         "Location: Riverside Facility, Bay 4\n"
@@ -61,7 +62,8 @@ def build() -> None:
         "2. Install audible alert on forklift lane approach (completed 2025-07-18).\n"
         "3. Mandatory forklift safety refresher training for all operators (due 2025-08-01).\n"
         "4. Review site traffic management plan (due 2025-08-15).",
-        new_x="LMARGIN", new_y="NEXT",
+        new_x="LMARGIN",
+        new_y="NEXT",
     )
 
     pdf.add_page()
@@ -71,7 +73,8 @@ def build() -> None:
     pdf.set_font("Helvetica", "", 11)
     pdf.set_x(pdf.l_margin)
     pdf.multi_cell(
-        0, 6,
+        0,
+        6,
         "Action review date: 2025-08-20\n"
         "All corrective actions from the initial report have been completed. "
         "The site traffic management plan has been updated and approved by the "
@@ -81,7 +84,8 @@ def build() -> None:
         "- Forklift lanes that cross pedestrian routes should have active audible warnings.\n"
         "- Near-miss reporting culture is working - employee reported promptly.\n\n"
         "Signed off: Site Safety Manager - 2025-08-20",
-        new_x="LMARGIN", new_y="NEXT",
+        new_x="LMARGIN",
+        new_y="NEXT",
     )
 
     # Get the PDF as bytes (before writing to disk)
@@ -133,10 +137,7 @@ def build() -> None:
     OUTPUT.write_bytes(raw)
 
     if corruption_applied:
-        print(
-            f"Written: {OUTPUT}  "
-            "(FlateDecode content stream corruption applied to page 2 body)"
-        )
+        print(f"Written: {OUTPUT}  (FlateDecode content stream corruption applied to page 2 body)")
     else:
         print(
             f"Written: {OUTPUT}  "

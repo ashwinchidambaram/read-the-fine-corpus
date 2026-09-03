@@ -42,8 +42,7 @@ def _save_deterministic(wb: openpyxl.Workbook, dest: "Path | io.RawIOBase") -> N
     raw_buf.seek(0)
 
     out_buf = io.BytesIO()
-    with zipfile.ZipFile(raw_buf) as zin, \
-         zipfile.ZipFile(out_buf, "w", zipfile.ZIP_STORED) as zout:
+    with zipfile.ZipFile(raw_buf) as zin, zipfile.ZipFile(out_buf, "w", zipfile.ZIP_STORED) as zout:
         for item in sorted(zin.infolist(), key=lambda x: x.filename):
             data = zin.read(item.filename)
             if item.filename == "docProps/core.xml":
@@ -69,6 +68,7 @@ def _save_deterministic(wb: openpyxl.Workbook, dest: "Path | io.RawIOBase") -> N
 # ──────────────────────────────────────────────────────────────────────────────
 # Report spreadsheet: formatted sheets, commentary, summary tables, BarChart
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 def build_report() -> None:
     wb = openpyxl.Workbook()
@@ -241,15 +241,25 @@ def build_report() -> None:
 # Database spreadsheet: 500+ uniform rows, row-per-record
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 def build_database() -> None:
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Customers"
 
     headers = [
-        "customer_id", "company_name", "contact_name", "contact_email",
-        "country", "region", "segment", "annual_revenue_usd", "employee_count",
-        "contract_start", "contract_end", "status",
+        "customer_id",
+        "company_name",
+        "contact_name",
+        "contact_email",
+        "country",
+        "region",
+        "segment",
+        "annual_revenue_usd",
+        "employee_count",
+        "contract_start",
+        "contract_end",
+        "status",
     ]
     header_fill = PatternFill("solid", fgColor="DDDDDD")
     for c_idx, h in enumerate(headers, start=1):
@@ -297,6 +307,7 @@ def build_database() -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 # Model spreadsheet: formula-dense amortization model
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 def build_model() -> None:
     wb = openpyxl.Workbook()
@@ -353,11 +364,11 @@ def build_model() -> None:
     ws["A136"] = "Summary"
     ws["A136"].font = Font(bold=True)
     ws["A137"] = "Total Payments ($)"
-    ws["B137"] = f"=SUM(B15:B{14+120})"
+    ws["B137"] = f"=SUM(B15:B{14 + 120})"
     ws["A138"] = "Total Interest ($)"
-    ws["B138"] = f"=SUM(D15:D{14+120})"
+    ws["B138"] = f"=SUM(D15:D{14 + 120})"
     ws["A139"] = "Total Principal ($)"
-    ws["B139"] = f"=SUM(C15:C{14+120})"
+    ws["B139"] = f"=SUM(C15:C{14 + 120})"
 
     out = CORPUS / "model_spreadsheet.xlsx"
     out.parent.mkdir(parents=True, exist_ok=True)

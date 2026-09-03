@@ -149,7 +149,8 @@ def build() -> None:
     pdf.cell(0, 8, "1. Introduction", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(2)
     pdf.set_font("Helvetica", "", 11)
-    mc(pdf,
+    mc(
+        pdf,
         "This manual describes the installation, operation, and maintenance of the ACME Widget "
         "v4 platform. It supersedes all previous editions. For warranty terms, see Section 7.",
     )
@@ -159,7 +160,8 @@ def build() -> None:
     pdf.cell(0, 8, "2. Safety Precautions", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(2)
     pdf.set_font("Helvetica", "", 11)
-    mc(pdf,
+    mc(
+        pdf,
         "Read all instructions before installation. Failure to follow these instructions may "
         "result in personal injury, property damage, or equipment failure. All electrical work "
         "must be performed by a qualified electrician in compliance with applicable codes.",
@@ -173,7 +175,8 @@ def build() -> None:
     pdf.set_font("Helvetica", "B", 11)
     pdf.cell(0, 7, "3.1 Site Preparation", new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("Helvetica", "", 11)
-    mc(pdf,
+    mc(
+        pdf,
         "Ensure the mounting surface is level to within 2 mm per metre and capable of supporting "
         "the unit weight plus a 50% safety factor. Provide adequate ventilation (minimum 100 mm "
         "clearance on all sides). Install a dedicated circuit breaker per local codes.",
@@ -183,7 +186,8 @@ def build() -> None:
     pdf.set_font("Helvetica", "B", 11)
     pdf.cell(0, 7, "3.2 Lubrication Procedure", new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("Helvetica", "", 11)
-    mc(pdf,
+    mc(
+        pdf,
         "Apply grease (NLGI Grade 2, Lithium complex) to all bearing surfaces before assembly. "
         "The bearing surfaces are identified by orange locating marks on the chassis. "
         "See section 4.2 for torque specifications. Torque all fasteners to the values listed "
@@ -204,7 +208,8 @@ def build() -> None:
     pdf.ln(2)
 
     pdf.set_font("Helvetica", "", 11)
-    mc(pdf,
+    mc(
+        pdf,
         "Table 1 lists the key component specifications for the ACME Widget v4. "
         "All tolerances are manufacturing tolerances; refer to Section 4.2 for assembly torques.",
     )
@@ -238,7 +243,8 @@ def build() -> None:
     pdf.cell(0, 7, "4.2 Assembly Torque Specifications", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(2)
     pdf.set_font("Helvetica", "", 11)
-    mc(pdf,
+    mc(
+        pdf,
         "Torque specifications are provided in Newton-metres (Nm). Use a calibrated torque wrench. "
         "Apply Loctite 243 (medium strength) to all steel fasteners unless otherwise noted. "
         "Do not use impact tools for final torque.",
@@ -275,7 +281,8 @@ def build() -> None:
     pdf.set_font("Helvetica", "B", 11)
     pdf.cell(0, 7, "5.1 Inspection Schedule", new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("Helvetica", "", 11)
-    mc(pdf,
+    mc(
+        pdf,
         "Perform the following inspections at the intervals shown. Record all inspection results "
         "in the maintenance log. Contact the service centre if any out-of-tolerance condition "
         "is found. Refer to the spare parts list in Appendix A for replacement part numbers.",
@@ -288,8 +295,11 @@ def build() -> None:
     pdf.add_page()
     pdf.set_font("Helvetica", "B", 11)
     pdf.cell(
-        0, 8, "Appendix A - Legacy Parts (scanned original, 1987)",
-        new_x="LMARGIN", new_y="NEXT",
+        0,
+        8,
+        "Appendix A - Legacy Parts (scanned original, 1987)",
+        new_x="LMARGIN",
+        new_y="NEXT",
     )
     pdf.ln(2)
     pdf.image(scan_buf, x=10, y=30, w=190)

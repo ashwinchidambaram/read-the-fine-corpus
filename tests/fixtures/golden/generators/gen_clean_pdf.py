@@ -35,10 +35,11 @@ def build() -> None:
 
     # --- Front matter / intro prose ---
     pdf.set_font("Helvetica", "", 11)
-    mc(pdf,
+    mc(
+        pdf,
         "This guide describes the installation and initial configuration of the ACME Widget "
         "v3.2. Follow all steps in order. Read Section 4 before applying power. "
-        "Contact support@acme.example if you encounter issues not covered here."
+        "Contact support@acme.example if you encounter issues not covered here.",
     )
     pdf.ln(4)
 
@@ -71,22 +72,24 @@ def build() -> None:
     pdf.set_font("Helvetica", "B", 11)
     pdf.cell(0, 7, "2.1 Mechanical Mounting", new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("Helvetica", "", 11)
-    mc(pdf,
+    mc(
+        pdf,
         "Attach the mounting bracket to the DIN rail using the four M4 bolts supplied. "
         "Torque each bolt to 2.5 Nm. Slide the Widget chassis onto the bracket until the "
         "locking tab engages. Apply grease (NLGI Grade 2) to all exposed bearing surfaces "
-        "before securing the cover plate. See Section 4.2 for torque specifications."
+        "before securing the cover plate. See Section 4.2 for torque specifications.",
     )
     pdf.ln(3)
 
     pdf.set_font("Helvetica", "B", 11)
     pdf.cell(0, 7, "2.2 Electrical Connections", new_x="LMARGIN", new_y="NEXT")
     pdf.set_font("Helvetica", "", 11)
-    mc(pdf,
+    mc(
+        pdf,
         "Connect the 24 V DC supply to terminal block TB1. Polarity is marked on the chassis "
         "silkscreen. Do NOT reverse polarity; doing so will void the warranty and may damage "
         "internal protection circuitry. The earth bonding point (green/yellow lug) MUST be "
-        "connected to the enclosure protective earth."
+        "connected to the enclosure protective earth.",
     )
     pdf.ln(4)
 

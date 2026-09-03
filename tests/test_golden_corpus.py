@@ -69,6 +69,7 @@ def fixture_entries(manifest: dict[str, Any]) -> list[dict[str, Any]]:
 # Test 1: manifest is valid YAML with required schema
 # ---------------------------------------------------------------------------
 
+
 class TestManifestSchema:
     def test_manifest_parses(self, manifest: dict[str, Any]) -> None:
         """manifest.yaml must be parseable YAML."""
@@ -110,6 +111,7 @@ class TestManifestSchema:
 # Test 2: every fixture file exists and is non-empty
 # ---------------------------------------------------------------------------
 
+
 class TestFixtureFilesExist:
     def test_all_files_exist(self, fixture_entries: list[dict[str, Any]]) -> None:
         """Every file listed in the manifest must exist on disk."""
@@ -146,6 +148,7 @@ class TestFixtureFilesExist:
 # Test 3: sha256 integrity
 # ---------------------------------------------------------------------------
 
+
 class TestSha256Integrity:
     def test_all_sha256_match(self, fixture_entries: list[dict[str, Any]]) -> None:
         """Every file's sha256 must match the manifest entry."""
@@ -174,10 +177,9 @@ class TestSha256Integrity:
 # Test 4: §18.1 mandatory category coverage
 # ---------------------------------------------------------------------------
 
+
 class TestMandatoryCategoryCompleteness:
-    def test_all_mandatory_categories_covered(
-        self, fixture_entries: list[dict[str, Any]]
-    ) -> None:
+    def test_all_mandatory_categories_covered(self, fixture_entries: list[dict[str, Any]]) -> None:
         """Every §18.1 mandatory category must be covered by at least one fixture entry."""
         roles = [e.get("role", "") for e in fixture_entries]
 
@@ -192,9 +194,7 @@ class TestMandatoryCategoryCompleteness:
             + "\n".join(f"  - {c}" for c in missing_categories)
         )
 
-    def test_adversarial_has_injection_flags(
-        self, fixture_entries: list[dict[str, Any]]
-    ) -> None:
+    def test_adversarial_has_injection_flags(self, fixture_entries: list[dict[str, Any]]) -> None:
         """Adversarial fixture must declare injection vector flags."""
         adv_entries = [e for e in fixture_entries if "adversarial" in e.get("role", "").lower()]
         assert adv_entries, "No adversarial fixture found in manifest"
@@ -202,8 +202,7 @@ class TestMandatoryCategoryCompleteness:
         flags = adv.get("flags", [])
         injection_flags = [f for f in flags if "injection" in f]
         assert injection_flags, (
-            "Adversarial fixture must have at least one 'injection_*' flag; "
-            f"found flags: {flags}"
+            f"Adversarial fixture must have at least one 'injection_*' flag; found flags: {flags}"
         )
 
     def test_adversarial_has_invisible_content_flags(
@@ -216,18 +215,14 @@ class TestMandatoryCategoryCompleteness:
         flags = adv.get("flags", [])
         invisible_flags = [f for f in flags if "invisible" in f]
         assert invisible_flags, (
-            "Adversarial fixture must have at least one 'invisible_*' flag; "
-            f"found flags: {flags}"
+            f"Adversarial fixture must have at least one 'invisible_*' flag; found flags: {flags}"
         )
 
     def test_unservable_set_covers_required_types(
         self, fixture_entries: list[dict[str, Any]]
     ) -> None:
         """Unservable set must include encrypted PDF, audio, video, image-only, and CAD."""
-        unservable = [
-            e for e in fixture_entries
-            if "unservable" in e.get("role", "").lower()
-        ]
+        unservable = [e for e in fixture_entries if "unservable" in e.get("role", "").lower()]
         classes = {e.get("expected_triage_class", "") for e in unservable}
         required_classes = {
             "encrypted_pdf",
@@ -238,13 +233,10 @@ class TestMandatoryCategoryCompleteness:
         }
         missing = required_classes - classes
         assert not missing, (
-            f"Unservable set is missing triage classes: {missing}. "
-            f"Present: {classes}"
+            f"Unservable set is missing triage classes: {missing}. Present: {classes}"
         )
 
-    def test_spreadsheet_three_kinds_present(
-        self, fixture_entries: list[dict[str, Any]]
-    ) -> None:
+    def test_spreadsheet_three_kinds_present(self, fixture_entries: list[dict[str, Any]]) -> None:
         """All three spreadsheet kinds (report, database, model) must be present."""
         classes = {e.get("expected_triage_class", "") for e in fixture_entries}
         for kind in ("spreadsheet_report", "spreadsheet_database", "spreadsheet_model"):
@@ -256,22 +248,14 @@ class TestMandatoryCategoryCompleteness:
         self, fixture_entries: list[dict[str, Any]]
     ) -> None:
         """Near-duplicate family must have exactly 3 members (v1, v2, v3)."""
-        nd_entries = [
-            e for e in fixture_entries
-            if "near-duplicate" in e.get("role", "").lower()
-        ]
+        nd_entries = [e for e in fixture_entries if "near-duplicate" in e.get("role", "").lower()]
         assert len(nd_entries) >= 3, (
             f"Near-duplicate family must have at least 3 members; found {len(nd_entries)}"
         )
 
-    def test_near_duplicate_family_has_primary(
-        self, fixture_entries: list[dict[str, Any]]
-    ) -> None:
+    def test_near_duplicate_family_has_primary(self, fixture_entries: list[dict[str, Any]]) -> None:
         """Near-duplicate family must have exactly one primary version."""
-        nd_entries = [
-            e for e in fixture_entries
-            if "near-duplicate" in e.get("role", "").lower()
-        ]
+        nd_entries = [e for e in fixture_entries if "near-duplicate" in e.get("role", "").lower()]
         primaries = [e for e in nd_entries if "primary" in e.get("role", "").lower()]
         assert len(primaries) == 1, (
             f"Near-duplicate family must have exactly 1 primary entry; found {len(primaries)}"
@@ -281,6 +265,7 @@ class TestMandatoryCategoryCompleteness:
 # ---------------------------------------------------------------------------
 # Test 5: generator scripts exist for every fixture
 # ---------------------------------------------------------------------------
+
 
 class TestGeneratorsExist:
     def test_all_generators_exist(self, fixture_entries: list[dict[str, Any]]) -> None:
@@ -294,14 +279,13 @@ class TestGeneratorsExist:
             gen_path = GOLDEN_DIR / gen
             if not gen_path.exists():
                 missing.append(f"{entry['file']}: generator {gen} not found")
-        assert not missing, (
-            "Missing generator scripts:\n" + "\n".join(f"  {m}" for m in missing)
-        )
+        assert not missing, "Missing generator scripts:\n" + "\n".join(f"  {m}" for m in missing)
 
 
 # ---------------------------------------------------------------------------
 # Test 6: generator determinism
 # ---------------------------------------------------------------------------
+
 
 class TestGeneratorDeterminism:
     def test_clean_pdf_generator_is_deterministic(

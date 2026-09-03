@@ -59,19 +59,25 @@ def build() -> None:
     pdf.cell(0, 8, "Leave Request Form", new_x="LMARGIN", new_y="NEXT", align="C")
     pdf.set_font("Helvetica", "", 10)
     pdf.cell(
-        0, 6, "Form No. HR-F-001 | Rev. 2 | Effective 2025-01-01",
-        new_x="LMARGIN", new_y="NEXT", align="C",
+        0,
+        6,
+        "Form No. HR-F-001 | Rev. 2 | Effective 2025-01-01",
+        new_x="LMARGIN",
+        new_y="NEXT",
+        align="C",
     )
     pdf.ln(4)
 
     pdf.set_font("Helvetica", "", 10)
     pdf.set_x(pdf.l_margin)
     pdf.multi_cell(
-        0, 5,
+        0,
+        5,
         "Complete all sections. Submit to your manager for approval, then to HR. "
         "Retain a copy for your records. This form must be submitted at least 5 working "
         "days before the first day of leave except in cases of emergency.",
-        new_x="LMARGIN", new_y="NEXT",
+        new_x="LMARGIN",
+        new_y="NEXT",
     )
     pdf.ln(4)
 
@@ -131,11 +137,13 @@ def build() -> None:
     pdf.set_font("Helvetica", "I", 9)
     pdf.set_x(pdf.l_margin)
     pdf.multi_cell(
-        0, 5,
+        0,
+        5,
         "For HR use only. Original to be retained in employee personnel file. "
         "Copy to payroll department. Personal data processed in accordance with GDPR "
         "and the ACME Corp Data Protection Policy (HR-POL-011).",
-        new_x="LMARGIN", new_y="NEXT",
+        new_x="LMARGIN",
+        new_y="NEXT",
     )
 
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)

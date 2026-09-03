@@ -87,6 +87,7 @@ def build_password_protected() -> None:
 # Tiny .wav — 1 second of 44100 Hz mono silence (PCM 16-bit)
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 def build_wav() -> None:
     sample_rate = 44100
     num_channels = 1
@@ -102,7 +103,7 @@ def build_wav() -> None:
     # fmt sub-chunk
     buf.write(b"fmt ")
     buf.write(struct.pack("<I", 16))  # sub-chunk size
-    buf.write(struct.pack("<H", 1))   # PCM format
+    buf.write(struct.pack("<H", 1))  # PCM format
     buf.write(struct.pack("<H", num_channels))
     buf.write(struct.pack("<I", sample_rate))
     buf.write(struct.pack("<I", sample_rate * num_channels * bits_per_sample // 8))  # byte rate
@@ -123,6 +124,7 @@ def build_wav() -> None:
 # Minimal .mp4 stub — valid ftyp box + empty mdat box
 # ──────────────────────────────────────────────────────────────────────────────
 
+
 def build_mp4() -> None:
     def box(box_type: bytes, payload: bytes) -> bytes:
         size = 8 + len(payload)
@@ -130,7 +132,7 @@ def build_mp4() -> None:
 
     # ftyp box
     ftyp_payload = (
-        b"isom"   # major brand
+        b"isom"  # major brand
         + struct.pack(">I", 0x200)  # minor version
         + b"isomiso2mp41"  # compatible brands
     )
@@ -140,12 +142,12 @@ def build_mp4() -> None:
     mvhd_payload = (
         b"\x00"  # version 0
         + b"\x00\x00\x00"  # flags
-        + struct.pack(">I", 0)   # creation time
-        + struct.pack(">I", 0)   # modification time
+        + struct.pack(">I", 0)  # creation time
+        + struct.pack(">I", 0)  # modification time
         + struct.pack(">I", 1000)  # timescale
-        + struct.pack(">I", 0)   # duration
+        + struct.pack(">I", 0)  # duration
         + struct.pack(">I", 0x00010000)  # rate = 1.0
-        + struct.pack(">H", 0x0100)     # volume = 1.0
+        + struct.pack(">H", 0x0100)  # volume = 1.0
         + b"\x00" * 70  # reserved + matrix + pre-defined
         + struct.pack(">I", 2)  # next track ID
     )
@@ -166,6 +168,7 @@ def build_mp4() -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 # Image-only PDF — rasterized page, no text layer
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 def build_image_only_pdf() -> None:
     # Create a synthetic "document" image
@@ -208,6 +211,7 @@ def build_image_only_pdf() -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 # CAD binary — .dwg extension with AutoCAD magic bytes
 # ──────────────────────────────────────────────────────────────────────────────
+
 
 def build_dwg() -> None:
     # AutoCAD DWG files start with a 6-byte version sentinel: e.g. "AC1015" for AutoCAD 2000
