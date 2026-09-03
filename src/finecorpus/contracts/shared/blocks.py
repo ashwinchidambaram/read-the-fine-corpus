@@ -16,7 +16,7 @@ from datetime import datetime
 from enum import Enum, StrEnum
 from typing import Annotated, Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # ---------------------------------------------------------------------------
 # Enums — TenancyBlock
@@ -107,6 +107,16 @@ class TenancyBlock(BaseModel):
         default=None,
         description="When permissions were last resolved from source. Null for manual/platform.",
     )
+
+    @model_validator(mode="after")
+    def _source_mirrored_requires_connector(self) -> TenancyBlock:
+        """source_mirrored requires permission_source=connector (§14.3, contracts README)."""
+        if (
+            self.permission_mode == PermissionMode.source_mirrored
+            and self.permission_source != PermissionSource.connector
+        ):
+            raise ValueError("permission_mode=source_mirrored requires permission_source=connector")
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -285,6 +295,16 @@ class TransformationRecord(BaseModel):
         description="Human-readable detail (e.g. 'OCR corrected 3 substitutions; changed_text').",
     )
 
+    @model_validator(mode="after")
+    def _tier_2_never_changes_text(self) -> TransformationRecord:
+        """Tier 2 never touches text — changed_text must be False for tier=2 (§7.2)."""
+        if self.tier == TransformationTier.tier_2 and self.changed_text:
+            raise ValueError(
+                "TransformationRecord with tier=2 must have changed_text=False "
+                "(Tier 2 contextual augmentation never alters chunk text, §7.2)"
+            )
+        return self
+
 
 # ---------------------------------------------------------------------------
 # Enums — Provenance
@@ -295,7 +315,7 @@ class SegmentType(StrEnum):
     """Segment type taxonomy.
 
     See docs/architecture/segment-taxonomy.md for the authoritative definitions.
-    All 13 types plus the sentinel.
+    13 content types plus one sentinel (unknown), for a total of 14 types.
     """
 
     prose = "prose"
@@ -312,19 +332,6 @@ class SegmentType(StrEnum):
     cross_reference = "cross_reference"
     scanned_region = "scanned_region"
     unknown = "unknown"
-
-    # Wire value for 'list' must match the identifier in the taxonomy
-    @classmethod
-    def _missing_(cls, value: object) -> SegmentType | None:
-        if value == "list":
-            return cls.list_
-        return None
-
-    def __str__(self) -> str:
-        # Ensure 'list_' serialises as 'list' on the wire
-        if self == SegmentType.list_:
-            return "list"
-        return self.value
 
 
 class SalienceTier(StrEnum):
@@ -450,16 +457,17 @@ class Provenance(BaseModel):
     - injection_suspicion, invisible_content_flags, sensitivity_flags always present.
     """
 
-    source_document_id: str = Field(
+    source_document_id: Annotated[str, Field(min_length=1)] = Field(
         description=(
             "Stable document identity (§8 'source document identity'). "
-            "Matches Inventory document_id."
+            "Matches Inventory document_id. Empty string is never valid."
         )
     )
-    source_document_version: str = Field(
+    source_document_version: Annotated[str, Field(min_length=1)] = Field(
         description=(
             "Which version of the document this came from (§8 'and version'). "
-            "Same value as Inventory content_hash; makes replace-by-document correct (§10.5)."
+            "Same value as Inventory content_hash; makes replace-by-document correct (§10.5). "
+            "Empty string is never valid."
         )
     )
     source_location: SourceLocation = Field(description="Position within source (§8).")
@@ -504,10 +512,10 @@ class Provenance(BaseModel):
             "(taxonomy §4.3, C-R3). Enables the §11.5 'why this tier' trace at retrieval."
         )
     )
-    language: str = Field(
+    language: Annotated[str, Field(min_length=1)] = Field(
         description=(
             "Detected language of the segment (§7.6) in BCP-47 format (e.g. 'en', 'es'). "
-            "'und' for undetermined; recorded, never omitted."
+            "'und' for undetermined; recorded, never omitted. Empty string is never valid."
         )
     )
     injection_suspicion: Annotated[float, Field(ge=0.0, le=1.0)] = Field(

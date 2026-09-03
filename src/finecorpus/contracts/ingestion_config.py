@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
 
@@ -206,7 +206,7 @@ class Tier3Settings(BaseModel):
     model_ref: str = Field(
         description="Model identity for the rewriter. A name, not a secret (§14.2)."
     )
-    opt_in_ack: Annotated[bool, Field()] = Field(
+    opt_in_ack: Literal[True] = Field(
         description="Explicit opt-in acknowledgement required (§7.2 Tier 3 MUST). Must be True."
     )
     diff_preview_required: bool = Field(
@@ -518,7 +518,7 @@ class IngestionConfig(BaseModel):
             "with evidence pointer (§6.4)."
         )
     )
-    secret_free_attestation: bool = Field(
+    secret_free_attestation: Literal[True] = Field(
         description=(
             "Structural guarantee no secrets are present (§14.2); "
             "the model forbids secret-bearing fields by construction. Must be True."
