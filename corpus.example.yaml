@@ -1,0 +1,444 @@
+# corpus.example.yaml — Read The Fine Corpus configuration reference
+#
+# Every option is present here, commented with its meaning and default value.
+# Copy this file to corpus.yaml and edit as needed.
+#
+# Spec §4.6: "Nothing is hidden in code."  If a tunable exists in the
+# implementation it MUST have a row in docs/configuration/reference.md
+# and appear here.
+#
+# SECRETS — never write credentials into this file.
+# Supply them via environment variables:
+#   FINECORPUS_STORAGE__POSTGRES__URL=postgresql://user:pass@host/db
+#   FINECORPUS_STORAGE__QDRANT__API_KEY=<key>
+# See docs/configuration/reference.md §1 for the full env-var convention.
+#
+# Precedence: env var  >  corpus.yaml  >  built-in default
+# Separator:  FINECORPUS_ prefix, __ double-underscore for nesting.
+
+# ---------------------------------------------------------------------------
+# §2.1 Platform
+# ---------------------------------------------------------------------------
+platform:
+  # Platform identity; used in collection naming prefix ``rtfc_``.  (§4.6)
+  # Default: "rtfc"
+  instance_name: "rtfc"
+
+  # Set to true by the first-run prompt after provider validation.
+  # Do not set manually.  (§4.6)
+  # Default: false
+  first_run_complete: false
+
+  # Blocks all outbound HTTP before any provider call. All providers must
+  # have is_local: true.  Equivalent to RTFC_AIRGAP=true.  (§4.3, §7.2)
+  # Default: false
+  airgap: false
+
+  # Structured log level for all services.  (§13)
+  # Allowed: debug | info | warn | error
+  # Default: "info"
+  log_level: "info"
+
+  # How often services poll the control-plane database for config changes.
+  # Setting to 0 disables polling (restart required for config changes).
+  # (§4.6, ADR-0005)  (proposed)
+  # Default: 30
+  config_distribution_poll_interval_seconds: 30
+
+# ---------------------------------------------------------------------------
+# §2.2 Storage backends
+# ---------------------------------------------------------------------------
+storage:
+  postgres:
+    # PostgreSQL connection URL.
+    # MUST be supplied via env var: FINECORPUS_STORAGE__POSTGRES__URL
+    # Never write the password here.  (§4.1)
+    # Default: (none — required)
+    url:
+
+    # Minimum connection pool size.  (§4.1)  (proposed)
+    # Default: 2
+    pool_min: 2
+
+    # Maximum connection pool size.  (§4.1)  (proposed)
+    # Default: 10
+    pool_max: 10
+
+  qdrant:
+    # Qdrant gRPC/HTTP endpoint.  (§4.4)
+    # Default: "http://qdrant:6333"
+    url: "http://qdrant:6333"
+
+    # Qdrant API key if Qdrant is configured with authentication.
+    # Supply via env var: FINECORPUS_STORAGE__QDRANT__API_KEY  (§4.4)
+    # Default: (none)
+    api_key:
+
+  object_store:
+    # Object storage backend for cold snapshots and source-document retention.
+    # Allowed: s3 | minio | gcs | azure_blob  (§10.2)  (proposed)
+    # Default: "minio"
+    backend: "minio"
+
+    # Bucket / container name.  (§10.2)  (proposed)
+    # Default: "rtfc-snapshots"
+    bucket: "rtfc-snapshots"
+
+    # Key prefix within the bucket.  (§10.2)
+    # Default: ""
+    prefix: ""
+
+    # Override endpoint — required for MinIO; leave unset for AWS S3.
+    # Supply via env var: FINECORPUS_STORAGE__OBJECT_STORE__ENDPOINT_URL  (§10.2)
+    # Default: (none)
+    endpoint_url:
+
+    # Region for S3/GCS/Azure backends.  (§10.2)  (proposed)
+    # Default: "us-east-1"
+    region: "us-east-1"
+
+  cache:
+    # Backing store for the query-embedding cache.
+    # Decision (OQ-C-1) is unresolved before Phase 4.
+    # Allowed: redis | postgres  (§11.3, OQ-C-1)
+    # Default: (none — unresolved)
+    backend:
+
+    # Connection URL for the cache backend.
+    # Supply via env var: FINECORPUS_STORAGE__CACHE__URL  (§11.3)
+    # Default: (none)
+    url:
+
+# ---------------------------------------------------------------------------
+# §2.3 Providers — Embedding
+# ---------------------------------------------------------------------------
+providers:
+  embedding:
+    # Name of the default embedding provider ("openai" or "ollama").
+    # Set by the first-run prompt.  (§4.6)
+    # Default: (none — set by first-run)
+    default:
+
+    cloud:
+      # Provider identifier.  (§7.1)
+      # Default: "openai"
+      provider_id: "openai"
+
+      # Model identifier passed to the OpenAI API.  (§7.1)
+      # Default: "text-embedding-3-small"
+      model: "text-embedding-3-small"
+
+      # Must match the model's output dimensions.
+      # Default: 1536
+      dimensions: 1536
+
+      # OpenAI API batch limit.
+      # Default: 2048
+      max_batch_size: 2048
+
+      # Current price; updated by ``corpus provider update-pricing``.  (§16)
+      # Default: (none — updated by tool)
+      cost_per_1k_tokens:
+
+      # ISO 8601 date the cost figure was last verified.
+      # Platform warns if older than index_lifecycle.pricing_stale_warn_days.
+      # Default: (none)
+      pricing_as_of:
+
+    local:
+      # Local provider identifier.  (§7.2)
+      # Default: "ollama"
+      provider_id: "ollama"
+
+      # Ollama HTTP endpoint.
+      # Default: "http://localhost:11434"
+      endpoint: "http://localhost:11434"
+
+      # Ollama model name (nomic-embed-text or bge-m3).  (proposed)
+      # Default: "nomic-embed-text"
+      model: "nomic-embed-text"
+
+      # Must match the model. nomic-embed-text=768; bge-m3=1024.  (proposed)
+      # Default: 768
+      dimensions: 768
+
+      # Opt-in batch mode for Ollama (requires minimum Ollama version per OQ-P-3).
+      # (proposed)
+      # Default: false
+      batch_mode: false
+
+# ---------------------------------------------------------------------------
+# §2.4 Providers — Internal LLM
+# ---------------------------------------------------------------------------
+internal_llm:
+  default:
+    # Default internal LLM provider ("openai" or "ollama").  (§7.3)
+    # Default: (none — set by first-run)
+    provider:
+
+    # Exact model identifier.  (§7.3)
+    # Default: (none — set by first-run)
+    model:
+
+    # Temperature for internal model calls. The only place temperature
+    # appears in the product.  (§7.3)  (proposed)
+    # Default: 0.2
+    temperature: 0.2
+
+  operations:
+    classification:
+      # Provider for segment classification. Inherits default when null.
+      provider:
+      # Model for segment classification. Inherits default when null.
+      model:
+      # Determinism is strongly preferred for classification.  (proposed)
+      # Default: 0.0
+      temperature: 0.0
+
+    augmentation:
+      # Provider for table description and breadcrumb blurb generation.
+      provider:
+      model:
+      # Default: 0.3  (proposed)
+      temperature: 0.3
+
+    question_generation:
+      # Provider for eval question generation.
+      provider:
+      model:
+      # Default: 0.7  (proposed)
+      temperature: 0.7
+
+    rewriting:
+      # Provider for Tier 3 rewriting.
+      # Local providers strongly preferred for sensitive corpora.
+      provider:
+      model:
+      # Default: 0.2  (proposed)
+      temperature: 0.2
+
+  # Retry limit before the operation is recorded as a failure.  (§15)  (proposed)
+  # Default: 3
+  max_retries: 3
+
+# ---------------------------------------------------------------------------
+# §2.5 Assessment thresholds
+# ---------------------------------------------------------------------------
+assessment:
+  # scanned_region segments below this page-level OCR confidence are assigned
+  # tier "excluded".  (§6.2, §6.4)  (proposed)
+  # Default: 0.60
+  ocr_confidence_exclude_floor: 0.60
+
+  # Segments between ocr_confidence_exclude_floor and this level are assigned
+  # tier "supporting" with a low-confidence flag.  (§6.2, §6.4)  (proposed)
+  # Default: 0.80
+  ocr_confidence_warn_level: 0.80
+
+  # A text block appearing in more than this proportion of corpus documents
+  # is classified as "boilerplate".  (§6.2)  (proposed)
+  # Default: 0.30
+  boilerplate_corpus_proportion: 0.30
+
+  # Boilerplate threshold when corpus has fewer docs than
+  # boilerplate_small_corpus_doc_count.  (§6.2)  (proposed)
+  # Default: 0.50
+  boilerplate_small_corpus_proportion: 0.50
+
+  # Corpus size below which the small-corpus boilerplate proportion applies.
+  # (§6.2)  (proposed)
+  # Default: 10
+  boilerplate_small_corpus_doc_count: 10
+
+  # Inline minority content shorter than this line count is absorbed into the
+  # parent segment type.  (§6.3)  (proposed)
+  # Default: 3
+  inline_split_min_lines: 3
+
+  # Inline minority content shorter than this character count is absorbed into
+  # the parent segment type.  (§6.3)  (proposed)
+  # Default: 200
+  inline_split_min_chars: 200
+
+  # Page-level OCR confidence above which sub-decomposition is attempted.
+  # (§6.3)  (proposed)
+  # Default: 0.85
+  ocr_sub_decompose_confidence_floor: 0.85
+
+  # Validation gate 1: shadow chunk count tolerance (±fraction).  (§10.4)  (proposed)
+  # Default: 0.20
+  chunk_count_tolerance_pct: 0.20
+
+  # Validation gate 4: eval baseline regression threshold.  (§10.4, §9.4)  (proposed)
+  # Default: 0.05
+  eval_regression_threshold: 0.05
+
+  # Below this document count, the platform declines to run a configuration
+  # sweep.  Executor-proposed; pending Phase 5.  (§9.3)
+  # Default: (none — pending executor design)
+  sweep_min_corpus_docs:
+
+# ---------------------------------------------------------------------------
+# §2.5 Ingestion
+# ---------------------------------------------------------------------------
+ingestion:
+  dedup:
+    # When false (default), superseded near-duplicate documents produce no
+    # segments and no chunks (inventory-only).  When true, they are indexed at
+    # salience tier "excluded".  (§6.1, §6.3, owner ruling D-25)
+    # Default: false
+    index_superseded_versions: false
+
+# ---------------------------------------------------------------------------
+# §2.6 Index lifecycle and retention
+# ---------------------------------------------------------------------------
+index_lifecycle:
+  # Number of previous collections to retain hot in Qdrant memory (N-1 count).
+  # 0 disables hot standby (saves RAM; UI warns).  (§10.2)  (proposed)
+  # Default: 1
+  hot_retention_count: 1
+
+  # Number of cold snapshots to retain before purging the oldest.  (§10.2)  (proposed)
+  # Default: 2
+  cold_retention_count: 2
+
+  # How long a VALIDATION_FAILED shadow collection is retained before automatic
+  # cold-snapshot and deletion.  (§15)  (proposed)
+  # Default: 7
+  validation_failed_shadow_retention_days: 7
+
+  # Hours before automatic purge at which the operator is notified.  (§15)  (proposed)
+  # Default: 24
+  validation_failed_shadow_notify_hours_before: 24
+
+  # Worker heartbeat timeout in seconds before the job is eligible for
+  # resumption by another worker.  (§15)  (proposed)
+  # Default: 60
+  worker_heartbeat_timeout_seconds: 60
+
+  # Default expiry (days) for newly issued service principal keys.  (§14.2)  (proposed)
+  # Default: 90
+  service_principal_key_expiry_days: 90
+
+  # Days before service principal key expiry at which a warning is issued.  (§14.2)  (proposed)
+  # Default: 7
+  service_principal_key_expiry_warn_days: 7
+
+  # Platform warns if providers.embedding.cloud.pricing_as_of is older than
+  # this many days.  (§16)  (proposed)
+  # Default: 90
+  pricing_stale_warn_days: 90
+
+  # Default cron expression for scheduled reindex trigger.
+  # Empty / null disables scheduled reindex at platform level.  (§10.3)
+  # Default: (none — disabled)
+  scheduled_reindex_cron:
+
+  # Aliases platform.config_distribution_poll_interval_seconds.  (ADR-0005)  (proposed)
+  # Default: 30
+  config_distribution_poll_interval_seconds: 30
+
+  # Default time-bound window (hours) for a Platform Admin break-glass grant.
+  # Must be finite.  (§2.3)  PENDING Open Decision #4 (OQ-C-2)
+  # Default: (none — pending Open Decision #4)
+  break_glass_grant_window_hours:
+
+  # Maximum age of a cold snapshot before it is eligible for automatic purge.
+  # (§17.1)  PENDING Open Decision #5 (OQ-C-3)
+  # Default: (none — pending Open Decision #5)
+  snapshot_retention_period_days:
+
+# ---------------------------------------------------------------------------
+# §2.7 Query embedding cache
+# ---------------------------------------------------------------------------
+cache:
+  query_embedding:
+    # Enable the query-embedding cache. Disable only for debugging.  (§11.3)
+    # Default: true
+    enabled: true
+
+    # Cache entry TTL in seconds.  (§11.3)  (proposed)
+    # Default: 3600
+    ttl_seconds: 3600
+
+    # Maximum cache entries before LRU eviction.  Pending Phase 4 sizing.
+    # (§11.3)  (proposed — pending executor design)
+    # Default: (none — pending executor design)
+    max_entries:
+
+# ---------------------------------------------------------------------------
+# §2.8 Retrieval
+# ---------------------------------------------------------------------------
+retrieval:
+  # Default number of chunks returned per query when not specified.  (§11.2)  (proposed)
+  # Default: 10
+  default_top_k: 10
+
+  # Maximum top-k a caller may request.  (§11.2)  (proposed)
+  # Default: 100
+  max_top_k: 100
+
+  # Default retrieval strategy at KB level.  (§11.2)  (proposed)
+  # Allowed: dense | sparse | hybrid
+  # Default: "hybrid"
+  default_strategy: "hybrid"
+
+  # Score weighting for "supporting"-tier chunks vs "primary" chunks.
+  # (§11.2)  (proposed)
+  # Default: 0.7
+  supporting_tier_weight: 0.7
+
+  rate_limit:
+    # Per-tenant query rate limit (queries/second). Pending Phase 4.  (§11.3)
+    # Default: (none — pending executor design)
+    queries_per_second_per_tenant:
+
+# ---------------------------------------------------------------------------
+# §2.9 Budgets and cost governance
+# ---------------------------------------------------------------------------
+budgets:
+  # Per-knowledge-base budget cap in USD. null = no cap.  (§16)
+  # Default: (none — no cap)
+  per_kb_cap_usd:
+
+  # Per-workspace budget cap in USD. null = no cap.  (§16)
+  # Default: (none — no cap)
+  per_workspace_cap_usd:
+
+  # Operations costing more than this require explicit confirmation.  (§16)  (proposed)
+  # Default: 10.00
+  ingestion_confirmation_threshold_usd: 10.00
+
+  # Sweeps costing more than this require explicit confirmation.  (§16, §9.3)  (proposed)
+  # Default: 5.00
+  sweep_confirmation_threshold_usd: 5.00
+
+  # After this many consecutive budget-cap hits on scheduled reindexes,
+  # a repeated-cap-hit alert is sent.  (§16)  (proposed)
+  # Default: 3
+  scheduled_reindex_cap_hit_alert_count: 3
+
+# ---------------------------------------------------------------------------
+# §2.10 Observability
+# ---------------------------------------------------------------------------
+observability:
+  # Port for the Prometheus-compatible metrics endpoint.  (§13.3)  (proposed)
+  # Default: 9090
+  metrics_port: 9090
+
+  # OpenTelemetry collector endpoint. Leave unset to disable trace export.  (§13.3)
+  # Default: (none — disabled)
+  otel_endpoint:
+
+  # Service name reported to the OTEL collector.  (§13.3)
+  # Default: "rtfc"
+  otel_service_name: "rtfc"
+
+  # Cron expression for the scheduled drift-detection eval run.  (§9.4)
+  # Default: (none — disabled)
+  drift_detection_cron:
+
+  # Log security observations when outputs contain injection-shaped content.
+  # Audit only; does not affect pipeline behaviour.  (§14.1)
+  # Default: true
+  log_injection_suspicion_observations: true
