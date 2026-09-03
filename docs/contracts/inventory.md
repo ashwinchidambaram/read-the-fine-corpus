@@ -51,11 +51,11 @@ list of `InventoryItem` records, plus link records and relationship records.
 | `source_modified_at` | `datetime` | no | Timestamp from source system. Distinguishes content vs metadata change (§10.3). |
 | `discovered_at` | `datetime` (UTC) | yes | When Collect first saw this file. |
 | `source_permissions` | `SourcePermissions` | no | Raw source-side ACLs when a connector supplies them (§14.3), before resolution into `TenancyBlock.permission_principals`. |
-| `dedup_role` | `enum{unique, exact_duplicate, primary, superseded}` | yes | Role in dedup/version relationships. `superseded` = an older version-family member, excluded from index by default (§6.1). |
+| `dedup_role` | `enum{unique, exact_duplicate, primary, superseded}` | yes | Role in dedup/version relationships. `superseded` = an older version-family member. **Default (D-25, owner ruling 2026-09-03):** produces no segments and no chunks; inventoried, retained in object storage, and reported in the exclusion report with reason "superseded by \<primary document_id\>". When `ingestion.dedup.index_superseded_versions=true`, decomposed and indexed at tier `excluded`. |
 | `dedup_group_id` | `str` | no | The `DuplicateGroup` or `VersionFamily` this item belongs to, if any. |
 | `collect_status` | `enum{collected, unreadable, access_denied, too_large, skipped_policy}` | yes | Outcome of collection. Failures are represented, not dropped (§6 rule 6). `unreadable` includes password-protected files (detail in `status_detail`). |
 | `status_detail` | `str` | no | Reason string for any non-`collected` status. Feeds the exclusion report. |
-| `document_status` | `enum{active, superseded, deleted}` | yes | **Lifecycle state of the document in the KB** (distinct from `collect_status`, which is a collection-time outcome). `active`: in the index (or eligible), full participation. `superseded`: a version-family member the newest version replaced — retained, indexed at `excluded` tier by default (§6.1), and flippable via the primacy path (index-lifecycle.md §7.5). `deleted`: removed from the KB after collection (§17.1) — its chunks are swept from all collections and it does not appear in findings/UI. Set to `deleted` by the deletion flow (index-lifecycle.md §12.1); resolves W-5, where a deleted document was previously indistinguishable from an active one. |
+| `document_status` | `enum{active, superseded, deleted}` | yes | **Lifecycle state of the document in the KB** (distinct from `collect_status`, which is a collection-time outcome). `active`: in the index (or eligible), full participation. `superseded`: a version-family member the newest version replaced — retained in object storage, reported in the exclusion report; **default (D-25, 2026-09-03):** produces no segments and no chunks; when `ingestion.dedup.index_superseded_versions=true`, indexed at `excluded` tier and flippable via the primacy path (index-lifecycle.md §7.5). `deleted`: removed from the KB after collection (§17.1) — its chunks are swept from all collections and it does not appear in findings/UI. Set to `deleted` by the deletion flow (index-lifecycle.md §12.1); resolves W-5, where a deleted document was previously indistinguishable from an active one. |
 
 ## `SourcePermissions`
 
@@ -95,19 +95,28 @@ list of `InventoryItem` records, plus link records and relationship records.
 | `family_id` | `str` (ULID) | yes | Family identity. |
 | `member_document_ids` | `list[str]` | yes | Near-duplicate members (§6.1). |
 | `primary_document_id` | `str` | yes | Newest member, treated as primary (§6.1). |
-| `superseded_document_ids` | `list[str]` | yes | Older members, retained but excluded from index by default (§6.1). |
+| `superseded_document_ids` | `list[str]` | yes | Older members, retained in object storage. **Default (D-25, 2026-09-03):** not indexed; appear in exclusion report. When `ingestion.dedup.index_superseded_versions=true`: indexed at tier `excluded` (§6.1). |
 | `similarity_method` | `str` | yes | How near-duplication was determined (e.g. `minhash`, `simhash`), for auditability. |
 | `similarity_scores` | `dict[str, float]` | no | Per-member similarity to primary, for inspection and override. |
 | `primacy_basis` | `enum{source_modified_at, discovered_at, filename_version, manual}` | yes | Why `primary` was chosen newest — recorded so a wrong pick is explainable and overridable. |
 
+**Superseded document handling (owner ruling 2026-09-03, D-25).** By default
+(`ingestion.dedup.index_superseded_versions=false`), superseded members produce no segments and no
+chunks. They are inventoried, retained in object storage, and appear in the exclusion report with
+reason "superseded by \<primary document_id\>". An `ExclusionRecord`-equivalent entry is written
+for each superseded member. When the toggle is `true`, superseded members are decomposed and
+indexed at salience tier `excluded` (recoverable via explicit filter).
+
 **Primacy flip (R5).** When the family's `primary` changes — a newer member arrives or an operator
 overrides — the change is **payload-only, not a rebuild**: the members' `dedup_role` and
 `document_status` flip (the new primary → `active`/`primary`; the previously-primary member →
-`superseded`), and a **metadata-only update job re-bakes `salience_tier`** on the affected
-documents' chunks in place (bytes and chunk IDs unchanged, no re-embed). This is the fifth reindex
-trigger in [index-lifecycle.md](../architecture/index-lifecycle.md) §7.5 and prevents the
-just-superseded document's chunks from continuing to be served at full tier (determinism review
-attack 5).
+`superseded`). If the superseded member was previously indexed (toggle was `true` or the member was
+the prior primary with full-tier chunks), a **metadata-only update job re-bakes `salience_tier`**
+on the affected documents' chunks in place (bytes and chunk IDs unchanged, no re-embed). This is
+the fifth reindex trigger in [index-lifecycle.md](../architecture/index-lifecycle.md) §7.5 and
+prevents the just-superseded document's chunks from continuing to be served at full tier
+(determinism review attack 5). If the toggle is `false`, the newly-superseded member's chunks are
+swept and the member is added to the exclusion report.
 
 ---
 
@@ -117,10 +126,13 @@ attack 5).
   `source_metadata` (§12 Inventory invariant).
 - Duplicate and version-family relationships are **explicit**: every item's `dedup_role` is set,
   and any non-`unique` role points to a group/family that lists it (§12).
-- In a `VersionFamily`, exactly one member is `primary`; all others are `superseded` and default
-  to index exclusion (§6.1). Superseded members are **retained**, never deleted (§6.1, design
-  principle 1). A `superseded` member carries `document_status=superseded`; a primacy flip updates
-  `dedup_role`, `document_status`, and the baked `salience_tier` via the metadata-only path (R5).
+- In a `VersionFamily`, exactly one member is `primary`; all others are `superseded`. Superseded
+  members are **retained** in object storage, never deleted (§6.1, design principle 1). **Default
+  (D-25, 2026-09-03):** superseded members produce no segments/chunks and appear in the exclusion
+  report. When `ingestion.dedup.index_superseded_versions=true`, they are decomposed and indexed at
+  tier `excluded`. A `superseded` member carries `document_status=superseded`; a primacy flip
+  updates `dedup_role`, `document_status`, and (where applicable) the baked `salience_tier` via the
+  metadata-only path (R5).
 - `document_status` is present on every item and reflects lifecycle state (`active`/`superseded`/
   `deleted`), distinct from the collection-time `collect_status`.
 - Failed and unreadable files are present with a `collect_status` and a reason, not omitted

@@ -283,22 +283,29 @@ left unhandled, the previously-primary document's chunks would remain at `primar
 tier and be served by default retrieval alongside the new primary — the "stale content served as
 authoritative" failure (determinism review attack 5).
 
-Handling: the primacy flip runs a **metadata-only update job** (§7.2) that re-bakes
-`salience_tier` on the affected documents' chunks in place — the newly-superseded document's chunks
-become `excluded`-tier, the new primary's chunks take full tier. Bytes and IDs are unchanged, so no
-full rebuild is needed. A §18.3-style test SHOULD assert that after a primacy flip, the
-superseded-document chunks are `excluded`-tier and absent from default retrieval. See
+Handling depends on the `ingestion.dedup.index_superseded_versions` toggle (owner ruling D-25,
+2026-09-03):
+
+- **Toggle `false` (default):** the newly-superseded document had no indexed chunks (it was already
+  excluded from the pipeline, or it was the prior primary whose chunks existed at full tier). If it
+  was the prior primary, its chunks are swept from the index by `source_document_id` payload-filter
+  delete (the same operation as a document deletion — §12.1). The new primary's chunks take full
+  tier. The newly-superseded document is added to the exclusion report.
+- **Toggle `true`:** a **metadata-only update job** (§7.2) re-bakes `salience_tier` on the
+  affected documents' chunks in place — the newly-superseded document's chunks become `excluded`-tier,
+  the new primary's chunks take full tier. Bytes and IDs are unchanged, so no full rebuild is needed.
+
+In both cases, a §18.3-style test SHOULD assert that after a primacy flip, the superseded-document
+chunks are absent from (or `excluded`-tier in) default retrieval. See
 [inventory.md](../contracts/inventory.md) version-family section.
 
 ---
 
 ## 8. Incremental upsert vs full rebuild
 
-> **PROPOSED — pending product-owner ruling on OQ-L-10.** This entire section describes the
-> orchestrator's proposed resolution of the incremental-upsert / C-4 / §10.5 conflict. The v1
-> DEFAULT below (clone-and-swap) honors both MUSTs; the opt-in direct-to-live mode explicitly
-> relaxes them. The spec-text disposition of C-4 still requires owner sign-off (see OQ-L-10 and the
-> decision ledger).
+**Decided 2026-09-03 (owner ruling, D-10 CLOSED).** v1 uses **clone-and-swap only**. The
+direct-to-live opt-in mode is rejected for v1 (see §8.3). C-4 stands as written; no spec
+amendment is needed because the shadow-only rule is now honored on every path.
 
 ### 8.1 When incremental upsert applies
 
@@ -308,10 +315,11 @@ Incremental upsert applies when:
 2. Only a subset of documents have changed content (detected via content hash).
 3. No documents have been deleted (or if deletions are pending, they are applied as part of the same incremental run).
 
-### 8.2 v1 DEFAULT — clone-and-swap incremental (shadow)
+### 8.2 v1 decided design — clone-and-swap incremental (shadow)
 
-The default incremental path is **clone-and-swap**, and it satisfies C-4 (ingestion writes only to
-a shadow) and §10.5 (no partial-state window) exactly as a full rebuild does:
+The incremental path is **clone-and-swap**. This is the only supported mode in v1. It satisfies
+C-4 (ingestion writes only to a shadow) and §10.5 (no partial-state window) exactly as a full
+rebuild does:
 
 1. **Snapshot live → shadow.** The current live collection is cloned into a new shadow collection
    (new `build_id` per §2.1). The shadow is a coherent copy of live; the live collection is not
@@ -329,26 +337,26 @@ a shadow) and §10.5 (no partial-state window) exactly as a full rebuild does:
 4. **Atomic alias retarget.** Promote the shadow with the same two-phase atomic alias swap as a full
    build (§4). Because the alias resolves to exactly one collection at any instant, **there is no
    dual-visibility window**: a query sees the old collection or the new one, never a mix. The
-   incremental path is thereby covered by §18.3 test 1 (alias swap under load — zero stale reads),
-   which the direct-to-live path evaded.
+   incremental path is thereby covered by §18.3 test 1 (alias swap under load — zero stale reads).
 
 **Cost amortization.** Cloning per single-document change would be wasteful, so change sets are
 **debounced**: pending replaces are batched and one clone-and-swap serves the batch. This keeps the
 per-swap cost bounded while preserving the no-partial-state guarantee.
 
-### 8.3 Opt-in performance mode — direct-to-live upsert
+### 8.3 Rejected alternative (v1) — direct-to-live upsert
 
-Direct-to-live upsert is an **explicitly opt-in** performance mode, not the default. When enabled,
-replace-by-document is applied directly to the live collection: the new version's chunks are
-written and the old chunks (matched by `source_document_id`) are deleted in a sequential two-step
-(Qdrant offers no cross-point transaction; OQ-L-4).
+**Rejected by owner 2026-09-03 (D-10 CLOSED).** A direct-to-live upsert mode was considered as
+an opt-in performance alternative. It was rejected for v1 because it violates C-4 ("the ingestion
+path MUST write to a shadow collection, never to the live one") and §10.5's no-partial-state
+requirement: writing and deleting chunks directly against the live collection creates a window
+during which both old and new versions of a document are simultaneously visible. These properties
+cannot be relaxed in v1 without evidence that the cost of clone-and-swap is a demonstrated
+problem. The mode may be revisited in a future version with supporting data.
 
-This mode **relaxes §10.5's no-partial-state window to the duration of the delete step** — during
-that window a query can momentarily see both the old and new version of the changed document — and
-it **bypasses C-4** (it writes to live, not to a shadow) and the pre-promotion validation gates
-(there is no alias swap, so §18.3 test 1's protection does not apply). Enabling it is a deliberate
-trade of the §10.5/C-4 guarantees for lower per-change latency and cost, and the UI/config MUST
-state this trade-off plainly at the point of opt-in.
+OQ-L-4 (Qdrant transactionality) is moot for v1: dual-visibility only existed in the rejected
+direct-to-live mode. Under clone-and-swap, all replaces happen in a shadow and promotion is an
+atomic alias swap, so there is no dual-visibility window requiring transactional protection.
+OQ-L-4 is marked resolved-by-ruling.
 
 ### 8.4 Orphan detection
 
@@ -528,10 +536,10 @@ The distinction between "deleted from service" and "purged from all copies" is v
 | OQ-L-1 | The two-phase alias swap has a window where Qdrant has been updated but the control-plane record has not. Recovery relies on comparing states at startup. Should a distributed transaction (saga with compensation) be used instead, or is the startup-reconciliation approach sufficient given that the window is typically sub-second? | Startup reconciliation is sufficient for v1. The control plane checks alias consistency on startup and after any promotion attempt. The saga pattern is correct but requires significant additional infrastructure (transaction log, compensating transactions). Flag for revisit if the inconsistency window causes operational problems. | YES |
 | OQ-L-2 | How long should a `VALIDATION_FAILED` shadow collection be retained before it is automatically purged? Too long wastes Qdrant memory; too short makes diagnosis impossible. | 7 days, then automatic cold snapshot and deletion from Qdrant. The operator is notified 24 hours before automatic purge. The shadow is tagged so it is never accidentally promoted. | YES |
 | OQ-L-3 | When the segment type taxonomy is revised (new types added, types merged), does this constitute a config version change that forces a full rebuild? For type additions, existing chunks simply don't have the new type and don't need to be invalidated. For type merges, existing chunks may be incorrectly typed. | Type additions: no forced rebuild; existing chunks are unaffected. Type merges or renames: forced rebuild, because the classification of existing chunks may be wrong. The config version hash should include a `taxonomy_version` field that the executor increments only on merge/rename operations. | YES |
-| OQ-L-4 | Qdrant does not currently support multi-document transactional writes (replace-by-document atomicity). The delete of old chunks and insert of new chunks is a sequential two-step. Is a partial state (new chunks written, old chunks not yet deleted) tolerable briefly, or must the operation be protected against concurrent reads seeing both versions? | **Applies ONLY to the opt-in direct-to-live mode (§8.3)**, not the v1 default. Under §8.2 clone-and-swap, the replaces happen in a shadow and promotion is an atomic alias swap, so there is **no** dual-visibility window. In the opt-in direct-to-live mode, the brief partial state is tolerable-by-acknowledgement: both old and new chunks are momentarily visible, bounded by the delete step; the opt-in docs state this relaxes §10.5 (§8.3). | YES |
+| OQ-L-4 | Qdrant does not currently support multi-document transactional writes (replace-by-document atomicity). The delete of old chunks and insert of new chunks is a sequential two-step. Is a partial state (new chunks written, old chunks not yet deleted) tolerable briefly, or must the operation be protected against concurrent reads seeing both versions? | **RESOLVED BY RULING (2026-09-03, D-10).** Moot for v1: dual-visibility only existed in the rejected direct-to-live mode (§8.3). Under the decided clone-and-swap design (§8.2), all replaces happen in a shadow and promotion is an atomic alias swap, so there is no dual-visibility window requiring transactional protection. | CLOSED |
 | OQ-L-5 | The spec says "Default: 1 hot + 2 cold. Executor may propose otherwise." Is 1+2 the right default for the reference hardware target (single-node Docker Compose)? The N-1 collection doubles the in-memory index size. For a corpus approaching the 5M-chunk reference scale, this is significant. | 1 hot + 2 cold is the specified default. The memory-cost display (§10.2) makes this explicit to the operator. For the reference hardware target, document this as requiring roughly 2× the baseline index RAM. The operator can reduce to 1+1 or 0+N if RAM is constrained; the UI warns when hot copies are reduced below 1 that instant rollback is unavailable. | YES |
 | OQ-L-6 | The Qdrant HNSW memory formula (vectors × dimensions × 4 bytes + HNSW graph) is an approximation that can vary based on quantization settings and HNSW parameters (m, ef_construct). How precisely should the memory estimate be presented? | Present as "approximately X GB" with a note that the estimate assumes no quantization and default HNSW parameters (m=16). If the KB is configured with scalar or product quantization, the estimate is adjusted using Qdrant's documented compression ratios. Flag if the actual usage diverges from the estimate by >20% in testing. | YES |
 | OQ-L-7 | During rollback to N-1, if N-1 was built with an embedding model that is no longer configured (e.g., the operator removed the OpenAI provider), queries will fail the model-identity check even after rollback. Should the rollback be blocked in this case, or should the rollback succeed and queries fail closed with a clear error? | Block the rollback with an error message that names the missing model and instructs the operator to re-configure it. A successful alias swap to a collection whose model is unavailable would result in every query failing, which is operationally worse than a blocked rollback. | YES |
 | OQ-L-8 | If the tombstone log has gaps (e.g., the database containing it was restored from a backup that predates some deletion events), the cold restore cannot guarantee complete deletion replay. What is the recovery procedure? | Flag this as a critical data integrity condition. The restore is aborted. The operator must manually verify what deletions are missing, apply them, and then re-initiate the restore. The purge operation (§12.2) is the safe path for right-to-erasure cases where tombstone completeness cannot be guaranteed. Document the tombstone log backup requirements in the operations runbook. | YES |
 | OQ-L-9 | The spec does not specify whether incremental upserts (§8) bypass the pre-promotion validation gates. Since incremental upserts write to the live collection directly (not a shadow), the validation gates do not apply by definition. Should a post-upsert validation step be run instead (lighter than the full gate suite)? | Yes: run a lightweight post-upsert check after every incremental run: orphan scan (§9.3), chunk count delta within expected bounds for the changed documents, and a log entry for the operation. Do not run the full eval baseline after every incremental upsert (too expensive for frequent small changes). Schedule a full validation run on the configured drift-detection cadence (§9.4). | YES |
-| OQ-L-10 | **Orchestrator-raised (review finding): the incremental-upsert design conflicts with two spec MUSTs and needs a product-owner ruling, not a design rationale.** (a) Constraint C-4: "the ingestion path MUST write to a shadow collection, never to the live one." (b) §10.5: "all chunks belonging to the previous version are removed in the same operation that writes the new ones; partial application is not an acceptable intermediate state." | **RULING PROPOSED — owner sign-off pending.** §8 has been rewritten (marked PROPOSED) so the v1 DEFAULT is **clone-and-swap incremental** (§8.2): snapshot live → shadow, apply document-granular replaces in the shadow, run the lightweight post-upsert checks (OQ-L-9), atomically retarget the alias. This honors C-4 and §10.5 and brings the incremental path under §18.3 test 1. **Direct-to-live upsert** is now an explicitly opt-in performance mode (§8.3) whose docs state it relaxes §10.5's no-partial-state window to the duration of the delete step and bypasses C-4. The remaining owner decision is the **spec-text disposition of C-4** — whether to amend C-4's literal wording or record the opt-in as a documented exception. Recorded as a PROPOSED ledger row for sign-off. | **ruling proposed, owner sign-off pending** |
+| OQ-L-10 | **Orchestrator-raised (review finding): the incremental-upsert design conflicts with two spec MUSTs and needs a product-owner ruling, not a design rationale.** (a) Constraint C-4: "the ingestion path MUST write to a shadow collection, never to the live one." (b) §10.5: "all chunks belonging to the previous version are removed in the same operation that writes the new ones; partial application is not an acceptable intermediate state." | **CLOSED 2026-09-03 (D-10).** Owner ruling: v1 uses clone-and-swap only (§8.2). Direct-to-live opt-in is rejected for v1 (§8.3). C-4 stands as written; no spec amendment needed. | CLOSED |

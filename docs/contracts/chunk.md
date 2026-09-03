@@ -199,9 +199,9 @@ prior-version chunks.** The manual's §3 is edited; its bytes change, so the doc
     only in `augmentation`/`embedding_input`. **This is exactly what §18.3 test 4 asserts.**
   - **Tier 3** may change `text` only with its recorded `tier=3, changed_text=true` flag; the
     pre-rewrite text is retained (§7.2).
-  - This byte-identity definition is subject to a PROPOSED §12 spec amendment (owner sign-off
-    pending; see the decision ledger). See also the `TransformationRecord` "Canonical source text"
-    invariant in [contracts/README.md](README.md).
+  - This byte-identity definition is the accepted interpretation of §12 (owner ruling 2026-09-03,
+    D-11 CLOSED). See also the `TransformationRecord` "Canonical source text" invariant in
+    [contracts/README.md](README.md).
 - **Tier 2 separation:** all augmentation is in `augmentation`/`embedding_input`, never in `text`
   (§7.2).
 - **Deterministic ID:** `chunk_id` derives solely from `document_id`, `content_hash`,

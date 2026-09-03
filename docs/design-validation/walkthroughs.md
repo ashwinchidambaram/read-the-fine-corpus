@@ -1046,15 +1046,30 @@ InventoryItem for leave-policy-v1.pdf:
 
 ### Stages 2–3 — Segment sets for superseded documents
 
-**OQ-11 reading assumed:** Superseded documents ARE decomposed into segments and embedded at
-tier `excluded` (the taxonomy OQ-11 proposed default). The alternative reading — that §6.1's
-"excluded from the index" means no segments are produced — would require an `ExclusionRecord`
-at the document level in the Segment set. This walkthrough follows the OQ-11 proposed default
-(everything is indexed; tier controls retrieval), which is the reading consistent with §6.3's
-salience-not-pruning invariant.
+**OQ-11 resolved (owner ruling 2026-09-03, D-25):** The assumed §6.3 reading (superseded
+docs indexed at `excluded` tier) was superseded by this ruling. **Default behaviour** now
+follows §6.1: superseded documents produce **no segments and no chunks**. They are inventoried,
+retained in object storage, and appear in the exclusion report with reason "superseded by
+\<primary document_id\>". The `ingestion.dedup.index_superseded_versions` toggle (default
+`false`) enables the `excluded`-tier indexing path when set to `true`.
 
 ```
-SegmentSet for leave-policy-v2.pdf (superseded):
+SegmentSet for leave-policy-v2.pdf (superseded, default behaviour):
+  segments: []
+  exclusions:
+    - exclusion_id     : "01JEXCL_V2"
+      source_region_ids: ["01JREG_V2_ALL"]
+      reason           : "superseded"
+      reason_detail    : "Document superseded by primary document_id=01JPOL_V3. Retained in object storage; not indexed. Enable ingestion.dedup.index_superseded_versions to index at excluded tier."
+      reversible       : true
+
+SegmentSet for leave-policy-v1.pdf (superseded, default behaviour):
+  # same pattern
+```
+
+When `ingestion.dedup.index_superseded_versions=true` (toggled on):
+```
+SegmentSet for leave-policy-v2.pdf (superseded, toggle enabled):
   segments:
     [0] prose segment:
           segment_id           : "01JSEG_V2_P0"
@@ -1064,13 +1079,10 @@ SegmentSet for leave-policy-v2.pdf (superseded):
           structural_path      : ["1. Purpose"]
           ...
           text                 : "This policy governs employee leave entitlements..."
-
-SegmentSet for leave-policy-v1.pdf (superseded):
-  # same pattern; all segments salience_tier: "excluded"
 ```
 
 ```
-SegmentSet for leave-policy-v3.pdf (primary — normal processing):
+SegmentSet for leave-policy-v3.pdf (primary — normal processing, both modes):
   segments:
     [0] prose segment:
           salience_tier  : "primary"             # primary version, full tier
@@ -1082,24 +1094,23 @@ SegmentSet for leave-policy-v3.pdf (primary — normal processing):
 ### Stage 5 — Chunks
 
 Primary version (v3) produces chunks at `salience_tier: "primary"` or `"supporting"` per
-segment type. Superseded versions (v2, v1) produce chunks at `salience_tier: "excluded"`.
-All chunks for all versions are indexed. Default retrieval filters `excluded` out. An explicit
-filter (e.g., `salience_tier in [primary, supporting, excluded]`) can retrieve superseded
-content — enabling version-family queries like "what changed between v1 and v3?"
+segment type.
 
-**FINDING [W-2]:** OQ-11 exposes a genuine spec tension between §6.1 ("excluded from the
-index by default") and §6.3 (salience tiering, not pruning — everything indexed). The schema
-CAN represent either reading (excluded tier is present; document-level ExclusionRecord is
-also present in the SegmentSet contract). But the two readings produce different pipeline
-outputs for the same input, and the correct reading is unresolved. This walkthrough assumes
-the OQ-11 proposed default (index at `excluded` tier), but an implementation following the
-§6.1 literal ("not in the index") would instead produce an `ExclusionRecord` for the whole
-document and zero chunks for superseded documents. The spec text must be resolved before
-Phase 2. Severity: high (architectural divergence).
+**Default:** superseded versions (v2, v1) produce **no chunks**. They appear in the exclusion
+report only.
 
-**Verdict for Case 5:** FINDING (W-2 — OQ-11 spec tension; both §6.1 and §6.3 interpretations
-are schema-representable, but they produce incompatible outputs; reading assumed: §6.3
-salience-tiering, superseded docs indexed at `excluded` tier).
+**When toggle enabled:** superseded versions produce chunks at `salience_tier: "excluded"`.
+Default retrieval filters `excluded` out. An explicit filter (e.g.,
+`salience_tier in [primary, supporting, excluded]`) can retrieve superseded content — enabling
+version-family queries like "what changed between v1 and v3?"
+
+**W-2 (resolved):** OQ-11 spec tension between §6.1 and §6.3 was resolved by owner ruling
+2026-09-03 (D-25). Default expectations now follow §6.1: superseded docs produce no chunks
+unless the per-KB toggle is enabled. The schema can represent both paths; the ruling picks the
+default.
+
+**Verdict for Case 5:** REPRESENTABLE (W-2 resolved by owner ruling D-25; default: no chunks
+for superseded docs; toggled: `excluded`-tier chunks). No architectural ambiguity remains.
 
 ---
 
@@ -1197,19 +1208,15 @@ Steps 2 and 3 are executed as a single atomic operation against the shadow colle
 No chunk from `content_hash = "9f2c...e0"` can survive. Orphan detection runs after and
 confirms zero orphans. Case (c) from chunk.md holds as written.
 
-**FINDING [W-4] (OQ-L-10 propagated):** The chunk.md and index-lifecycle.md describe the
-replace-by-document operation as a write to "the shadow collection" for full rebuilds but §8.2
-of index-lifecycle.md describes incremental upserts writing directly to the live collection.
-This conflicts with constraint C-4 ("ingestion path MUST write to a shadow collection, never
-to the live one"). For the §10.5 edit scenario specifically: if the edit triggers an incremental
-upsert (config unchanged, single document changed), C-4 is violated. OQ-L-10 in
-index-lifecycle.md flags this as a blocking design-review item. The schema can represent the
-correct outcomes either way, but the operational path — and whether it satisfies C-4 — is
-unresolved. Severity: high (spec conflict, not just documentation gap).
+**W-4 (resolved by owner ruling D-10, 2026-09-03):** OQ-L-10 has been closed. Clone-and-swap
+is the decided v1 design (index-lifecycle §8.2). For the §10.5 edit scenario: an incremental
+upsert (config unchanged, single document changed) uses clone-and-swap — the changes are applied
+in a shadow collection and promoted via atomic alias swap. C-4 is honored on every path.
+Direct-to-live was rejected (§8.3). No spec conflict remains.
 
 **Verdict for Case 6:** FINDING (W-3 — case (a) label in chunk.md is misleading about cross-
-version ID stability; W-4 — incremental-upsert path conflicts with C-4; chunk ID derivation
-is otherwise correct and all three cases hold as written).
+version ID stability; W-4 resolved — incremental-upsert path uses clone-and-swap, C-4 honored.
+Chunk ID derivation is correct and all three cases hold as written).
 
 ---
 
@@ -1309,9 +1316,9 @@ EvalQuestion `review_status` enum missing `source_deleted`; W-7 — §17.1 and i
 | ID | Case | What failed or was ambiguous | Severity |
 |---|---|---|---|
 | W-1 | 1 (Bloated manual) | `boilerplate_strip` as a Tier 1 operation conflicts with the byte-identity invariant. The chunk contract requires `changed_text=false` for all Tier 1 ops, but stripping boilerplate removes bytes from `text`. A Tier 1 op that removes content either violates the invariant or produces an empty/absent chunk. The segment-taxonomy says boilerplate is stripped "from the text field" at Build, which implies `text` changes, but `changed_text` must be `false`. Resolution needed: either (a) designate boilerplate-strip as a Tier 1.5 or special case with `changed_text=true` allowed, (b) define boilerplate segments as producing no chunk (empty chunks excluded), or (c) store the stripped text in `augmentation` not `text`. | high |
-| W-2 | 5 (Near-duplicate family) | OQ-11: §6.1 says superseded documents are "excluded from the index by default"; §6.3 mandates everything-is-indexed with tier controlling retrieval. The schema can represent both interpretations, but they produce incompatible pipeline outputs. An implementation following §6.1 literally produces no segments/chunks for superseded docs; one following §6.3 philosophy produces `excluded`-tier segments/chunks. The spec text must be resolved. | high |
+| W-2 | 5 (Near-duplicate family) | **RESOLVED** — OQ-11 spec tension closed by owner ruling 2026-09-03 (D-25). Default: superseded docs produce no segments/chunks and appear in the exclusion report with reason "superseded by \<primary document_id\>". Toggle `ingestion.dedup.index_superseded_versions=true` enables `excluded`-tier indexing. The assumed §6.3 reading in the original walkthrough was superseded by this ruling. | resolved |
 | W-3 | 6 (§10.5 edit) | chunk.md case (a) is labelled "unchanged chunk keeps its ID across runs" but the mechanism is that `content_hash` and `config_version` are both unchanged — i.e., the same document VERSION under the same config. An edited document rotates ALL chunk IDs including unchanged-text chunks (because `content_hash` is document-wide). The label misleads: text-stability ≠ ID-stability across document versions. Documentation needs a clarifying sentence. | low |
-| W-4 | 6 (§10.5 edit) | Incremental upsert (index-lifecycle §8.2) writes directly to the live collection, violating C-4 ("ingestion path MUST write to a shadow collection, never to the live one"). OQ-L-10 in index-lifecycle.md flags this as a blocking design-review item needing product-owner ruling. The schema is sound; the operational path is contradicted by a MUST constraint. | high |
+| W-4 | 6 (§10.5 edit) | **RESOLVED** — OQ-L-10 closed by owner ruling D-10 (2026-09-03): clone-and-swap is the decided v1 design (index-lifecycle §8.2); direct-to-live opt-in rejected (§8.3). C-4 stands as written and is honored on every incremental path. No violation. | resolved |
 | W-5 | 7 (Deletion) | `InventoryItem` has no field to record post-ingestion deletion. `collect_status` covers collection-time failures only. §17.1 says documents are "marked `deleted` in the control-plane inventory" but the Inventory contract schema has no `document_status` or equivalent field. A deleted document is indistinguishable from an active one in the contract schema. | medium |
 | W-6 | 7 (Deletion) | `EvalQuestion.review_status` enum (`unreviewed, reviewed_kept, reviewed_edited, reviewed_rejected`) has no `source_deleted` value, but index-lifecycle §12.1 says eval questions from deleted documents are "marked `source_deleted`." The eval-set contract cannot represent this state without a schema addition (new enum member or new boolean field). | medium |
 | W-7 | 7 (Deletion) | §17.1 says eval questions derived from a deleted document must be "removed." Index-lifecycle §12.1 says they are "marked `source_deleted`…not removed, to preserve the eval set's history." These are contradictory directives. The schema cannot satisfy both. The spec must pick one and the contract must be updated accordingly. | medium |
@@ -1350,7 +1357,10 @@ each case. Specifically:
 
 5. **Case 5** — The version family must appear as a `VersionFamily` in the Inventory with
    `primacy_basis: "source_modified_at"`. Superseded documents must have `dedup_role:
-   "superseded"`. Under the OQ-11 proposed default, superseded segments must have
+   "superseded"`. **Default behaviour (D-25, owner ruling 2026-09-03):** superseded documents
+   produce no segments and no chunks; their `SegmentSet.exclusions` must each carry one record
+   with `reason: "superseded"` and `reason_detail` naming the primary document_id. When
+   `ingestion.dedup.index_superseded_versions=true`, superseded segments must have
    `salience_tier: "excluded"` and their chunks must be present in the index.
 
 6. **Case 6** — The old chunk's canonical string must be reconstructable from its provenance
@@ -1363,6 +1373,7 @@ each case. Specifically:
    collection. The tombstone log must contain an entry with `subject_id: "01JMANUAL0001"` and
    `deletion_type: "document"`.
 
-Findings W-1 through W-7 are open issues that MUST be resolved before Phase 2 implementation
+Findings W-2 and W-4 are resolved by owner rulings D-25 and D-10 respectively (2026-09-03).
+Findings W-1, W-3, W-5, W-6, W-7 remain open and MUST be resolved before Phase 2 implementation
 begins. Resolution of each finding MUST produce a contract version bump (at minimum PATCH;
 MINOR or MAJOR as appropriate to the field change) and an ADR or spec-correction note.

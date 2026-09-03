@@ -1,6 +1,6 @@
 # Data Contracts
 
-Status: **proposed** (design review pending). Governing spec: §12 (terms of reference), §8
+Status: **accepted** (design review complete; D-11 closed 2026-09-03). Governing spec: §12 (terms of reference), §8
 (provenance invariant), §5 (pipeline), §10.5 (chunk identity).
 
 The inter-stage data contracts are the load-bearing artifacts of Read The Fine Corpus. Each
@@ -187,9 +187,10 @@ Invariants:
   - Byte-identity is therefore checked against the Tier-1-normalized canonical source, with the
     ordered `transformations` list (and its per-op `changed_text` flags) as the audit trail from
     raw original to served `text`.
-  - This definition is subject to a PROPOSED spec amendment (see the decision ledger row for §12):
-    the literal "byte-identical to source" is proposed to mean "byte-identical to the
-    Tier-1-normalized canonical source." Owner sign-off pending.
+  - This definition is the accepted interpretation of spec §12 (owner ruling 2026-09-03,
+    D-11 CLOSED): the literal "byte-identical to source" means "byte-identical to the
+    Tier-1-normalized canonical source." Every Tier 1 op is recorded with its own `changed_text`
+    flag in provenance; the raw original is always retained and addressable via `source_location`.
 
 ### Provenance block (`Provenance`)
 

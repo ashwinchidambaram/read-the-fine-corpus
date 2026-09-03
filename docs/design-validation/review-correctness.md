@@ -8,7 +8,7 @@ docs/contracts/README.md, docs/contracts/chunk.md, docs/contracts/eval-set.md,
 docs/contracts/ingestion-config.md, docs/contracts/inventory.md,
 docs/contracts/parse-result.md, docs/contracts/segment-set.md
 **Ground truth:** spec-read-the-fine-corpus.md §5–§12 and §15
-**Pre-existing flagged items not re-reported:** OQ-L-10 (incremental-upsert vs C-4/§10.5); OQ-11 (superseded-duplicate §6.1-vs-§6.3 tension)
+**Pre-existing flagged items not re-reported:** OQ-L-10 (incremental-upsert vs C-4/§10.5 — **resolved by owner ruling D-10, 2026-09-03**: clone-and-swap only; direct-to-live rejected); OQ-11 (superseded-duplicate §6.1-vs-§6.3 tension — **resolved by owner ruling D-25, 2026-09-03**: superseded docs not indexed by default; toggle available)
 
 ---
 

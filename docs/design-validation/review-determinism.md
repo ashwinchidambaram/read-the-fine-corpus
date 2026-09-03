@@ -214,8 +214,9 @@ user-chosen A).
 
 **Trace.**
 - `dedup_role` is an **Inventory** field, and `salience_tier=excluded` for superseded members is a
-  **SegmentSet/payload** field (taxonomy §4.1 explicit exclusion / OQ-11: superseded → tier
-  `excluded`, indexed-but-filtered).
+  **SegmentSet/payload** field (taxonomy §4.1 explicit exclusion; OQ-11 resolved D-25, 2026-09-03:
+  by default, superseded docs produce no chunks; when `ingestion.dedup.index_superseded_versions=true`,
+  superseded → tier `excluded`, indexed-but-filtered — this attack applies in that toggled path).
 - Neither `dedup_role` nor `salience_tier` is in the chunk-ID canonical string. Neither is in
   `config_version` (config_version excludes retrieval treatment AND does not include per-document
   dedup role). And doc_B's `content_hash` is unchanged.
@@ -428,20 +429,11 @@ new, never a mix. This restores the §10.5 "no partial state" guarantee and brin
 path under §18.3 test 1's protection. The **direct-to-live mode** (OQ-L-10's opt-in) remains a
 BREAK of §10.5's letter and must be documented as such.
 
-**Verdict: BREAKS as designed (default per §8.2/OQ-L-4); HELD only if OQ-L-10 clone-and-swap is
-adopted as the v1 default.** The reviewed §8.2 + OQ-L-4 default violates §10.5's "no partial
-intermediate state" and evades §18.3 test 1 (no alias swap on the direct-to-live path). OQ-L-10's
-clone-and-swap is sufficient to close it but is currently a *recommendation awaiting product-owner
-ruling*, and it explicitly notes C-4 ("ingestion writes only to shadow") is *also* violated by
-§8.2. §18.3 test 1 as written targets the alias-swap path and would MISS a direct-to-live
-dual-visibility read unless the concurrency test specifically drives queries through an incremental
-upsert. Severity: high — this is the canonical "stale returned alongside current" failure §10.5 is
-written to prevent, present by default.
-
-**Required design change:** adopt OQ-L-10 clone-and-swap as the v1 default (not opt-in); if
-direct-to-live is retained, gate it behind explicit opt-in AND add a concurrency test that drives
-sustained queries through an in-flight incremental upsert asserting no old+new mix for the changed
-document.
+**Verdict: HELD (owner ruling D-10, 2026-09-03).** Clone-and-swap is the decided v1 design
+(index-lifecycle §8.2). Direct-to-live opt-in was rejected (§8.3). There is no dual-visibility
+window on the decided path: replaces happen in a shadow and promotion is an atomic alias swap,
+bringing the incremental path under §18.3 test 1's protection. OQ-L-4 is resolved-by-ruling (moot
+for v1). C-4 stands as written and is honored on every path.
 
 ---
 
@@ -457,7 +449,7 @@ document.
 | 6 | Tombstone replay vs config change | HOLDS*/BREAKS (config-crossing) | High | Pin tombstone replay to `subject_id` (document_id), config-invariant; `chunk_ids_affected` is audit-only; extend test 8 with an interleaved config change. |
 | 7 | Boilerplate strip + reassembly | HOLDS (reassembly/ID); BREAKS (byte-identity wording) | low-med | Record Tier-1 boilerplate_strip as a `changed_text=true` transformation, OR strip only `embedding_input` not served `text`. |
 | 8 | Config-version scope | **BREAKS** | High | Fold class-description text (feeds embedded `class_context` + baked `salience_tier`) into `config_version`; add config-version-scope test. |
-| 9 | chunk_index / dual-visibility interleave | **BREAKS** (default); HELD under OQ-L-10 | High | Adopt OQ-L-10 clone-and-swap as v1 default; if direct-to-live retained, gate opt-in + concurrency test through an in-flight upsert. |
+| 9 | chunk_index / dual-visibility interleave | **HELD** (owner ruling D-10, 2026-09-03: clone-and-swap is the v1 default; direct-to-live rejected) | High (resolved) | Clone-and-swap adopted as the only v1 mode (index-lifecycle §8.2). Direct-to-live opt-in rejected (§8.3). No dual-visibility window on the decided path. |
 
 \* HOLDS for the invariant, but with a documentation inconsistency (1) or a config-crossing latent
 break (6) that must be closed.
@@ -476,8 +468,8 @@ produces the same IDs on every run" — rests on an **un-pinned link**: `segment
 listed will catch it. Compounding this, the design has three further high-severity gaps that all
 reproduce §10.5's own stated failure mode ("stale content returned as authoritative") through paths
 §10.5 doesn't police: config-version under-inclusion of class descriptions/baked salience (Attack
-8), the missing primacy-flip trigger (Attack 5), and the default direct-to-live dual-visibility
-window that OQ-L-10 already flags as a spec conflict (Attack 9). §10.5's *intent* holds; §10.5 *as
-designed across these contracts* does not, until Decompose is made deterministic-by-construction,
-`config_version` is widened to every embedded/baked input, replay and primacy are made
-config-invariant and triggered, and clone-and-swap becomes the incremental default.
+8), and the missing primacy-flip trigger (Attack 5). Attack 9 (dual-visibility window) is resolved
+by owner ruling D-10 (2026-09-03): clone-and-swap is the decided v1 design; direct-to-live is
+rejected. §10.5's *intent* holds; §10.5 *as designed across these contracts* does not, until
+Decompose is made deterministic-by-construction, `config_version` is widened to every
+embedded/baked input, and replay and primacy are made config-invariant and triggered.
