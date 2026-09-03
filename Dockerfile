@@ -9,7 +9,7 @@
 # Usage:
 #   docker build --build-arg SERVICE=retrieval-api -t rtfc/retrieval-api .
 
-ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.7-python3.12-bookworm-slim
+ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.7.21-python3.12-bookworm-slim
 
 # ---------------------------------------------------------------------------
 # Stage 1: build — install dependencies with uv

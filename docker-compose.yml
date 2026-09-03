@@ -43,7 +43,7 @@ services:
 
   # C-2: no `ports:` block — Qdrant is internal-only
   qdrant:
-    image: qdrant/qdrant:latest
+    image: qdrant/qdrant:v1.15.1
     restart: unless-stopped
     volumes:
       - qdrant-data:/qdrant/storage
@@ -59,7 +59,7 @@ services:
       start_period: 20s
 
   minio:
-    image: minio/minio:latest
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
@@ -80,7 +80,7 @@ services:
 
   # One-shot job: create the default bucket after MinIO is healthy
   minio-init:
-    image: minio/mc:latest
+    image: minio/mc:RELEASE.2025-08-13T08-35-41Z
     depends_on:
       minio:
         condition: service_healthy
@@ -163,9 +163,6 @@ services:
       SERVICE: embedding-service
     networks:
       - rtfc-internal
-    depends_on:
-      postgres:
-        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz', timeout=4)\""]
       interval: 15s
@@ -199,10 +196,13 @@ services:
         condition: service_completed_successfully
       embedding-service:
         condition: service_healthy
-    # Worker has no HTTP server; check that the process is alive via pgrep
+    # Worker has no HTTP server; confirm liveness via a heartbeat file that the
+    # loop touches each iteration.  A hung worker stops updating the file and
+    # goes unhealthy within ~90 s (interval 30 s × retries 3).
     healthcheck:
-      test: ["CMD-SHELL", "pgrep -f 'finecorpus.services.ingest_worker' > /dev/null"]
+      test: ["CMD", "python", "-c",
+             "import pathlib, time; p=pathlib.Path('/tmp/worker-heartbeat'); assert p.exists() and (time.time()-p.stat().st_mtime)<90"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      start_period: 60s
