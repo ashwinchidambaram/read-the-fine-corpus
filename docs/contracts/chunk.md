@@ -103,7 +103,7 @@ chunk_id = "chk_" + base32_nopad( sha256( canonical.encode("utf-8") ) )[:26]
 
 - **sha256** of the UTF-8 canonical string.
 - Encode the digest in lowercase **base32 without padding**, take the first 26 chars, prefix
-  `chk_`. Result is a stable, URL-safe, human-recognizable ID, e.g. `chk_ab3f...` (32 chars total).
+  `chk_`. Result is a stable, URL-safe, human-recognizable ID, e.g. `chk_ab3f...` (30 chars total).
 - 26 base32 chars = 130 bits of the digest, collision-negligible at 5M chunks (§4.5 scale).
 
 ### Vector-DB point ID mapping
