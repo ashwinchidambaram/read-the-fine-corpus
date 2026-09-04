@@ -215,7 +215,11 @@ class TestContractVersionRejection:
 
         stage = AssessStage()
         result = stage.run(input_data=valid_inventory, store=store)
-        assert result["schema_version"] == "1.0.0"
+        # Phase 2: schema_version bumped to 1.1.0 (MINOR — added version_families /
+        # boilerplate_blocks).  Accept any 1.x.y.
+        assert result["schema_version"].startswith("1."), (
+            f"Expected major version 1, got: {result['schema_version']}"
+        )
 
     def test_assess_rejects_wrong_major(self, tmp_path):
         """AssessStage must reject major version 2 (different breaking version)."""

@@ -92,11 +92,18 @@ class TestAllArtifactsExistAndValidate:
     def test_assess_loads_as_parse_result_batch(self, pipeline_run):
         store: ArtifactStore = pipeline_run["store"]
         batch = store.load_with_model_validation("assess", ParseResultBatch)
-        assert batch.schema_version == "1.0.0"
+        # Phase 2: bumped to 1.1.0 (MINOR — added version_families / boilerplate_blocks).
+        # Accept any 1.x.y — consumers declare min_minor=0 so all 1.x are valid.
+        assert batch.schema_version.startswith("1."), (
+            f"Expected major-1 schema_version, got: {batch.schema_version}"
+        )
         # Phase 1: real implementation — skeleton is None (not a skeleton pass-through)
         assert batch.skeleton is not True, (
             "Assess stage should be a real implementation in Phase 1 (skeleton=None)"
         )
+        # Phase 2: corpus-level fields present (may be empty lists for small/single-doc runs)
+        assert isinstance(batch.version_families, list), "version_families must be a list"
+        assert isinstance(batch.boilerplate_blocks, list), "boilerplate_blocks must be a list"
 
     def test_decompose_loads_as_segment_set_batch(self, pipeline_run):
         store: ArtifactStore = pipeline_run["store"]
