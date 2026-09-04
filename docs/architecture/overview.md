@@ -11,7 +11,7 @@ thin consumer (constraint C-5).
 
 | Service | Process | Responsibility | Scaling |
 |---|---|---|---|
-| `retrieval-api` | FastAPI | All query traffic: REST, **MCP server** (in-process, same auth and tenancy path), explain mode. Sole owner of the vector-DB connection pool. Stateless (C-1). | Horizontal replicas behind LB |
+| `retrieval-api` | FastAPI | All query traffic. **Phase 1**: dense-only REST (`POST /v1/kb/{id}/query`). **Phase 3+**: MCP server (in-process), explain mode. Sole owner of the vector-DB connection pool. Stateless (C-1). | Horizontal replicas behind LB |
 | `ingest-worker` | worker loop | Pipeline stages Collect→Build. Queue-driven, checkpointed, resumable. Never in the request path. | Worker count |
 | `embedding-service` | FastAPI | Provider abstraction, request batching, query-embedding cache. Shared by ingestion and retrieval. | Horizontal; batch tuning |
 | `control-api` | FastAPI | Tenancy, RBAC, break-glass, config, job orchestration, audit log, cost accounting. | Horizontal |

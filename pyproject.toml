@@ -58,6 +58,7 @@ source_modules = [
     "finecorpus.config",
     "finecorpus.index",
     "finecorpus.control",
+    "finecorpus.retrieval",
 ]
 forbidden_modules = [
     "finecorpus.cli",
@@ -65,11 +66,11 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
-name = "C-5: layers — cli/services sit above pipeline above config/index above embedding above control/contracts"
+name = "C-5: layers — cli/services above retrieval/pipeline above config/index above embedding above control/contracts"
 type = "layers"
 layers = [
     "finecorpus.cli | finecorpus.services",
-    "finecorpus.pipeline",
+    "finecorpus.retrieval | finecorpus.pipeline",
     "finecorpus.config | finecorpus.index",
     "finecorpus.embedding",
     "finecorpus.control | finecorpus.contracts",

@@ -116,7 +116,9 @@ SUPPORTED_INGESTION_CONFIG = SpecRange(major=1, min_minor=1)
 """Ingestion-config consumer range — bumped to 1.1 with addition of ChunkingConfig.tokenizer."""
 SUPPORTED_CHUNK = SpecRange(major=1, min_minor=0)
 SUPPORTED_EVAL_SET = SpecRange(major=1, min_minor=0)
-SUPPORTED_RETRIEVAL_RESPONSE = SpecRange(major=1, min_minor=0)
+SUPPORTED_RETRIEVAL_RESPONSE = SpecRange(major=1, min_minor=1)
+"""Retrieval-response consumer range — bumped to 1.1 with addition of
+CONTROL_PLANE_UNAVAILABLE and PAYLOAD_CORRUPT error codes."""
 
 
 def check_version(contract: str, schema_version: str, spec_range: SpecRange) -> None:

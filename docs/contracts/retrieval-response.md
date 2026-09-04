@@ -71,14 +71,22 @@ error rather than degrading to a different model or an unscoped search.
 
 ```
 enum ErrorCode {
-    EMBEDDING_MODEL_MISMATCH,   # query embedded with a model != the alias's model identity — fail closed (§15, provider-abstraction §3.3)
-    VECTOR_DB_UNAVAILABLE,      # Qdrant unreachable — fail closed, do not serve stale/unscoped (§15)
-    PROVIDER_UNAVAILABLE,       # embedding provider down at query time — fail closed, no model fallback (§15)
-    KB_NOT_READY,               # alias points at nothing yet (index-lifecycle §2.2)
-    PERMISSION_DENIED,          # authenticated principal has no access to the requested scope
-    INVALID_QUERY,              # malformed request
+    EMBEDDING_MODEL_MISMATCH,    # query embedded with a model != the alias's model identity — fail closed (§15, provider-abstraction §3.3)
+    VECTOR_DB_UNAVAILABLE,       # Qdrant unreachable — fail closed, do not serve stale/unscoped (§15)
+    PROVIDER_UNAVAILABLE,        # embedding provider down at query time — fail closed, no model fallback (§15)
+    KB_NOT_READY,                # alias points at nothing yet (index-lifecycle §2.2)
+    PERMISSION_DENIED,           # authenticated principal has no access to the requested scope
+    INVALID_QUERY,               # malformed request
+    CONTROL_PLANE_UNAVAILABLE,   # control-plane database (Postgres) unreachable — fail closed, retriable (schema v1.1)
+    PAYLOAD_CORRUPT,             # a point payload is missing source_document_id or source_document_version — never fabricated (schema v1.1)
 }
 ```
+
+**Schema version note**: `CONTROL_PLANE_UNAVAILABLE` and `PAYLOAD_CORRUPT` were added in schema
+version 1.1 (backward-compatible MINOR bump per the contract versioning discipline in
+[README.md](README.md#contract-versioning)).  Consumers that declared `SpecRange(major=1,
+min_minor=0)` must update to `SpecRange(major=1, min_minor=1)` to handle the new codes.
+The `SUPPORTED_RETRIEVAL_RESPONSE` constant in `contracts/versions.py` has been updated accordingly.
 
 `EMBEDDING_MODEL_MISMATCH` and `VECTOR_DB_UNAVAILABLE` are called out explicitly because they are
 the two §15 fail-closed paths most likely to be mishandled as "empty result"; they MUST surface as
