@@ -363,6 +363,10 @@ class SalienceSignalKind(StrEnum):
     """§6.5 LLM classification against the class description."""
     boilerplate_detection = "boilerplate_detection"
     """§6.2 corpus-wide boilerplate machinery."""
+    superseded_version = "superseded_version"
+    """D-25: segment belongs to a superseded near-duplicate document indexed at excluded tier.
+    Applied by SupersededVersionPass when ingestion.dedup.index_superseded_versions=True.
+    Wins over all type-prior and boilerplate signals (highest structural precedence)."""
     ocr_confidence_warn = "ocr_confidence_warn"
     """OCR between floor and warning level → supporting + flag."""
     segment_type_prior = "segment_type_prior"
