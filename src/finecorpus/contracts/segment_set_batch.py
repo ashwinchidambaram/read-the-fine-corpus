@@ -20,11 +20,12 @@ it is omitted (None) in real runs.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, Field
 
-from finecorpus.contracts.versions import SpecRange
+from finecorpus.contracts.versions import SUPPORTED_SEGMENT_SET_BATCH  # noqa: F401
 
 # ---------------------------------------------------------------------------
 # Version constants
@@ -33,9 +34,9 @@ from finecorpus.contracts.versions import SpecRange
 BATCH_SCHEMA_VERSION = "1.0.0"
 """Version stamped on every SegmentSetBatch produced by DecomposeStage."""
 
-SUPPORTED_SEGMENT_SET_BATCH = SpecRange(major=1, min_minor=0)
-"""Versions that PlanStage accepts.  Bumping this range is a MINOR change;
-removing a field or changing semantics is a MAJOR change (see contracts/README.md)."""
+# SUPPORTED_SEGMENT_SET_BATCH is the authoritative SpecRange; it lives in
+# finecorpus.contracts.versions (the single inspectable compatibility matrix).
+# Re-exported here for backward-compatibility with any direct imports.
 
 
 # ---------------------------------------------------------------------------
@@ -61,6 +62,18 @@ class SegmentSetBatch(BaseModel):
     contract: str = Field(
         default="segment_set_batch",
         description="Nominal contract name for this artifact.",
+    )
+    run_id: str = Field(
+        description=(
+            "Pipeline run identifier (§12 traceability). "
+            "Threaded from the orchestrator; matches ArtifactStore.run_id."
+        )
+    )
+    produced_at: datetime = Field(
+        description=(
+            "When DecomposeStage produced this batch (UTC). "
+            "Uses run_started_at from the orchestrator — not wall-clock — for determinism."
+        )
     )
     skeleton: bool | None = Field(
         default=None,

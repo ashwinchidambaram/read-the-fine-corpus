@@ -111,7 +111,7 @@ carried into a segment is accounted for here.
 | `exclusion_id` | `str` (ULID) | yes | Identity. |
 | `location` | `SourceLocation` | yes | The excluded span in the source. |
 | `source_region_ids` | `list[str]` | yes | Regions excluded, for coverage accounting. |
-| `reason` | `enum{unservable_content, spreadsheet_database, spreadsheet_model, encrypted, empty_region, superseded_version, duplicate, parse_failed, other}` | yes | Why excluded (§7.5, §6.4). |
+| `reason` | `enum{unservable_content, spreadsheet_database, spreadsheet_model, encrypted, empty_region, superseded_version, duplicate, parse_failed, too_short, other}` | yes | Why excluded (§7.5, §6.4). `too_short` = content span below the minimum segment length threshold (added schema_version 1.1.0). |
 | `reason_detail` | `str` | no | Plain-language detail for the exclusion report (§7.5). |
 | `reversible` | `bool` | yes | Whether the original is retained and the exclusion can be undone (§1.4 principle 1). Always `true` in v1 — exclusion never destroys source. |
 

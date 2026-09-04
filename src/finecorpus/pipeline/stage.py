@@ -84,10 +84,10 @@ class Stage(ABC):
         """
         # 1. Validate input contract version
         # Only perform version checking when a consumed_version_range is declared.
-        # Stages that consume pipeline-internal envelope contracts (not the six
-        # official contracts from §12) set consumed_version_range=None to opt out
-        # of the check_version call; the ArtifactStore's load() still ensures
-        # schema_version is present and the JSON is well-formed.
+        # consumed_version_range=None means the stage has no consumed contract at all
+        # (e.g. CollectStage, which is the pipeline entry point and receives no upstream
+        # artifact). Every stage that consumes a §12 contract MUST declare a SpecRange
+        # and will have it checked here; there is no opt-out for "internal envelopes".
         if (
             self.consumed_contract is not None
             and self.consumed_version_range is not None

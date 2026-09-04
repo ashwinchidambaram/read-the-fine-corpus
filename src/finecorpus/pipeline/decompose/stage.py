@@ -460,9 +460,50 @@ def _decompose_parsed_document(
                             }
                         )
                     doc_order += 1
+                elif remaining_text:
+                    # Post-heading remainder is too short to segment — record as exclusion (F-02)
+                    excl_suffix = f"short-remainder-{region_id}-{para_idx}"
+                    exclusions.append(
+                        ExclusionRecord(
+                            exclusion_id=_exclusion_id(document_id, excl_suffix),
+                            location=seg_loc,
+                            source_region_ids=[region_id],
+                            reason=ExclusionReason.too_short,
+                            reason_detail=(
+                                f"Post-heading remainder ({len(remaining_text)} chars) "
+                                f"below minimum segment length ({_MIN_SEGMENT_CHARS} chars). "
+                                "Recorded as exclusion per §12 (no silent content loss)."
+                            ),
+                            reversible=True,
+                        )
+                    )
             else:
                 # Not a heading paragraph — classify and emit as prose/front_matter/unknown
-                if not para_text.strip() or len(para_text.strip()) < _MIN_SEGMENT_CHARS:
+                stripped_para = para_text.strip()
+                if not stripped_para:
+                    continue
+                if len(stripped_para) < _MIN_SEGMENT_CHARS:
+                    # Too-short paragraph: record as exclusion instead of silently dropping (F-02)
+                    excl_suffix = f"short-para-{region_id}-{para_idx}"
+                    seg_loc_short = SourceLocation(
+                        locator_kind=LocatorKind.page,
+                        page_start=page_num,
+                        page_end=page_num,
+                    )
+                    exclusions.append(
+                        ExclusionRecord(
+                            exclusion_id=_exclusion_id(document_id, excl_suffix),
+                            location=seg_loc_short,
+                            source_region_ids=[region_id],
+                            reason=ExclusionReason.too_short,
+                            reason_detail=(
+                                f"Paragraph ({len(stripped_para)} chars) below minimum "
+                                f"segment length ({_MIN_SEGMENT_CHARS} chars). "
+                                "Recorded as exclusion per §12 (no silent content loss)."
+                            ),
+                            reversible=True,
+                        )
+                    )
                     continue
 
                 prose_type = _classify_prose(para_text, is_first_page, para_idx, page_num)
@@ -555,7 +596,7 @@ def _decompose_parsed_document(
     )
 
     return SegmentSet(
-        schema_version="1.0.0",
+        schema_version="1.1.0",
         tenancy=tenancy,
         document_id=document_id,
         content_hash=content_hash,
@@ -731,7 +772,7 @@ def _make_empty_segment_set(
         )
 
     return SegmentSet(
-        schema_version="1.0.0",
+        schema_version="1.1.0",
         tenancy=tenancy,
         document_id=document_id,
         content_hash=content_hash,
@@ -753,8 +794,12 @@ def _make_empty_segment_set(
 
 
 def _frozen_artifact_key(document_id: str, content_hash: str, config_version: str) -> str:
-    """Build the cache key string for a frozen segment set."""
-    return f"{document_id}__{content_hash[:16]}__{config_version}"
+    """Build the cache key string for a frozen segment set.
+
+    Uses the full 64-char content_hash (sha256 hex) per the documented key spec.
+    Truncation increases collision probability and must not be used.
+    """
+    return f"{document_id}__{content_hash}__{config_version}"
 
 
 def _frozen_artifact_path(
@@ -821,9 +866,11 @@ class DecomposeStage(Stage):
         self,
         run_started_at: datetime | None = None,
         artifacts_root: Path | str | None = None,
+        run_id: str = "",
     ) -> None:
         self._run_started_at = run_started_at or datetime.now(tz=UTC)
         self._artifacts_root = Path(artifacts_root) if artifacts_root else None
+        self._run_id = run_id
 
     def _produce(self, input_data: dict[str, Any] | None) -> dict[str, Any]:
         """Produce one SegmentSet per parse result entry.
@@ -908,6 +955,8 @@ class DecomposeStage(Stage):
         batch = SegmentSetBatch(
             schema_version=BATCH_SCHEMA_VERSION,
             contract="segment_set_batch",
+            run_id=self._run_id,
+            produced_at=self._run_started_at,
             skeleton=None,  # real run
             segment_sets=segment_sets,
         )

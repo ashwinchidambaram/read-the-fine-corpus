@@ -51,6 +51,12 @@ class ExclusionReason(StrEnum):
     superseded_version = "superseded_version"
     duplicate = "duplicate"
     parse_failed = "parse_failed"
+    too_short = "too_short"
+    """Content span below the minimum segment length threshold (§6 rule 6).
+
+    Added in schema_version 1.1.0.  Every dropped short paragraph or post-heading
+    remainder is recorded here so no content is silently lost (§12).
+    """
     other = "other"
 
 

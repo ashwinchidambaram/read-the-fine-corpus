@@ -716,6 +716,10 @@ class AssessStage(Stage):
 
     D-26 resolution: ParseResultBatch is now an official versioned contract;
     DecomposeStage version-checks it.
+
+    Args:
+        run_id: Pipeline run identifier (§12 traceability), threaded from the orchestrator.
+        run_started_at: Timestamp threaded from the orchestrator (not wall-clock).
     """
 
     name = "assess"
@@ -723,6 +727,14 @@ class AssessStage(Stage):
     consumed_version_range = SUPPORTED_INVENTORY
     produced_contract = "parse_result_batch"
     output_model = ParseResultBatch
+
+    def __init__(
+        self,
+        run_id: str = "",
+        run_started_at: datetime | None = None,
+    ) -> None:
+        self._run_id = run_id
+        self._run_started_at = run_started_at or datetime.now(tz=UTC)
 
     def _produce(self, input_data: dict[str, Any] | None) -> dict[str, Any]:
         """Produce one ParseResult per inventory item.
@@ -745,7 +757,7 @@ class AssessStage(Stage):
             permission_resolved_at=None,
         )
 
-        parsed_at = datetime.now(tz=UTC)
+        parsed_at = self._run_started_at
         results: list[dict[str, Any]] = []
 
         for item in input_data.get("items", []):
@@ -853,6 +865,8 @@ class AssessStage(Stage):
         batch = ParseResultBatch(
             schema_version=BATCH_SCHEMA_VERSION,
             contract="parse_result_batch",
+            run_id=self._run_id,
+            produced_at=self._run_started_at,
             skeleton=None,  # real run — not a skeleton
             results=results,
         )
