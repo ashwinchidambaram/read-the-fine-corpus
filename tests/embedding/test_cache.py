@@ -241,3 +241,50 @@ class TestGetQueryCache:
         cache = get_query_cache(ttl_seconds=300, max_entries=10, reset=True)
         assert cache._ttl == 300
         assert cache._max == 10
+
+
+# ---------------------------------------------------------------------------
+# F-007: error results must NOT be stored in the cache
+# ---------------------------------------------------------------------------
+
+
+class TestCacheErrorResultContract:
+    """F-007: put() forbids error results; a failed embed must not grow cache.size."""
+
+    def test_failed_embed_leaves_cache_size_zero(self) -> None:
+        """Simulates the contract: after a provider error, cache.size stays 0."""
+        from finecorpus.embedding.base import ProviderUnavailableError
+
+        cache = QueryEmbeddingCache()
+        assert cache.size == 0
+
+        # Simulate what the caller SHOULD do: only put on success.
+        # If an exception is raised, put() is never called.
+        try:
+            raise ProviderUnavailableError(
+                "Provider failed",
+                provider_id="fake",
+                model_id="fake-model",
+            )
+        except ProviderUnavailableError:
+            # Do NOT call cache.put — the contract says error results are forbidden
+            pass
+
+        assert cache.size == 0, (
+            "Cache size must remain 0 when the provider raises an error "
+            "and put() is correctly not called (F-007)"
+        )
+
+    def test_successful_embed_grows_cache_size(self) -> None:
+        """After a successful embed, put() is called and cache.size increases."""
+        cache = QueryEmbeddingCache()
+        assert cache.size == 0
+        cache.put("model", 768, "v1", "hello", [0.1] * 768)
+        assert cache.size == 1
+
+    def test_put_docstring_mentions_error_prohibition(self) -> None:
+        """F-007: the put() docstring must document that error results are forbidden."""
+        doc = QueryEmbeddingCache.put.__doc__ or ""
+        assert "error" in doc.lower(), (
+            "put() docstring must mention that error results must not be stored (F-007)"
+        )

@@ -242,7 +242,7 @@ class TestOpenAIRetry:
         assert exc_info.value.retry_after_seconds == 10.0
 
     def test_non_retryable_error_does_not_retry(self) -> None:
-        """401 (auth error) should not retry."""
+        """F-001: 401 (auth error) is NOT in retryable set → ProviderError, no retry."""
         err = Exception("Auth error")
         err.status_code = 401  # type: ignore[attr-defined]
         err.response = SimpleNamespace(status_code=401, headers={})  # type: ignore[attr-defined]
@@ -252,6 +252,7 @@ class TestOpenAIRetry:
         with patch("finecorpus.embedding._backoff.time.sleep"):
             with pytest.raises(ProviderError):
                 p.embed_batch(["hello"], "text-embedding-3-small")
+        # F-001: backoff layer surfaces non-retryable status as ProviderError immediately
         assert client.embeddings.create.call_count == 1
 
 
@@ -260,8 +261,36 @@ class TestOpenAIRetry:
 # ---------------------------------------------------------------------------
 
 
+def _walk_exception_chain(exc: BaseException) -> list[BaseException]:
+    """Walk both __cause__ and __context__ chains, returning all exceptions found.
+
+    F-006: providers use ``raise ... from None`` AND set ``__context__ = None``
+    to sever both chain members.  This helper validates that neither chain
+    carries the secret.
+    """
+    seen: list[BaseException] = []
+    visited: set[int] = set()
+    queue = [exc]
+    while queue:
+        current = queue.pop()
+        if id(current) in visited:
+            continue
+        visited.add(id(current))
+        seen.append(current)
+        if current.__cause__ is not None:
+            queue.append(current.__cause__)
+        if current.__context__ is not None:
+            queue.append(current.__context__)
+    return seen
+
+
 class TestOpenAISecretAbsence:
-    """The API key MUST NOT appear in any exception chain or log record."""
+    """The API key MUST NOT appear in any exception chain or log record.
+
+    F-006: tests walk BOTH __cause__ and __context__ chains.
+    Where providers use ``raise ... from None`` they also set
+    ``__context__ = None`` so no chain member can carry the secret.
+    """
 
     FAKE_KEY = "sk-supersecretkey99999999999999999999"
 
@@ -280,13 +309,14 @@ class TestOpenAISecretAbsence:
         with patch("finecorpus.embedding._backoff.time.sleep"):
             with pytest.raises(ProviderUnavailableError) as exc_info:
                 p.embed_batch(["test"], "text-embedding-3-small")
+        raised = exc_info.value
         # Check message
-        assert self.FAKE_KEY not in str(exc_info.value)
-        # Check __cause__ chain
-        cause = exc_info.value.__cause__
-        while cause is not None:
-            assert self.FAKE_KEY not in str(cause)
-            cause = cause.__cause__
+        assert self.FAKE_KEY not in str(raised)
+        # F-006: walk BOTH __cause__ and __context__ chains
+        for chained in _walk_exception_chain(raised):
+            assert self.FAKE_KEY not in str(chained), (
+                f"API key found in chained exception {type(chained).__name__}: {chained!r}"
+            )
 
     def test_key_absent_from_provider_error_message(self) -> None:
         """ProviderError message must not contain the API key."""
@@ -295,7 +325,29 @@ class TestOpenAISecretAbsence:
         p = OpenAIProvider(self.FAKE_KEY, _openai_client=client)
         with pytest.raises(ProviderError) as exc_info:
             p.embed_batch(["test"], "text-embedding-3-small")
-        assert self.FAKE_KEY not in str(exc_info.value)
+        raised = exc_info.value
+        assert self.FAKE_KEY not in str(raised)
+        # F-006: also walk the full chain
+        for chained in _walk_exception_chain(raised):
+            assert self.FAKE_KEY not in str(chained), (
+                f"API key found in chained exception {type(chained).__name__}: {chained!r}"
+            )
+
+    def test_context_chain_severed_on_retryable_exception(self) -> None:
+        """F-006: __context__ must be None on the _RetryableException (severed chain)."""
+        err = self._make_exc_with_status(429)
+        cfg = BackoffConfig(max_attempts=2)
+        client = _make_mock_client([err, err])
+        p = OpenAIProvider(self.FAKE_KEY, _openai_client=client, backoff_config=cfg)
+
+        with patch("finecorpus.embedding._backoff.time.sleep"):
+            with pytest.raises(ProviderUnavailableError) as exc_info:
+                p.embed_batch(["test"], "text-embedding-3-small")
+
+        raised = exc_info.value
+        # The final ProviderUnavailableError should have no __context__ carrying the key
+        for chained in _walk_exception_chain(raised):
+            assert self.FAKE_KEY not in str(chained)
 
     def test_key_absent_from_repr(self) -> None:
         p = OpenAIProvider(self.FAKE_KEY, _openai_client=MagicMock())

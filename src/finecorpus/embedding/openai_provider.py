@@ -251,7 +251,12 @@ class OpenAIProvider(EmbeddingProvider):
         )
 
     def _embed_chunk_with_retry(self, texts: list[str], model_id: str) -> dict:
-        """Call the OpenAI embed API for one batch with backoff retry."""
+        """Call the OpenAI embed API for one batch with backoff retry.
+
+        Providers raise ``_RetryableException`` for ALL non-200 HTTP responses;
+        the backoff layer in ``retry_with_backoff`` decides whether the status
+        code is retryable (F-001).
+        """
 
         def _attempt() -> dict:
             try:
@@ -260,18 +265,15 @@ class OpenAIProvider(EmbeddingProvider):
                 # Classify the exception — never expose the raw exc chain
                 # (it may contain auth headers).
                 status, retry_after = _classify_openai_error(exc)
-                if status in _RETRYABLE_STATUSES:
-                    raise _RetryableException(
-                        f"OpenAI API error HTTP {status} (redacted for secret safety).",
-                        http_status=status,
-                        retry_after_seconds=retry_after,
-                    ) from None  # sever the chain — exc may contain auth data
-                # Non-retryable: re-raise sanitised
-                raise ProviderError(
-                    f"OpenAI API error HTTP {status} (non-retryable).",
-                    provider_id="openai",
-                    model_id=model_id,
-                ) from None
+                # Raise for ALL non-200 statuses; backoff layer classifies
+                # retryable vs non-retryable (F-001).
+                err = _RetryableException(
+                    f"OpenAI API error HTTP {status} (redacted for secret safety).",
+                    http_status=status,
+                    retry_after_seconds=retry_after,
+                )
+                err.__context__ = None  # sever chain — exc may contain auth data
+                raise err from None
 
             embeddings = [item.embedding for item in resp.data]
             if len(embeddings) != len(texts):

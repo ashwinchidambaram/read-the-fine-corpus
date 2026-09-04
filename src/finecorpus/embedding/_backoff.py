@@ -8,16 +8,28 @@ Design
 - Bounded attempts (configurable, default 5).
 - Full-jitter exponential backoff: ``sleep = random(0, min(cap, base * 2^attempt))``.
 - Respects ``Retry-After`` headers: if the provider specifies a delay we sleep at
-  least that long (plus jitter).
+  least that long (plus jitter).  A ``Retry-After`` value that exceeds
+  ``cap_delay_seconds`` is honoured as-is (the cap applies only to computed
+  jitter delays); a WARNING is logged when this occurs.
 - After ``max_attempts`` are exhausted, raises ``ProviderUnavailableError`` with the
   attempt count and HTTP status code — the caller can surface these to the operator.
 - Secret-safe: never includes API keys or auth headers in exception messages.
 
+Status-code classification
+--------------------------
+The backoff layer owns the decision of whether an HTTP status is retryable.
+Providers raise ``_RetryableException`` with the raw HTTP status; the loop
+inspects ``exc.http_status`` against ``retryable_status_codes``.  If the status
+is NOT in the retryable set the exception is re-raised as a ``ProviderError``
+immediately (no retry).  This keeps providers free from duplicating the
+retryable-status logic.
+
 Usage
 -----
-``BackoffConfig`` is constructed with the desired limits.  ``retry_embed`` accepts a
-callable that performs one attempt and may raise ``_RetryableError``.  The callable is
-responsible for interpreting HTTP responses and raising the correct exception.
+``BackoffConfig`` is constructed with the desired limits.  ``retry_with_backoff``
+accepts a callable that performs one attempt and may raise ``_RetryableException``.
+The callable raises ``_RetryableException`` for ANY non-200 HTTP response that
+might be worth retrying; the backoff layer decides whether it actually will.
 """
 
 from __future__ import annotations
@@ -29,7 +41,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TypeVar
 
-from finecorpus.embedding.base import ProviderUnavailableError
+from finecorpus.embedding.base import ProviderError, ProviderUnavailableError
 
 T = TypeVar("T")
 
@@ -42,6 +54,9 @@ logger = logging.getLogger(__name__)
 _DEFAULT_BASE_DELAY_SECONDS = 1.0
 _DEFAULT_CAP_DELAY_SECONDS = 60.0
 _DEFAULT_MAX_ATTEMPTS = 5
+
+# Default set of retryable HTTP status codes.
+_DEFAULT_RETRYABLE_STATUS_CODES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
 
 
 @dataclass
@@ -56,7 +71,9 @@ class BackoffConfig:
     base_delay_seconds:
         Base delay for the first retry.
     cap_delay_seconds:
-        Maximum delay cap (never sleep longer than this regardless of attempt).
+        Maximum delay cap for computed jitter delays.  A ``Retry-After`` header
+        value that exceeds this cap is still honoured as-is (with a WARNING log);
+        the cap applies only to the computed jitter component.
     """
 
     max_attempts: int = _DEFAULT_MAX_ATTEMPTS
@@ -112,13 +129,16 @@ def retry_with_backoff[T](  # noqa: UP047
     call: Callable[[], T],
     *,
     config: BackoffConfig | None = None,
-    retryable_status_codes: frozenset[int] = frozenset({429, 500, 502, 503, 504}),
+    retryable_status_codes: frozenset[int] = _DEFAULT_RETRYABLE_STATUS_CODES,
     sleep_fn: Callable[[float], None] | None = None,  # injected in tests
 ) -> T:
     """Call *call* up to ``config.max_attempts`` times with exponential backoff.
 
-    *call* should raise ``_RetryableException`` to signal a retriable failure.
-    Any other exception propagates immediately (non-retriable errors).
+    *call* should raise ``_RetryableException`` to signal a potentially-retriable
+    failure.  The backoff layer inspects ``exc.http_status`` against
+    ``retryable_status_codes`` to decide whether to retry or surface a
+    ``ProviderError`` immediately.  Any other exception propagates immediately
+    (non-retriable errors).
 
     Parameters
     ----------
@@ -133,7 +153,9 @@ def retry_with_backoff[T](  # noqa: UP047
     config:
         Backoff configuration.  Defaults to ``BackoffConfig()``.
     retryable_status_codes:
-        HTTP status codes that should be retried.
+        HTTP status codes that should trigger a retry.  Codes NOT in this set
+        cause the ``_RetryableException`` to be immediately re-raised as a
+        ``ProviderError`` (no retry).  Defaults to {429, 500, 502, 503, 504}.
     sleep_fn:
         Override ``time.sleep`` for tests (avoids real sleeping).
 
@@ -144,6 +166,9 @@ def retry_with_backoff[T](  # noqa: UP047
 
     Raises
     ------
+    ProviderError
+        If ``_RetryableException`` is raised with a status NOT in
+        ``retryable_status_codes`` (non-retryable HTTP error).
     ProviderUnavailableError
         After all attempts are exhausted.
     """
@@ -157,6 +182,17 @@ def retry_with_backoff[T](  # noqa: UP047
         try:
             return call()  # type: ignore[return-value]
         except _RetryableException as exc:
+            # --- F-001: backoff layer owns classification ---
+            if exc.http_status not in retryable_status_codes:
+                # Non-retryable status: surface immediately as ProviderError
+                raise ProviderError(
+                    f"Provider '{provider_id}' model '{model_id}' returned "
+                    f"non-retryable HTTP {exc.http_status} during '{operation}' "
+                    f"(redacted for secret safety).",
+                    provider_id=provider_id,
+                    model_id=model_id,
+                ) from None
+
             last_status = exc.http_status
             last_retry_after = exc.retry_after_seconds
 
@@ -168,9 +204,22 @@ def retry_with_backoff[T](  # noqa: UP047
             cap = min(cfg.cap_delay_seconds, cfg.base_delay_seconds * (2**attempt))
             jitter_delay = random.uniform(0, cap)
 
-            # Respect Retry-After if it demands a longer wait
-            delay = max(jitter_delay, exc.retry_after_seconds or 0.0)
-            delay = min(delay, cfg.cap_delay_seconds)
+            # Respect Retry-After: honour it even when it exceeds cap_delay_seconds
+            # (F-005: cap applies to computed jitter only, not to Retry-After)
+            retry_after = exc.retry_after_seconds or 0.0
+            if retry_after > cfg.cap_delay_seconds:
+                logger.warning(
+                    "Provider '%s' model '%s': Retry-After %.1fs exceeds "
+                    "cap_delay_seconds %.1fs — honouring as-is.",
+                    provider_id,
+                    model_id,
+                    retry_after,
+                    cfg.cap_delay_seconds,
+                )
+                delay = retry_after
+            else:
+                delay = max(jitter_delay, retry_after)
+                delay = min(delay, cfg.cap_delay_seconds)
 
             logger.warning(
                 "Provider '%s' model '%s' attempt %d/%d failed (%s HTTP %d); retrying in %.1fs.",

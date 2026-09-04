@@ -12,6 +12,10 @@ Design
   The config key ``providers.embedding.cloud.*`` contains no credential values.
 - The OPENAI_API_KEY env var is the standard OpenAI convention; FINECORPUS_
   prefixed variants are also accepted (reference.md §1 env-var convention).
+- Air-gap enforcement (F-003): when ``RTFC_AIRGAP=true`` (or
+  ``platform.airgap=True``), requesting a non-local provider raises
+  ``ValueError`` immediately at the registry level with an actionable message.
+  Provider-level guards remain as defence-in-depth.
 """
 
 from __future__ import annotations
@@ -37,6 +41,11 @@ _OPENAI_KEY_ENV_VARS: list[str] = [
     "OPENAI_API_KEY",  # standard OpenAI convention
 ]
 
+# Providers that are NOT local (cloud egress required)
+_CLOUD_PROVIDER_TARGETS: frozenset[str] = frozenset({"openai", "cloud"})
+# Providers that are local (no egress)
+_LOCAL_PROVIDER_TARGETS: frozenset[str] = frozenset({"ollama", "local"})
+
 
 def _get_openai_api_key() -> str | None:
     """Read the OpenAI API key from environment variables.
@@ -49,6 +58,15 @@ def _get_openai_api_key() -> str | None:
         if val:
             return val
     return None
+
+
+def _is_airgap_active(config: Config) -> bool:
+    """Return ``True`` when air-gap mode is active (config or env-var)."""
+    return config.platform.airgap or os.environ.get("RTFC_AIRGAP", "").lower() in {
+        "1",
+        "true",
+        "yes",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -77,8 +95,9 @@ def build_provider_from_config(
     Raises
     ------
     ValueError
-        If ``which`` is not ``"cloud"`` or ``"local"``, or if the provider
-        is ``"openai"`` but no API key is configured.
+        If ``which`` is not ``"cloud"`` or ``"local"``, if the provider is
+        ``"openai"`` but no API key is configured, or if air-gap mode is
+        active and a non-local provider is requested (F-003).
     RuntimeError
         If ``providers.embedding.default`` is not set and ``which`` is not
         specified.
@@ -92,9 +111,19 @@ def build_provider_from_config(
             "to 'openai' or 'ollama' in corpus.yaml, or pass 'which' explicitly."
         )
 
-    if target in {"openai", "cloud"}:
+    # F-003: registry-level air-gap enforcement — raises immediately with an
+    # actionable message before any provider object is constructed.
+    if _is_airgap_active(config) and target in _CLOUD_PROVIDER_TARGETS:
+        raise ValueError(
+            f"Air-gap mode is active (RTFC_AIRGAP / platform.airgap=true) but "
+            f"a cloud provider ('{target}') was requested. "
+            f"Cloud providers require outbound HTTP egress which is blocked in "
+            f"air-gap mode. Configure a local provider (e.g. 'ollama') instead."
+        )
+
+    if target in _CLOUD_PROVIDER_TARGETS:
         return _build_openai(config)
-    elif target in {"ollama", "local"}:
+    elif target in _LOCAL_PROVIDER_TARGETS:
         return _build_ollama(config)
     else:
         raise ValueError(

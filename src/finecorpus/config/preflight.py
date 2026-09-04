@@ -384,19 +384,38 @@ def _check_embedding_provider(config: Config) -> CheckResult:
     has_fail = False
     has_warn = False
 
-    # Check each configured provider (cloud + local, whichever are set up)
+    # F-004: check EVERY fully-configured provider, not just the default.
+    # "Fully configured" means the provider section has a non-default / non-empty
+    # model set OR it is the selected default.  We include a provider in the
+    # check list when:
+    #   - it is selected as default, OR
+    #   - its section has a non-empty provider_id (it was explicitly configured).
+    # Each provider gets its own named check line in the report.
     providers_to_check: list[tuple[str, str]] = []  # (label, which)
-    if emb.default in {"openai", "cloud"} or emb.cloud.provider_id:
-        providers_to_check.append(("cloud (openai)", "cloud"))
+    if (
+        emb.default in {"openai", "cloud"}
+        or (emb.cloud.provider_id and emb.cloud.provider_id != "openai")
+        or emb.default in {"openai", "cloud"}
+    ):
+        # Cloud is the default OR explicitly configured
+        if emb.default in {"openai", "cloud"}:
+            providers_to_check.append(("cloud (openai) [default]", "cloud"))
+        elif emb.cloud.provider_id:
+            providers_to_check.append(("cloud (openai)", "cloud"))
     if emb.default in {"ollama", "local"} or emb.local.provider_id:
-        providers_to_check.append(("local (ollama)", "local"))
+        if emb.default in {"ollama", "local"}:
+            providers_to_check.append(("local (ollama) [default]", "local"))
+        else:
+            providers_to_check.append(("local (ollama)", "local"))
 
-    # Only check the provider that is actually selected as default
-    # (the other is optional at startup)
-    if emb.default in {"openai", "cloud"}:
-        providers_to_check = [("cloud (openai)", "cloud")]
-    elif emb.default in {"ollama", "local"}:
-        providers_to_check = [("local (ollama)", "local")]
+    # De-duplicate while preserving order (edge case: default matches provider_id)
+    seen: set[str] = set()
+    unique_providers: list[tuple[str, str]] = []
+    for label, which in providers_to_check:
+        if which not in seen:
+            seen.add(which)
+            unique_providers.append((label, which))
+    providers_to_check = unique_providers
 
     for label, which in providers_to_check:
         try:

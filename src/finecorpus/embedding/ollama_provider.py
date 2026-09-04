@@ -8,9 +8,16 @@ Design
   Other models are supported with explicit ``dimensions`` parameter.
 - Batch mode: default is single-text calls (OQ-P-3 resolution: default
   single-text for maximum compatibility; opt-in batch mode available).
-- API version: derived from model sha256 digest via ``/api/show`` (OQ-P-4).
-  Falls back to ``"unknown"`` if the endpoint doesn't expose it.
+- API version lifecycle (F-002):
+  - ``ProviderCapabilities.api_version`` reads ``"unresolved"`` until
+    ``health_check()`` is called for the first time.
+  - ``health_check()`` fetches the sha256 digest from ``/api/show`` (OQ-P-4)
+    and caches it on the instance.  Subsequent calls to ``capabilities`` return
+    the resolved value.
+  - The constructor makes NO network calls (pure construction).
 - Retry: same exponential-backoff pattern as OpenAIProvider (hand-rolled).
+  Providers raise ``_RetryableException`` for ALL non-200 HTTP responses;
+  the backoff layer in ``retry_with_backoff`` decides what is retryable (F-001).
 - Fail-closed: after max_attempts exhaustion, raises ProviderUnavailableError.
 - Air-gap: local provider, so air-gap mode does NOT block it (``is_local=True``).
 - Secret-safe: Ollama endpoints may have auth tokens.  The endpoint URL is
@@ -69,11 +76,14 @@ _MODEL_DEFAULTS: dict[str, dict] = {
     },
 }
 
-# Retryable HTTP statuses
+# Retryable HTTP statuses (passed to backoff layer; F-001)
 _RETRYABLE_STATUSES: frozenset[int] = frozenset({429, 500, 502, 503, 504})
 
 # Default HTTP timeout for Ollama calls (seconds)
 _DEFAULT_TIMEOUT = 30.0
+
+# Sentinel value for api_version before health_check() resolves it (F-002)
+_API_VERSION_UNRESOLVED = "unresolved"
 
 
 class OllamaProvider(EmbeddingProvider):
@@ -98,6 +108,14 @@ class OllamaProvider(EmbeddingProvider):
     _http_client:
         Injected ``httpx.Client`` for testing.  When ``None``, a real client
         is constructed.
+
+    Lifecycle note (F-002)
+    ----------------------
+    The constructor makes NO network calls.  ``capabilities.api_version``
+    reports ``"unresolved"`` until ``health_check()`` is invoked for the
+    first time.  After ``health_check()`` completes the resolved digest (or
+    ``"unknown"`` when /api/show is unavailable) is cached on the instance
+    and ``capabilities.api_version`` reflects it on subsequent reads.
     """
 
     def __init__(
@@ -130,9 +148,9 @@ class OllamaProvider(EmbeddingProvider):
         supported_langs = model_defaults.get("supported_languages", "*")
         cross_lingual = model_defaults.get("cross_lingual", False)
 
-        # Fetch api_version (model digest) from /api/show.
-        # This is done once at construction; if unavailable, use "unknown".
-        api_version = self._fetch_api_version(_http_client)
+        # F-002: constructor is pure — no network call.
+        # api_version is "unresolved" until health_check() runs for the first time.
+        self._api_version: str = _API_VERSION_UNRESOLVED
 
         self._caps = ProviderCapabilities(
             provider_id="ollama",
@@ -145,28 +163,25 @@ class OllamaProvider(EmbeddingProvider):
             is_local=True,
             cost_per_1k_tokens=None,
             pricing_as_of=None,
-            api_version=api_version,
+            api_version=_API_VERSION_UNRESOLVED,
         )
 
-        # Construct or accept http client (after caps are set, for repr safety)
+        # Construct or accept http client
         self._http = _http_client or httpx.Client(
             base_url=self._base_url,
             timeout=_DEFAULT_TIMEOUT,
         )
 
-    def _fetch_api_version(self, client: httpx.Client | None = None) -> str:
+    def _resolve_api_version(self) -> str:
         """Fetch the model's sha256 digest from Ollama /api/show (OQ-P-4).
 
+        Called lazily by ``health_check()`` on the first invocation.
         Returns ``"unknown"`` if the endpoint is unreachable or the field
         is absent.  The base_url is NEVER included in error messages here
         (it may contain auth tokens — §6.2).
         """
         try:
-            http = client or httpx.Client(
-                base_url=self._base_url,
-                timeout=5.0,
-            )
-            resp = http.post("/api/show", json={"name": self._model_id})
+            resp = self._http.post("/api/show", json={"name": self._model_id})
             if resp.status_code == 200:
                 data = resp.json()
                 # Ollama returns "details" -> "parent_model" or a top-level "digest"
@@ -180,6 +195,24 @@ class OllamaProvider(EmbeddingProvider):
 
     @property
     def capabilities(self) -> ProviderCapabilities:
+        # Return a view that reflects the current api_version (may be "unresolved"
+        # before health_check() runs, or the resolved digest afterwards).
+        if self._api_version == self._caps.api_version:
+            return self._caps
+        # Rebuild caps with updated api_version (ProviderCapabilities is frozen)
+        self._caps = ProviderCapabilities(
+            provider_id=self._caps.provider_id,
+            model_id=self._caps.model_id,
+            vector_dimensions=self._caps.vector_dimensions,
+            max_input_tokens=self._caps.max_input_tokens,
+            max_batch_size=self._caps.max_batch_size,
+            supported_languages=self._caps.supported_languages,
+            cross_lingual=self._caps.cross_lingual,
+            is_local=self._caps.is_local,
+            cost_per_1k_tokens=self._caps.cost_per_1k_tokens,
+            pricing_as_of=self._caps.pricing_as_of,
+            api_version=self._api_version,
+        )
         return self._caps
 
     def embed_batch(self, texts: list[str], model_id: str) -> EmbedBatchResult:
@@ -236,25 +269,23 @@ class OllamaProvider(EmbeddingProvider):
                     json={"model": model_id, "input": text},
                 )
             except (httpx.ConnectError, httpx.TimeoutException) as exc:
-                raise _RetryableException(
+                # Raise with http_status=503; backoff layer decides if retryable.
+                # Sever the exception chain — exc may contain endpoint URL with auth.
+                err = _RetryableException(
                     f"Ollama connection error during embed (type={type(exc).__name__}).",
                     http_status=503,
                     retry_after_seconds=None,
-                ) from None  # sever chain — may contain endpoint URL with auth
+                )
+                err.__context__ = None
+                raise err from None
 
-            if resp.status_code in _RETRYABLE_STATUSES:
+            if resp.status_code != 200:
+                # Raise for all non-200; backoff layer classifies retryable (F-001).
                 retry_after = parse_retry_after(resp.headers.get("Retry-After"))
                 raise _RetryableException(
                     f"Ollama HTTP {resp.status_code} during embed.",
                     http_status=resp.status_code,
                     retry_after_seconds=retry_after,
-                )
-
-            if resp.status_code != 200:
-                raise ProviderError(
-                    f"Ollama returned HTTP {resp.status_code} (non-retryable).",
-                    provider_id="ollama",
-                    model_id=model_id,
                 )
 
             data = resp.json()
@@ -287,25 +318,21 @@ class OllamaProvider(EmbeddingProvider):
                     json={"model": model_id, "input": texts},
                 )
             except (httpx.ConnectError, httpx.TimeoutException) as exc:
-                raise _RetryableException(
+                err = _RetryableException(
                     f"Ollama connection error during batch embed (type={type(exc).__name__}).",
                     http_status=503,
                     retry_after_seconds=None,
-                ) from None
+                )
+                err.__context__ = None
+                raise err from None
 
-            if resp.status_code in _RETRYABLE_STATUSES:
+            if resp.status_code != 200:
+                # Raise for all non-200; backoff layer classifies retryable (F-001).
                 retry_after = parse_retry_after(resp.headers.get("Retry-After"))
                 raise _RetryableException(
                     f"Ollama HTTP {resp.status_code} during batch embed.",
                     http_status=resp.status_code,
                     retry_after_seconds=retry_after,
-                )
-
-            if resp.status_code != 200:
-                raise ProviderError(
-                    f"Ollama returned HTTP {resp.status_code} (non-retryable, batch mode).",
-                    provider_id="ollama",
-                    model_id=model_id,
                 )
 
             data = resp.json()
@@ -328,7 +355,15 @@ class OllamaProvider(EmbeddingProvider):
         )
 
     def health_check(self) -> HealthCheckResult:
-        """Probe Ollama with a fixed string; confirm model availability and dimensions (§2.2)."""
+        """Probe Ollama with a fixed string; confirm model availability and dimensions (§2.2).
+
+        On the first call, also resolves and caches ``api_version`` from
+        ``/api/show`` (F-002).  Subsequent calls use the cached value.
+        """
+        # F-002: resolve api_version lazily on first health_check()
+        if self._api_version == _API_VERSION_UNRESOLVED:
+            self._api_version = self._resolve_api_version()
+
         start = time.monotonic()
         try:
             resp = self._http.post(

@@ -169,3 +169,97 @@ class TestPreflightEmbeddingBackwardCompat:
         assert emb.status == CheckStatus.SKIPPED
         # SKIPPED counts as "not FAIL" in passed
         assert emb.status != CheckStatus.FAIL
+
+
+class TestRegistryAirgapEnforcement:
+    """F-003: registry raises immediately when airgap is on and a cloud provider is requested."""
+
+    def test_build_cloud_provider_with_airgap_raises_at_registry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """RTFC_AIRGAP + build_provider_from_config(which='cloud') → ValueError at construction."""
+        from finecorpus.embedding.registry import build_provider_from_config
+
+        cfg_file = write_yaml(
+            tmp_path,
+            """
+            providers:
+              embedding:
+                default: "openai"
+                cloud:
+                  model: "text-embedding-3-small"
+                  dimensions: 1536
+            """,
+        )
+        cfg = load_config(cfg_file)
+        monkeypatch.setenv("RTFC_AIRGAP", "true")
+        # Should raise at registry level before any provider object is built
+        with pytest.raises(ValueError, match="[Aa]ir.gap"):
+            build_provider_from_config(cfg, which="cloud")
+
+    def test_build_cloud_via_default_with_airgap_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """RTFC_AIRGAP + default=openai → raises at build_provider_from_config."""
+        from finecorpus.embedding.registry import build_provider_from_config
+
+        cfg_file = write_yaml(
+            tmp_path,
+            """
+            providers:
+              embedding:
+                default: "openai"
+                cloud:
+                  model: "text-embedding-3-small"
+                  dimensions: 1536
+            """,
+        )
+        cfg = load_config(cfg_file)
+        monkeypatch.setenv("RTFC_AIRGAP", "true")
+        with pytest.raises(ValueError, match="[Aa]ir.gap"):
+            build_provider_from_config(cfg)
+
+    def test_build_local_provider_with_airgap_succeeds(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """RTFC_AIRGAP + local provider → construction succeeds (local is always allowed)."""
+        from finecorpus.embedding.ollama_provider import OllamaProvider
+        from finecorpus.embedding.registry import build_provider_from_config
+
+        cfg_file = write_yaml(
+            tmp_path,
+            """
+            providers:
+              embedding:
+                default: "ollama"
+                local:
+                  model: "nomic-embed-text"
+                  dimensions: 768
+            """,
+        )
+        cfg = load_config(cfg_file)
+        monkeypatch.setenv("RTFC_AIRGAP", "true")
+        # Should not raise — local providers are always allowed in airgap mode
+        provider = build_provider_from_config(cfg)
+        assert isinstance(provider, OllamaProvider)
+
+    def test_platform_airgap_config_enforced_at_registry(self, tmp_path: Path) -> None:
+        """platform.airgap=true in config (not just env var) triggers registry enforcement."""
+        from finecorpus.embedding.registry import build_provider_from_config
+
+        cfg_file = write_yaml(
+            tmp_path,
+            """
+            platform:
+              airgap: true
+            providers:
+              embedding:
+                default: "openai"
+                cloud:
+                  model: "text-embedding-3-small"
+                  dimensions: 1536
+            """,
+        )
+        cfg = load_config(cfg_file)
+        with pytest.raises(ValueError, match="[Aa]ir.gap"):
+            build_provider_from_config(cfg, which="cloud")

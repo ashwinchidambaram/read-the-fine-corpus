@@ -85,42 +85,80 @@ def _make_client_with_responses(responses: list[httpx.Response]) -> httpx.Client
 
 
 class TestOllamaProviderConstruction:
+    """F-002: constructor must be pure (no network calls)."""
+
     def test_known_model_defaults(self) -> None:
-        client = _make_client_with_responses([_make_show_response()])
+        # F-002: no /api/show response needed — constructor is pure
+        client = _make_client_with_responses([])
         p = OllamaProvider(model_id="nomic-embed-text", _http_client=client)
         assert p.capabilities.vector_dimensions == 768
         assert p.capabilities.provider_id == "ollama"
         assert p.capabilities.is_local is True
 
     def test_bge_m3_defaults(self) -> None:
-        client = _make_client_with_responses([_make_show_response()])
+        client = _make_client_with_responses([])
         p = OllamaProvider(model_id="bge-m3", _http_client=client)
         assert p.capabilities.vector_dimensions == 1024
         assert p.capabilities.cross_lingual is True
 
     def test_unknown_model_without_dimensions_raises(self) -> None:
-        client = _make_client_with_responses([_make_show_response()])
+        client = _make_client_with_responses([])
         with pytest.raises(ValueError, match="dimensions must be supplied"):
             OllamaProvider(model_id="unknown-model", _http_client=client)
 
     def test_unknown_model_with_explicit_dims(self) -> None:
-        client = _make_client_with_responses([_make_show_response()])
+        client = _make_client_with_responses([])
         p = OllamaProvider(model_id="custom", dimensions=256, _http_client=client)
         assert p.capabilities.vector_dimensions == 256
 
-    def test_api_version_from_digest(self) -> None:
-        digest = "sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abcd"
-        client = _make_client_with_responses([_make_show_response(digest=digest)])
+    def test_api_version_is_unresolved_before_health_check(self) -> None:
+        """F-002: api_version reads 'unresolved' until health_check() runs."""
+        client = _make_client_with_responses([])
         p = OllamaProvider(model_id="nomic-embed-text", _http_client=client)
+        assert p.capabilities.api_version == "unresolved"
+
+    def test_no_network_call_during_construction(self) -> None:
+        """F-002: constructor makes zero network calls."""
+
+        class _RecordingTransport(httpx.BaseTransport):
+            def __init__(self) -> None:
+                self.call_count = 0
+
+            def handle_request(self, req: httpx.Request) -> httpx.Response:
+                self.call_count += 1
+                return _make_show_response()
+
+        transport = _RecordingTransport()
+        http = httpx.Client(transport=transport, base_url="http://localhost:11434")
+        OllamaProvider(model_id="nomic-embed-text", _http_client=http)
+        assert transport.call_count == 0, (
+            f"Constructor made {transport.call_count} network call(s); expected 0 (F-002)"
+        )
+
+    def test_api_version_resolved_after_health_check(self) -> None:
+        """F-002: api_version is resolved after health_check() runs."""
+        digest = "sha256:abc123def456abc123def456abc123def456abc123def456abc123def456abcd"
+        # health_check calls /api/show then /api/embed
+        show_resp = _make_show_response(digest=digest)
+        embed_resp = _make_embed_response([[0.1] * 768])
+        client = _make_client_with_responses([show_resp, embed_resp])
+        p = OllamaProvider(model_id="nomic-embed-text", _http_client=client)
+        assert p.capabilities.api_version == "unresolved"
+        p.health_check()
         assert digest[:71] in p.capabilities.api_version
 
     def test_api_version_unknown_when_show_fails(self) -> None:
-        client = _make_client_with_responses([_make_error_response(404)])
+        """F-002: api_version is 'unknown' (not 'unresolved') after failed health_check."""
+        # health_check tries /api/show (404) then /api/embed (success)
+        show_fail = _make_error_response(404)
+        embed_resp = _make_embed_response([[0.1] * 768])
+        client = _make_client_with_responses([show_fail, embed_resp])
         p = OllamaProvider(model_id="nomic-embed-text", _http_client=client)
+        p.health_check()
         assert p.capabilities.api_version == "unknown"
 
     def test_repr_safe(self) -> None:
-        client = _make_client_with_responses([_make_show_response()])
+        client = _make_client_with_responses([])
         p = OllamaProvider(model_id="nomic-embed-text", _http_client=client)
         r = repr(p)
         assert "ollama" in r
@@ -135,9 +173,9 @@ class TestOllamaProviderConstruction:
 class TestOllamaEmbedBatchSingle:
     def test_single_text_success(self) -> None:
         vec = [0.1] * 768
-        show = _make_show_response()
         embed = _make_embed_response([vec])
-        client = _make_client_with_responses([show, embed])
+        # F-002: no show response needed at construction time
+        client = _make_client_with_responses([embed])
         p = OllamaProvider(model_id="nomic-embed-text", _http_client=client)
         result = p.embed_batch(["hello"], "nomic-embed-text")
         assert len(result.embeddings) == 1
@@ -146,37 +184,34 @@ class TestOllamaEmbedBatchSingle:
 
     def test_multiple_texts_calls_api_per_text(self) -> None:
         vecs = [[float(i)] * 768 for i in range(3)]
-        show = _make_show_response()
         embeds = [_make_embed_response([v]) for v in vecs]
-        client = _make_client_with_responses([show] + embeds)
+        client = _make_client_with_responses(embeds)
         p = OllamaProvider(model_id="nomic-embed-text", _http_client=client)
         result = p.embed_batch(["a", "b", "c"], "nomic-embed-text")
         assert len(result.embeddings) == 3
 
     def test_wrong_model_id_raises(self) -> None:
-        client = _make_client_with_responses([_make_show_response()])
+        client = _make_client_with_responses([])
         p = OllamaProvider(model_id="nomic-embed-text", _http_client=client)
         with pytest.raises(ValueError, match="model"):
             p.embed_batch(["hello"], "wrong-model")
 
     def test_empty_texts_raises(self) -> None:
-        client = _make_client_with_responses([_make_show_response()])
+        client = _make_client_with_responses([])
         p = OllamaProvider(model_id="nomic-embed-text", _http_client=client)
         with pytest.raises(ValueError, match="empty"):
             p.embed_batch([], "nomic-embed-text")
 
     def test_empty_embedding_response_raises_provider_error(self) -> None:
-        show = _make_show_response()
         bad_resp = httpx.Response(200, content=b'{"embeddings":[]}')
-        client = _make_client_with_responses([show, bad_resp])
+        client = _make_client_with_responses([bad_resp])
         p = OllamaProvider(model_id="nomic-embed-text", _http_client=client)
         with pytest.raises(ProviderError):
             p.embed_batch(["hello"], "nomic-embed-text")
 
     def test_token_count_positive(self) -> None:
-        show = _make_show_response()
         embed = _make_embed_response([[0.1] * 768])
-        client = _make_client_with_responses([show, embed])
+        client = _make_client_with_responses([embed])
         p = OllamaProvider(model_id="nomic-embed-text", _http_client=client)
         result = p.embed_batch(["hello world"], "nomic-embed-text")
         assert result.input_tokens_used > 0
@@ -190,18 +225,16 @@ class TestOllamaEmbedBatchSingle:
 class TestOllamaEmbedBatchMode:
     def test_batch_mode_single_api_call(self) -> None:
         vecs = [[0.1] * 768, [0.2] * 768, [0.3] * 768]
-        show = _make_show_response()
         embed = _make_embed_response(vecs)
-        client = _make_client_with_responses([show, embed])
+        client = _make_client_with_responses([embed])
         p = OllamaProvider(model_id="nomic-embed-text", batch_mode=True, _http_client=client)
         result = p.embed_batch(["a", "b", "c"], "nomic-embed-text")
         assert len(result.embeddings) == 3
 
     def test_batch_mode_wrong_count_raises_provider_error(self) -> None:
         # Returns only 1 embedding for 2 texts
-        show = _make_show_response()
         embed = _make_embed_response([[0.1] * 768])
-        client = _make_client_with_responses([show, embed])
+        client = _make_client_with_responses([embed])
         p = OllamaProvider(model_id="nomic-embed-text", batch_mode=True, _http_client=client)
         with pytest.raises(ProviderError):
             p.embed_batch(["a", "b"], "nomic-embed-text")
@@ -214,10 +247,9 @@ class TestOllamaEmbedBatchMode:
 
 class TestOllamaRetry:
     def test_retries_on_503_then_succeeds(self) -> None:
-        show = _make_show_response()
         err = _make_error_response(503)
         success = _make_embed_response([[0.1] * 768])
-        client = _make_client_with_responses([show, err, success])
+        client = _make_client_with_responses([err, success])
         cfg = BackoffConfig(max_attempts=3)
         p = OllamaProvider(model_id="nomic-embed-text", backoff_config=cfg, _http_client=client)
         with patch("finecorpus.embedding._backoff.time.sleep"):
@@ -225,9 +257,8 @@ class TestOllamaRetry:
         assert len(result.embeddings) == 1
 
     def test_exhausted_raises_provider_unavailable(self) -> None:
-        show = _make_show_response()
         errors = [_make_error_response(503)] * 3
-        client = _make_client_with_responses([show] + errors)
+        client = _make_client_with_responses(errors)
         cfg = BackoffConfig(max_attempts=3)
         p = OllamaProvider(model_id="nomic-embed-text", backoff_config=cfg, _http_client=client)
         with patch("finecorpus.embedding._backoff.time.sleep"):
@@ -235,6 +266,16 @@ class TestOllamaRetry:
                 p.embed_batch(["hello"], "nomic-embed-text")
         assert exc_info.value.provider_id == "ollama"
         assert exc_info.value.attempts == 3
+
+    def test_non_retryable_status_raises_provider_error_immediately(self) -> None:
+        """F-001: 404 is not in retryable set → ProviderError, no retry."""
+        err = _make_error_response(404)
+        client = _make_client_with_responses([err])
+        cfg = BackoffConfig(max_attempts=3)
+        p = OllamaProvider(model_id="nomic-embed-text", backoff_config=cfg, _http_client=client)
+        with patch("finecorpus.embedding._backoff.time.sleep"):
+            with pytest.raises(ProviderError):
+                p.embed_batch(["hello"], "nomic-embed-text")
 
     def test_connection_error_is_retryable(self) -> None:
         """httpx.ConnectError should trigger retry logic."""
@@ -246,8 +287,7 @@ class TestOllamaRetry:
                 self._n = 0
 
             def handle_request(self, req: httpx.Request) -> httpx.Response:
-                if req.url.path == "/api/show":
-                    return _make_show_response()
+                # F-002: /api/show is only called during health_check, not construction
                 self._n += 1
                 if self._n == 1:
                     raise httpx.ConnectError("connection refused")
@@ -269,6 +309,7 @@ class TestOllamaRetry:
 
 class TestOllamaHealthCheck:
     def test_healthy(self) -> None:
+        # F-002: health_check calls /api/show then /api/embed
         show = _make_show_response()
         probe = _make_embed_response([[0.1] * 768])
         client = _make_client_with_responses([show, probe])
@@ -286,7 +327,7 @@ class TestOllamaHealthCheck:
 
         transport = _AlwaysConnectError()
         client = httpx.Client(transport=transport, base_url="http://localhost:11434")
-        # Skip /api/show failure for construction; use dimensions explicitly
+        # F-002: constructor is pure; dimensions supplied explicitly so no show needed
         p = OllamaProvider(model_id="nomic-embed-text", dimensions=768, _http_client=client)
         hc = p.health_check()
         assert hc.reachable is False
@@ -303,6 +344,7 @@ class TestOllamaHealthCheck:
         assert hc.error is not None
 
     def test_non_200_means_model_unavailable(self) -> None:
+        # /api/show succeeds, but /api/embed for health probe returns 404
         show = _make_show_response()
         probe = _make_error_response(404)
         client = _make_client_with_responses([show, probe])
@@ -333,33 +375,32 @@ class TestOllamaHealthCheck:
 
 class TestOllamaEstimateCost:
     def test_zero_cost(self) -> None:
-        client = _make_client_with_responses([_make_show_response()])
+        client = _make_client_with_responses([])
         p = OllamaProvider(model_id="nomic-embed-text", _http_client=client)
         est = p.estimate_cost(["hello world"])
         assert est.estimated_cost_usd == Decimal("0.0")
 
     def test_positive_token_count(self) -> None:
-        client = _make_client_with_responses([_make_show_response()])
+        client = _make_client_with_responses([])
         p = OllamaProvider(model_id="nomic-embed-text", _http_client=client)
         est = p.estimate_cost(["hello world test"])
         assert est.estimated_tokens > 0
 
     def test_no_network_call(self) -> None:
-        """estimate_cost MUST NOT make network calls."""
-        show = _make_show_response()
+        """estimate_cost MUST NOT make network calls (F-002: constructor is also pure)."""
 
         class _RecordingTransport(httpx.BaseTransport):
             def __init__(self) -> None:
                 self.call_count = 0
-                self._inner = _StubTransport([show])
 
             def handle_request(self, req: httpx.Request) -> httpx.Response:
                 self.call_count += 1
-                return self._inner.handle_request(req)
+                return _make_show_response()
 
         transport = _RecordingTransport()
         http = httpx.Client(transport=transport, base_url="http://localhost:11434")
         p = OllamaProvider(model_id="nomic-embed-text", _http_client=http)
-        initial_count = transport.call_count
+        # Construction already made zero calls; estimate_cost should also make zero
+        assert transport.call_count == 0
         p.estimate_cost(["hello"])
-        assert transport.call_count == initial_count  # no new calls
+        assert transport.call_count == 0  # no new calls from estimate_cost either

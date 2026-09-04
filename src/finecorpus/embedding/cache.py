@@ -192,6 +192,16 @@ class QueryEmbeddingCache:
         """Store an embedding in the cache.
 
         Evicts the LRU entry when at capacity.
+
+        Contract (F-007)
+        ----------------
+        Callers MUST NOT store error results in the cache.  Only call ``put``
+        when the embedding was successfully retrieved from the provider.
+        Storing a failed or empty embedding would permanently poison the cache
+        entry for the duration of the TTL, causing all subsequent queries for
+        the same text to silently return the bad result instead of retrying the
+        provider.  Any ``ProviderUnavailableError`` or ``ProviderError`` raised
+        by the provider should bypass this method entirely.
         """
         if not self._enabled:
             return
