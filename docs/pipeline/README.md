@@ -166,4 +166,5 @@ Phase 1 real implementations set `skeleton=None`.
 - [build.md](build.md) — Build stage: chunker params, provenance mapping, checkpoint/resume semantics, promote flag
 - [Contracts](../contracts/) — the seven inter-stage data contracts
 - [Architecture overview](../architecture/overview.md) — pipeline decomposition in the full system
+- [Ingest runbook](../runbooks/ingest.md) — `corpus init` → preflight → pipeline run → promote: the operator-facing flow
 - [Decision ledger D-26](../process/decision-ledger.md) — CLOSED: batch envelope contracts promoted to official §12 contracts

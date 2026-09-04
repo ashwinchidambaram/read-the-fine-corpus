@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Phase 1 closeout (this PR): `corpus init` first-run provider prompt (M-103, §4.6) with scripted and interactive modes, preflight integration, secret-never-written guarantee, and 12 tests in `tests/config/test_init_flow.py`; real troubleshooting docs with per-error-code operator actions; `docs/runbooks/ingest.md` runbook; traceability status updates for C-1, C-2, M-008, M-011, M-064, M-097 (partial), M-103, T-01, T-07.
+- Phase 1 acceptance test layer — T-01 alias swap under load, T-07 embedding model mismatch end-to-end, provider parity (Ollama + OpenAI chunk-identity invariant), and throughput baseline (#13).
+- Phase 1 REST retrieval service — dense query path, fail-closed semantics (EMBEDDING_MODEL_MISMATCH, PROVIDER_UNAVAILABLE, KB_NOT_READY, CONTROL_PLANE_UNAVAILABLE, PAYLOAD_CORRUPT), full §8 provenance in every result, and complete API reference (#12).
+- Phase 1 reference chunker and real Build stage — recursive-character splitting at 512 tokens / 50-token overlap, provenance-complete chunks, shadow-collection write (C-4), per-document resumability checkpoints (#11).
+- Phase 1 real Assess and Decompose for native-text PDF prose; D-26 CLOSED: ParseResultBatch and SegmentSetBatch promoted to official §12 contracts with SpecRange declarations and version-check enforcement at all five stage boundaries (#10).
+- Phase 1 embedding providers — OpenAI (`text-embedding-3-*`) and Ollama (`nomic-embed-text` / `bge-m3`) with deterministic FakeProvider, query-embedding cache, and real preflight health check with dimension verification (#9).
+- Phase 1 vector-index adapter, QdrantAdapter backend, alias lifecycle (create_shadow / promote / rollback), AliasRepository control-plane records, and model-identity mismatch check (#8).
 - Design package (pre-implementation, spec build rule 2): architecture pages (overview,
   segment taxonomy, provider abstraction, index lifecycle), seven data-contract schemas with
   deterministic chunk-identity derivation, configuration reference (90 consolidated options),
