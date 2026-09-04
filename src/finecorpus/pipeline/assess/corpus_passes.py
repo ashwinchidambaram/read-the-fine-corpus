@@ -493,10 +493,12 @@ def compute_boilerplate_blocks(
             if norm not in seen_in_doc:
                 seen_in_doc.add(norm)
                 block_doc_count[norm] = block_doc_count.get(norm, 0) + 1
-                # First time seeing this block in this document: start the per-doc count
-                # We'll track how many DISTINCT positions in the document this block occupies.
-                # Since seen_in_doc prevents double-counting, this is effectively 1 per doc.
-                # The total cross-document count is simply the sum of per-document counts.
+                # First time seeing this block in this document: increment the cross-document
+                # total by 1 (one occurrence per document).  Within-document repetitions
+                # (e.g. nav chrome repeated across pages in a single HTML export) are NOT
+                # captured here — that excess is added by the second pass below, which counts
+                # how many paragraph-level occurrences the block has in each document and
+                # adds (count - 1) to block_total_count for every repeated occurrence.
                 block_total_count[norm] = block_total_count.get(norm, 0) + 1
 
     # NOTE: to capture within-document repetitions (branch b use case: nav chrome

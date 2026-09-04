@@ -379,11 +379,13 @@ class TestCorpusWideManifestParity:
             if "unservable_cad" in report_codes:
                 pass
 
-            # 8. table_structure_retained: quality dict flag or finding code
+            # 8. table_structure_retained: synthesised finding (report generator) or
+            # quality dict value "full"/"partial" (F-3 fix: field is a StrEnum string,
+            # not a bool — "is True" was always False).
             quality = doc.get("quality", {})
-            if quality.get("table_structure_retained") is True:
+            if quality.get("table_structure_retained") in ("full", "partial"):
                 report_codes.add("table_structure_retained")
-            # Also accept the finding code if present
+            # Also accept the finding code if present (synthesised by report generator)
             if "table_structure_retained" in report_codes:
                 pass  # already handled via findings codes above
 

@@ -59,7 +59,11 @@ from finecorpus.contracts.shared.blocks import (
     TenancyBlock,
 )
 from finecorpus.contracts.versions import SUPPORTED_INVENTORY
-from finecorpus.pipeline.assess.corpus_passes import run_corpus_passes
+from finecorpus.pipeline.assess.corpus_passes import (
+    DEFAULT_BOILERPLATE_ABS_FLOOR_COUNT,
+    DEFAULT_BOILERPLATE_ABS_FLOOR_FRACTION,
+    run_corpus_passes,
+)
 from finecorpus.pipeline.assess.parsers import REGISTRY, ParserContext
 from finecorpus.pipeline.stage import Stage
 
@@ -96,6 +100,12 @@ class AssessStage(Stage):
     Args:
         run_id: Pipeline run identifier (§12 traceability), threaded from the orchestrator.
         run_started_at: Timestamp threaded from the orchestrator (not wall-clock).
+        boilerplate_abs_floor_count: Minimum total corpus occurrences for branch (b)
+            boilerplate detection (D-32). Mirrors ``assessment.boilerplate_abs_floor_count``
+            in corpus.yaml. Default: 3.
+        boilerplate_abs_floor_fraction: Minimum unique-document fraction for branch (b)
+            boilerplate detection (D-32). Mirrors ``assessment.boilerplate_abs_floor_fraction``
+            in corpus.yaml. Default: 0.05.
     """
 
     name = "assess"
@@ -108,9 +118,13 @@ class AssessStage(Stage):
         self,
         run_id: str = "",
         run_started_at: datetime | None = None,
+        boilerplate_abs_floor_count: int = DEFAULT_BOILERPLATE_ABS_FLOOR_COUNT,
+        boilerplate_abs_floor_fraction: float = DEFAULT_BOILERPLATE_ABS_FLOOR_FRACTION,
     ) -> None:
         self._run_id = run_id
         self._run_started_at = run_started_at or datetime.now(tz=UTC)
+        self._boilerplate_abs_floor_count = boilerplate_abs_floor_count
+        self._boilerplate_abs_floor_fraction = boilerplate_abs_floor_fraction
 
     def _produce(self, input_data: dict[str, Any] | None) -> dict[str, Any]:
         """Produce one ParseResult per inventory item.
@@ -165,7 +179,11 @@ class AssessStage(Stage):
 
         # --- Phase 2: corpus-level passes ---
         # Run after all per-document parsing so the full corpus is available.
-        version_families, boilerplate_blocks = run_corpus_passes(results)
+        version_families, boilerplate_blocks = run_corpus_passes(
+            results,
+            boilerplate_abs_floor_count=self._boilerplate_abs_floor_count,
+            boilerplate_abs_floor_fraction=self._boilerplate_abs_floor_fraction,
+        )
 
         batch = ParseResultBatch(
             schema_version=BATCH_SCHEMA_VERSION,

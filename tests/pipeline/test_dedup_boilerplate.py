@@ -928,3 +928,105 @@ class TestD32AbsoluteFloor:
             f"Branch (a) at fraction=1.0 must still fire (3-doc small corpus); "
             f"blocks detected: {blocks}"
         )
+
+
+# ---------------------------------------------------------------------------
+# F-1: AssessmentConfig wiring — non-default abs_floor values change detection
+# ---------------------------------------------------------------------------
+
+
+class TestAssessStageAbsFloorWiring:
+    """Verify that boilerplate_abs_floor_count / boilerplate_abs_floor_fraction
+    passed to AssessStage are forwarded to run_corpus_passes / compute_boilerplate_blocks.
+
+    The test calls run_corpus_passes directly (bypassing file I/O) with the same
+    arguments that AssessStage.__init__ stores, demonstrating that a non-default
+    value in config changes detection behaviour.
+
+    F-1 ruling: add both fields to AssessmentConfig and wire them from config
+    through AssessStage into run_corpus_passes()/detect_boilerplate().
+    """
+
+    def _make_pr(self, doc_id: str, text: str) -> dict[str, Any]:
+        return {
+            "document_id": doc_id,
+            "parse_status": "parsed",
+            "regions": [{"text": text, "region_id": f"reg-{doc_id}"}],
+        }
+
+    def test_raised_abs_floor_count_suppresses_detection(self):
+        """With abs_floor_count raised to 10, a block with only 3 total occurrences is NOT detected.
+
+        Default config (abs_floor_count=3, abs_floor_fraction=0.05):
+          - 3 docs share the block in a 13-doc corpus → total=3 >= 3 AND fraction=3/13 >= 0.05
+          - Branch (b) fires → block IS in boilerplate set.
+
+        Non-default config (abs_floor_count=10):
+          - total=3 < 10 → branch (b) does NOT fire.
+          - fraction=3/13 = 0.23 < 0.30 → branch (a) does NOT fire.
+          - Block is NOT in boilerplate set.
+
+        This confirms that AssessStage.__init__'s boilerplate_abs_floor_count parameter
+        (mirroring assessment.boilerplate_abs_floor_count in corpus.yaml) flows through
+        to compute_boilerplate_blocks(), changing detection behaviour as documented (F-1).
+        """
+        import re
+
+        shared = "proprietary notice this block appears in three of thirteen documents"
+        results = [
+            self._make_pr(
+                f"doc-{i}",
+                f"{shared}\n\nunique content for document {i} padding to exceed minimum length",
+            )
+            for i in range(3)
+        ] + [
+            self._make_pr(
+                f"filler-{i}",
+                f"completely unrelated content for filler document number {i} distinct padding",
+            )
+            for i in range(10)
+        ]
+        assert len(results) == 13
+
+        # --- Default config: branch (b) fires (count=3 >= 3, fraction=3/13 >= 0.05) ---
+        _, boilerplate_default = run_corpus_passes(
+            [dict(r) for r in results],  # copy so mutation doesn't bleed between calls
+            boilerplate_abs_floor_count=3,
+            boilerplate_abs_floor_fraction=0.05,
+        )
+        norm_shared = re.sub(r"\s+", " ", shared.lower()).strip()
+        assert norm_shared in boilerplate_default, (
+            "Default abs_floor_count=3 must detect the block (branch b: count=3 >= 3, "
+            "fraction=3/13 >= 0.05); boilerplate set was empty or missing block"
+        )
+
+        # --- Non-default config (raised floor): branch (b) does NOT fire ---
+        _, boilerplate_raised = run_corpus_passes(
+            [dict(r) for r in results],
+            boilerplate_abs_floor_count=10,  # raised above total count of 3
+            boilerplate_abs_floor_fraction=0.05,
+        )
+        assert norm_shared not in boilerplate_raised, (
+            "Raised abs_floor_count=10 must suppress detection (count=3 < 10); "
+            "block was unexpectedly classified as boilerplate"
+        )
+
+    def test_assess_stage_stores_custom_abs_floor_values(self):
+        """AssessStage.__init__ stores boilerplate_abs_floor_count/fraction on self.
+
+        Validates that the constructor parameters are correctly stored as instance
+        attributes that will be forwarded to run_corpus_passes on the next _produce() call.
+        """
+        from finecorpus.pipeline.assess.stage import AssessStage
+
+        stage = AssessStage(
+            run_id="test-wiring",
+            boilerplate_abs_floor_count=7,
+            boilerplate_abs_floor_fraction=0.12,
+        )
+        assert stage._boilerplate_abs_floor_count == 7, (
+            "AssessStage must store boilerplate_abs_floor_count from constructor"
+        )
+        assert stage._boilerplate_abs_floor_fraction == 0.12, (
+            "AssessStage must store boilerplate_abs_floor_fraction from constructor"
+        )

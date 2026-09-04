@@ -75,8 +75,6 @@ fixtures:
     location: pages 1-2
   - code: mixed_pdf
     severity: info
-  - code: table_structure_retained
-    severity: info
   flags:
   - boilerplate_legal_preamble
   - cross_reference_see_section_4_2
@@ -250,6 +248,8 @@ fixtures:
   - code: boilerplate_detected
     severity: info
     location: navigation chrome
+  - code: table_structure_retained
+    severity: info
   flags:
   - boilerplate_nav_chrome
   - internal_wiki_links
