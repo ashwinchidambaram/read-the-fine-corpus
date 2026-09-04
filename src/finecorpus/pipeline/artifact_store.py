@@ -19,7 +19,7 @@ import json
 import pathlib
 from typing import Any
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 
 class ArtifactStoreError(Exception):
@@ -135,8 +135,8 @@ class ArtifactStore:
     def load_with_model_validation(
         self,
         stage_name: str,
-        model_class: type,
-    ) -> Any:
+        model_class: type[BaseModel],
+    ) -> BaseModel:
         """Load an artifact and fully validate it against a pydantic model.
 
         Args:
