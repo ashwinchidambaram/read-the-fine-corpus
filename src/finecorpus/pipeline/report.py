@@ -176,6 +176,8 @@ class _Context:
     source_paths: dict[str, str]
     # ExclusionRecord dicts from Decompose, keyed by exclusion_id
     exclusion_records: dict[str, dict[str, Any]]
+    # Whether the decompose artifact was present and successfully loaded (F-07)
+    decompose_artifact_present: bool = True
 
 
 def _load_context(store: ArtifactStore, run_id: str) -> _Context:
@@ -207,19 +209,24 @@ def _load_context(store: ArtifactStore, run_id: str) -> _Context:
     # --- SegmentSetBatch (decompose artifact) ---
     segment_sets: dict[str, dict[str, Any]] = {}
     exclusion_records: dict[str, dict[str, Any]] = {}
+    decompose_artifact_present = False
 
     if store.exists("decompose"):
-        decompose_raw = store.load("decompose")
-        for ss in decompose_raw.get("segment_sets", []):
-            doc_id = ss.get("document_id", "")
-            if doc_id:
-                segment_sets[doc_id] = ss
-                # Collect exclusion records from this segment set
-                for exc in ss.get("exclusions", []):
-                    exc_id = exc.get("exclusion_id", "")
-                    if exc_id:
-                        exc["_document_id"] = doc_id  # annotate for grouping
-                        exclusion_records[exc_id] = exc
+        try:
+            decompose_raw = store.load("decompose")
+            decompose_artifact_present = True
+            for ss in decompose_raw.get("segment_sets", []):
+                doc_id = ss.get("document_id", "")
+                if doc_id:
+                    segment_sets[doc_id] = ss
+                    # Collect exclusion records from this segment set
+                    for exc in ss.get("exclusions", []):
+                        exc_id = exc.get("exclusion_id", "")
+                        if exc_id:
+                            exc["_document_id"] = doc_id  # annotate for grouping
+                            exclusion_records[exc_id] = exc
+        except ArtifactStoreError:
+            decompose_artifact_present = False
 
     return _Context(
         run_id=run_id,
@@ -229,23 +236,13 @@ def _load_context(store: ArtifactStore, run_id: str) -> _Context:
         boilerplate_blocks=boilerplate_blocks,
         source_paths=source_paths,
         exclusion_records=exclusion_records,
+        decompose_artifact_present=decompose_artifact_present,
     )
 
 
 # ---------------------------------------------------------------------------
 # Internal: build findings JSON
 # ---------------------------------------------------------------------------
-
-# Reason codes for exclusions from pre-parse stage
-_EXCLUDED_PRE_PARSE_REASONS: dict[str, str] = {
-    "spreadsheet_database": "Spreadsheet classified as database — not vectorizable (§6.4).",
-    "spreadsheet_model": "Spreadsheet classified as model — stale snapshot risk (§6.4).",
-    "csv_not_supported": "CSV files are not supported by the spreadsheet parser.",
-    "audio_not_supported": "Audio files are unservable content (§7.5).",
-    "video_not_supported": "Video files are unservable content (§7.5).",
-    "cad_not_supported": "CAD files are unservable content (§7.5).",
-    "unrecognized_extension": "File type not recognized — unservable content (§7.5).",
-}
 
 
 def _get_source_path(ctx: _Context, doc_id: str, pr: dict[str, Any]) -> str:
@@ -254,34 +251,6 @@ def _get_source_path(ctx: _Context, doc_id: str, pr: dict[str, Any]) -> str:
         return ctx.source_paths[doc_id]
     # Fall back to the document_id itself (best-effort)
     return doc_id
-
-
-def _extract_security_findings(pr: dict[str, Any]) -> dict[str, Any]:
-    """Extract security-relevant data from a ParseResult dict."""
-    invisible_detections = []
-    injection_max = 0.0
-    injection_segments: list[dict[str, Any]] = []
-
-    # Invisible content from pages
-    for page in pr.get("pages", []):
-        for ic in page.get("invisible_content", []):
-            invisible_detections.append(
-                {
-                    "kind": ic.get("kind", ""),
-                    "page_number": page.get("page_number"),
-                    "text_snippet": (ic.get("text") or "")[:80] or None,
-                }
-            )
-
-    # Injection suspicion lives in the SegmentSet (Decompose output), not ParseResult.
-    # We document this gap: see DATA GAPS note at module bottom.
-
-    return {
-        "invisible_content_count": len(invisible_detections),
-        "invisible_content": invisible_detections,
-        "injection_max_suspicion": injection_max,
-        "injection_flagged_segments": injection_segments,
-    }
 
 
 def _extract_ocr_summary(pr: dict[str, Any]) -> dict[str, Any] | None:
@@ -482,11 +451,13 @@ def _build_findings_json(ctx: _Context) -> dict[str, Any]:
                 "primary_source_path": ctx.source_paths.get(
                     vf.get("primary_document_id", ""), vf.get("primary_document_id", "")
                 ),
+                "primacy_basis": vf.get("primacy_basis"),
                 "superseded_document_ids": vf.get("superseded_document_ids", []),
                 "superseded_source_paths": [
                     ctx.source_paths.get(d, d) for d in vf.get("superseded_document_ids", [])
                 ],
-                "similarity_score": vf.get("similarity_score"),
+                # similarity_scores is a per-member dict {member_id -> score_vs_primary}
+                "similarity_scores": vf.get("similarity_scores", {}),
             }
             for vf in sorted(ctx.version_families, key=lambda v: v.get("family_id", ""))
         ],
@@ -567,6 +538,7 @@ def _build_exclusions_json(ctx: _Context) -> dict[str, Any]:
         "schema_version": "1.0.0",
         "contract": "exclusion_report",
         "run_id": ctx.run_id,
+        "decompose_artifact_present": ctx.decompose_artifact_present,
         "summary": {
             "total_exclusions": len(exclusions),
             "by_reason": dict(sorted(reason_counts.items())),
@@ -584,8 +556,17 @@ def _find_primary_for_superseded(doc_id: str, version_families: list[dict[str, A
 
 
 def _user_action_for_reason(reason: str) -> str:
-    """Return plain-language user guidance for an exclusion reason."""
+    """Return plain-language user guidance for an exclusion reason.
+
+    Only covers codes that correspond to actual ExclusionReason enum members.
+    File-type detail (audio, video, CAD, CSV, unrecognized extension) is carried
+    in reason_detail under the unservable_content reason code.
+    """
     _actions: dict[str, str] = {
+        "unservable_content": (
+            "Nothing — this content type cannot be usefully indexed. "
+            "See reason_detail for the specific file-type detail (§7.5)."
+        ),
         "spreadsheet_database": (
             "Nothing — a row-oriented database spreadsheet cannot be usefully vectorized. "
             "If this is a narrative report, reclassify via spreadsheet_triage override in "
@@ -596,45 +577,29 @@ def _user_action_for_reason(reason: str) -> str:
             "without becoming a stale snapshot. If the spreadsheet contains narrative, "
             "reclassify via spreadsheet_triage override in IngestionConfig."
         ),
-        "csv_not_supported": (
-            "Nothing — CSV files are not supported. Convert to .xlsx or provide the data "
-            "as a narrative document."
+        "encrypted": (
+            "Decrypt the file and re-run the pipeline, or remove the document from the "
+            "source directory if it should not be indexed."
         ),
-        "audio_not_supported": (
-            "Nothing — audio files are unservable content. Provide a transcript if the "
-            "spoken content should be indexed."
-        ),
-        "video_not_supported": (
-            "Nothing — video files are unservable content. Provide a transcript or "
-            "slide deck if the content should be indexed."
-        ),
-        "cad_not_supported": (
-            "Nothing — CAD files are unservable content. Provide a specification "
-            "document or PDF export if the design intent should be indexed."
-        ),
-        "unrecognized_extension": (
-            "Check whether the file is a supported type with an unexpected extension. "
-            "If so, rename it. Otherwise, nothing — unrecognized files cannot be indexed."
+        "empty_region": (
+            "Nothing — the region contained no extractable text. This is the correct outcome."
         ),
         "superseded_version": (
             "Set index_superseded_versions=true in IngestionConfig to include "
             "superseded versions in the index. By default only the newest version is indexed."
         ),
-        "too_short": (
-            "Nothing — short segments (below the minimum length threshold) are excluded "
-            "to avoid poor-quality chunks. This is the correct outcome."
-        ),
-        "empty_region": (
-            "Nothing — the region contained no extractable text. This is the correct outcome."
+        "duplicate": (
+            "Remove exact duplicate files from the source directory, or nothing — "
+            "only one copy will be indexed."
         ),
         "parse_failed": (
             "Investigate why the document could not be parsed. Check for password protection, "
             "corruption, or missing dependencies (e.g., tesseract for scanned PDFs)."
         ),
-        "unservable_content": (
-            "Nothing — this content type cannot be usefully indexed. This is the correct outcome."
+        "too_short": (
+            "Nothing — short segments (below the minimum length threshold) are excluded "
+            "to avoid poor-quality chunks. This is the correct outcome."
         ),
-        "excluded_pre_parse": ("Check the reason_detail for the specific exclusion cause."),
         "other": "Review the reason_detail for specific guidance.",
     }
     return _actions.get(reason, "Review the reason_detail for specific guidance.")
@@ -744,14 +709,18 @@ def _render_findings_md(data: dict[str, Any], run_id: str) -> str:
         lines.append("")
         for vf in families:
             fid = vf.get("family_id", "?")
-            primary_path = vf.get("primary_source_path", vf.get("primary_document_id", "?"))
+            primary_id = vf.get("primary_document_id", "")
+            primary_path = vf.get("primary_source_path", primary_id or "?")
+            primacy_basis = vf.get("primacy_basis") or "unknown"
+            superseded_ids = vf.get("superseded_document_ids", [])
             superseded_paths = vf.get("superseded_source_paths", [])
-            sim = vf.get("similarity_score")
-            sim_str = f"{sim:.2f}" if sim is not None else "n/a"
-            lines.append(f"### Family `{fid}` (similarity: {sim_str})")
-            lines.append(f"- **Primary:** `{primary_path}`")
-            for sp in superseded_paths:
-                lines.append(f"- Superseded: `{sp}`")
+            sim_scores: dict[str, float] = vf.get("similarity_scores", {})
+            lines.append(f"### Family `{fid}`")
+            lines.append(f"- **Primary:** `{primary_path}` *(primacy basis: {primacy_basis})*")
+            for sid, sp in zip(superseded_ids, superseded_paths, strict=False):
+                score = sim_scores.get(sid)
+                score_str = f"{score:.4f}" if score is not None else "n/a"
+                lines.append(f"- Superseded: `{sp}` (similarity to primary: {score_str})")
             lines.append("")
 
     # Boilerplate blocks
@@ -794,7 +763,12 @@ def _render_findings_md(data: dict[str, Any], run_id: str) -> str:
         )
     lines.append("")
 
-    # Per-document detail sections (for documents with notable findings)
+    # Per-document detail sections (for documents with notable findings).
+    # A document whose ONLY findings are INFO link_record entries does NOT qualify as notable —
+    # those are aggregated into a single summary line (F-05).
+    def _has_non_link_record_findings(doc: dict[str, Any]) -> bool:
+        return any(f.get("code") != "link_record" for f in doc.get("findings", []))
+
     notable = [
         doc
         for doc in documents
@@ -805,7 +779,7 @@ def _render_findings_md(data: dict[str, Any], run_id: str) -> str:
             or doc.get("mixed_pdf_scanned_pages")
             or doc.get("triage") is not None
             or doc.get("parse_status") in ("failed", "partial")
-            or len(doc.get("findings", [])) > 0
+            or _has_non_link_record_findings(doc)
         )
     ]
 
@@ -871,13 +845,22 @@ def _render_findings_md(data: dict[str, Any], run_id: str) -> str:
                     f"({len(sec.get('injection_flagged_segments', []))} segment(s))"
                 )
 
-            # Findings
+            # Findings — aggregate link_record INFO entries to avoid noise (F-05)
             findings = doc.get("findings", [])
             if findings:
-                lines.append("- Findings:")
-                for f in findings:
-                    badge = _SEV_BADGE.get(f.get("severity", "info"), "INFO")
-                    lines.append(f"  - [{badge}] `{f.get('code', '?')}`: {f.get('message', '')}")
+                link_record_count = sum(1 for f in findings if f.get("code") == "link_record")
+                non_link_findings = [f for f in findings if f.get("code") != "link_record"]
+                if non_link_findings:
+                    lines.append("- Findings:")
+                    for f in non_link_findings:
+                        badge = _SEV_BADGE.get(f.get("severity", "info"), "INFO")
+                        lines.append(
+                            f"  - [{badge}] `{f.get('code', '?')}`: {f.get('message', '')}"
+                        )
+                if link_record_count > 0:
+                    lines.append(
+                        f"- {link_record_count} link(s) recorded (see JSON report for full list)"
+                    )
 
             lines.append("")
 
@@ -889,21 +872,16 @@ def _render_findings_md(data: dict[str, Any], run_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 _REASON_HEADING: dict[str, str] = {
-    "excluded_pre_parse": "Excluded Before Parsing (Unservable File Types)",
+    # Codes that map to actual ExclusionReason enum members
+    "unservable_content": "Unservable Content",
     "spreadsheet_database": "Spreadsheet: Database Kind",
     "spreadsheet_model": "Spreadsheet: Model Kind",
-    "csv_not_supported": "CSV Not Supported",
-    "audio_not_supported": "Audio Files (Unservable)",
-    "video_not_supported": "Video Files (Unservable)",
-    "cad_not_supported": "CAD Files (Unservable)",
-    "unrecognized_extension": "Unrecognized File Type",
-    "superseded_version": "Superseded Near-Duplicate Versions",
-    "too_short": "Segments: Too Short",
-    "empty_region": "Segments: Empty Region",
-    "parse_failed": "Parse Failure",
-    "unservable_content": "Unservable Content",
     "encrypted": "Encrypted / Password-Protected",
+    "empty_region": "Segments: Empty Region",
+    "superseded_version": "Superseded Near-Duplicate Versions",
     "duplicate": "Exact Duplicates",
+    "parse_failed": "Parse Failure",
+    "too_short": "Segments: Too Short",
     "other": "Other Exclusions",
 }
 
@@ -913,15 +891,29 @@ def _render_exclusions_md(data: dict[str, Any], run_id: str) -> str:
     lines: list[str] = []
     summary = data.get("summary", {})
     exclusions = data.get("exclusions", [])
+    decompose_present = data.get("decompose_artifact_present", True)
 
     lines.append(f"# Exclusion Report — run `{run_id}`")
     lines.append("")
-    lines.append(
-        "> The exclusion report is a first-class deliverable, not an error log (§7.5). "
-        "Every document and segment excluded from indexing is listed here with its reason. "
-        "Nothing is silently dropped."
-    )
-    lines.append("")
+
+    # F-07: warn prominently when decompose artifact is missing
+    if not decompose_present:
+        lines.append(
+            "> **WARNING: The decompose artifact is missing for this run.**  "
+            "Segment-level exclusions (too_short, empty_region, etc.) cannot be reported. "
+            "Re-run the pipeline through the Decompose stage to obtain a complete exclusion "
+            "report. The counts below reflect ONLY pre-parse exclusions recorded by the Assess "
+            "stage via ExclusionRecords; the true total exclusions may be higher."
+        )
+        lines.append("")
+    else:
+        lines.append(
+            "> The exclusion report is a first-class deliverable, not an error log (§7.5). "
+            "Every document and segment excluded from indexing is listed here with its reason. "
+            "Nothing is silently dropped."
+        )
+        lines.append("")
+
     lines.append("## Summary")
     lines.append("")
     lines.append(f"- **Total exclusions:** {summary.get('total_exclusions', 0)}")
@@ -934,7 +926,13 @@ def _render_exclusions_md(data: dict[str, Any], run_id: str) -> str:
     lines.append("")
 
     if not exclusions:
-        lines.append("*No exclusions in this run.*")
+        if not decompose_present:
+            lines.append(
+                "*No exclusion records found. The decompose artifact is missing — "
+                "segment-level exclusions are not available for this run.*"
+            )
+        else:
+            lines.append("*No exclusions in this run.*")
         return "\n".join(lines)
 
     # Group by reason
@@ -942,23 +940,17 @@ def _render_exclusions_md(data: dict[str, Any], run_id: str) -> str:
     for exc in exclusions:
         by_reason_groups[exc.get("reason", "other")].append(exc)
 
-    # Render each group in a consistent order
+    # Render each group in a consistent order (codes match ExclusionReason enum members)
     reason_order = [
-        "excluded_pre_parse",
+        "unservable_content",
         "spreadsheet_database",
         "spreadsheet_model",
-        "csv_not_supported",
-        "audio_not_supported",
-        "video_not_supported",
-        "cad_not_supported",
-        "unrecognized_extension",
-        "superseded_version",
         "encrypted",
         "parse_failed",
-        "unservable_content",
+        "superseded_version",
+        "duplicate",
         "too_short",
         "empty_region",
-        "duplicate",
         "other",
     ]
     # Append any reasons not in the explicit order

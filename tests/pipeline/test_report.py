@@ -143,9 +143,11 @@ class TestAdversarialSecurityFindings:
         adv_entries = [
             doc for doc in fj.get("documents", []) if "adversarial" in doc.get("source_path", "")
         ]
-        # The adversarial fixture may have both invisible content and injection signals;
-        # we assert at least invisible content is reported (injection lives in segments).
         assert adv_entries, "adversarial.pdf must appear in findings report"
+        assert adv_entries[0]["security"]["injection_max_suspicion"] > 0, (
+            "adversarial.pdf must have injection_max_suspicion > 0 in findings report; "
+            f"got {adv_entries[0]['security']['injection_max_suspicion']}"
+        )
 
     def test_summary_invisible_count_nonzero(self, tmp_path):
         """Summary invisible_content_detections must be > 0 for adversarial corpus."""
@@ -383,8 +385,9 @@ class TestNearDupVersionFamilyInReport:
 class TestMixedPDFInReport:
     """bloated_manual.pdf mixed-PDF findings appear in report (skip if no tesseract)."""
 
+    @classmethod
     @pytest.fixture(scope="class")
-    def bloated_run(self, tmp_path_factory):
+    def bloated_run(cls, tmp_path_factory):
         tmp_path = tmp_path_factory.mktemp("bloated")
         store, _, _ = _run_pipeline_over_subset(
             tmp_path, ["bloated_manual.pdf"], run_id="test-bloated"
@@ -447,11 +450,12 @@ class TestExclusionCompletenessInvariant:
         "confluence_export.html",
     ]
 
+    @classmethod
     @pytest.fixture(scope="class")
-    def full_run(self, tmp_path_factory):
+    def full_run(cls, tmp_path_factory):
         tmp_path = tmp_path_factory.mktemp("full")
         store, _, _ = _run_pipeline_over_subset(
-            tmp_path, self.ALL_FIXTURES, run_id="test-completeness"
+            tmp_path, cls.ALL_FIXTURES, run_id="test-completeness"
         )
         return store
 
@@ -526,8 +530,9 @@ class TestExclusionCompletenessInvariant:
 class TestReportJSONShape:
     """Findings and exclusion JSON must have required top-level fields."""
 
+    @classmethod
     @pytest.fixture(scope="class")
-    def simple_run(self, tmp_path_factory):
+    def simple_run(cls, tmp_path_factory):
         tmp_path = tmp_path_factory.mktemp("shape")
         store, _, _ = _run_pipeline_over_subset(tmp_path, ["clean_native.pdf"], run_id="test-shape")
         return store
@@ -736,4 +741,86 @@ class TestCLIReport:
         assert proc.stdout.strip(), "corpus report produced no output"
         assert "Findings Report" in proc.stdout, (
             "Expected 'Findings Report' in corpus report output"
+        )
+
+
+# ---------------------------------------------------------------------------
+# J. Missing decompose artifact: warning banner (F-07)
+# ---------------------------------------------------------------------------
+
+
+class TestMissingDecomposeArtifact:
+    """When the decompose artifact is absent, report must warn — not claim zero silent drops."""
+
+    def test_missing_decompose_sets_flag_in_json(self, tmp_path):
+        """exclusions_json.decompose_artifact_present is False when decompose artifact missing."""
+        from finecorpus.pipeline.assess import AssessStage
+        from finecorpus.pipeline.collect import CollectStage
+
+        artifacts_root = tmp_path / "artifacts"
+        src_dir = tmp_path / "corpus"
+        src_dir.mkdir()
+        shutil.copy2(FIXTURE_CORPUS / "clean_native.pdf", src_dir / "clean_native.pdf")
+
+        store = ArtifactStore(artifacts_root=artifacts_root, run_id="no-decompose")
+        ts = datetime(2026, 9, 1, tzinfo=UTC)
+
+        collect = CollectStage(
+            source_dir=src_dir,
+            workspace_id="ws-test",
+            kb_id="kb-test",
+            collected_at=ts,
+        )
+        inv = collect.run(input_data=None, store=store)
+
+        assess = AssessStage(run_id="no-decompose", run_started_at=ts)
+        assess.run(input_data=inv, store=store)
+
+        # Deliberately skip DecomposeStage — no decompose artifact written
+        assert not store.exists("decompose"), (
+            "Test setup error: decompose artifact should not exist"
+        )
+
+        result = generate_report(
+            artifacts_root=store.run_dir.parent,
+            run_id=store.run_id,
+        )
+        assert result.exclusions_json.get("decompose_artifact_present") is False, (
+            "exclusions_json.decompose_artifact_present must be False when decompose is missing"
+        )
+
+    def test_missing_decompose_warning_in_md(self, tmp_path):
+        """exclusions_md must contain a WARNING banner when decompose artifact is missing."""
+        from finecorpus.pipeline.assess import AssessStage
+        from finecorpus.pipeline.collect import CollectStage
+
+        artifacts_root = tmp_path / "artifacts"
+        src_dir = tmp_path / "corpus"
+        src_dir.mkdir()
+        shutil.copy2(FIXTURE_CORPUS / "clean_native.pdf", src_dir / "clean_native.pdf")
+
+        store = ArtifactStore(artifacts_root=artifacts_root, run_id="no-decompose-md")
+        ts = datetime(2026, 9, 1, tzinfo=UTC)
+
+        collect = CollectStage(
+            source_dir=src_dir,
+            workspace_id="ws-test",
+            kb_id="kb-test",
+            collected_at=ts,
+        )
+        inv = collect.run(input_data=None, store=store)
+
+        assess = AssessStage(run_id="no-decompose-md", run_started_at=ts)
+        assess.run(input_data=inv, store=store)
+
+        result = generate_report(
+            artifacts_root=store.run_dir.parent,
+            run_id=store.run_id,
+        )
+        assert "WARNING" in result.exclusions_md, (
+            "exclusions_md must contain a WARNING banner when decompose artifact is missing"
+        )
+        assert "Nothing is silently dropped" not in result.exclusions_md, (
+            "exclusions_md must NOT claim 'Nothing is silently dropped' when "
+            "the decompose artifact is missing — that claim would be false"
         )
