@@ -53,6 +53,7 @@ from finecorpus.contracts.shared.blocks import (
     TenancyBlock,
 )
 from finecorpus.pipeline.assess.parsers.base import ParserContext
+from finecorpus.pipeline.assess.security import detect_invisible_content
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -340,6 +341,7 @@ class NativePDFParser:
         pages: list[PageResult] = []
         regions: list[RegionResult] = []
         encoding_issues: list[EncodingIssue] = []
+        all_invisible_findings: list[Finding] = []
         page_char_counts: list[int] = []
         page_failures: list[int] = []
         any_success = False
@@ -364,6 +366,16 @@ class NativePDFParser:
                 _DECOMPRESSION_ERROR_RE.search(msg) for msg in warn_capture.messages
             )
 
+            # §14.1 invisible-content detection — run on every page regardless
+            # of extraction outcome (hidden text in failed streams is still a
+            # security signal; detect_invisible_content is best-effort and safe).
+            try:
+                page_invisible, page_invisible_findings = detect_invisible_content(reader, page_num)
+            except Exception:
+                page_invisible = []
+                page_invisible_findings = []
+            all_invisible_findings.extend(page_invisible_findings)
+
             if decompression_failed and not text.strip():
                 page_char_counts.append(0)
                 page_failures.append(page_num)
@@ -373,7 +385,7 @@ class NativePDFParser:
                         is_scanned=False,
                         ocr_confidence=None,
                         extraction_ratio=0.0,
-                        invisible_content=[],
+                        invisible_content=page_invisible,
                     )
                 )
                 regions.append(
@@ -416,7 +428,7 @@ class NativePDFParser:
                     is_scanned=False,
                     ocr_confidence=None,
                     extraction_ratio=round(extraction_ratio, 4),
-                    invisible_content=[],
+                    invisible_content=page_invisible,
                 )
             )
 
@@ -540,6 +552,8 @@ class NativePDFParser:
                     ),
                 )
             )
+        # §14.1 invisible-content findings accumulated across all pages
+        findings.extend(all_invisible_findings)
 
         return ParseResult(
             schema_version="1.0.0",
