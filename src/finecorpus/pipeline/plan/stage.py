@@ -49,7 +49,7 @@ from finecorpus.contracts.shared.blocks import (
 from finecorpus.contracts.versions import SUPPORTED_SEGMENT_SET_BATCH
 from finecorpus.pipeline.stage import Stage
 
-_INGESTION_CONFIG_SCHEMA_VERSION = "1.0.0"
+_INGESTION_CONFIG_SCHEMA_VERSION = "1.1.0"
 
 # Fixed naive baseline reference (§9.3).
 _NAIVE_BASELINE = NaiveBaselineRef(

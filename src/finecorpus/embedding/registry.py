@@ -22,12 +22,16 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import TYPE_CHECKING
+from typing import Any
 
 from finecorpus.embedding.base import EmbeddingProvider
 
-if TYPE_CHECKING:
-    from finecorpus.config.models import Config
+# Config is only referenced in function signatures as a type annotation.
+# With `from __future__ import annotations`, all annotations are lazy strings —
+# no runtime import of finecorpus.config is needed here.
+# F-04: finecorpus.embedding sits below finecorpus.config in the import-linter
+# layers contract; embedding importing config would be an upward back-edge.
+# Using `Any` for the runtime parameter type avoids that dependency entirely.
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +64,7 @@ def _get_openai_api_key() -> str | None:
     return None
 
 
-def _is_airgap_active(config: Config) -> bool:
+def _is_airgap_active(config: Any) -> bool:
     """Return ``True`` when air-gap mode is active (config or env-var)."""
     return config.platform.airgap or os.environ.get("RTFC_AIRGAP", "").lower() in {
         "1",
@@ -75,7 +79,7 @@ def _is_airgap_active(config: Config) -> bool:
 
 
 def build_provider_from_config(
-    config: Config,
+    config: Any,
     which: str | None = None,
 ) -> EmbeddingProvider:
     """Build an embedding provider from *config*.
@@ -132,21 +136,21 @@ def build_provider_from_config(
 
 
 def build_cloud_provider(
-    config: Config,
+    config: Any,
 ) -> EmbeddingProvider:
     """Build the cloud (OpenAI) embedding provider from *config*."""
     return _build_openai(config)
 
 
 def build_local_provider(
-    config: Config,
+    config: Any,
 ) -> EmbeddingProvider:
     """Build the local (Ollama) embedding provider from *config*."""
     return _build_ollama(config)
 
 
 def _build_openai(
-    config: Config,
+    config: Any,
 ) -> EmbeddingProvider:
     """Construct OpenAIProvider from config.providers.embedding.cloud."""
     from finecorpus.embedding.openai_provider import OpenAIProvider
@@ -172,7 +176,7 @@ def _build_openai(
 
 
 def _build_ollama(
-    config: Config,
+    config: Any,
 ) -> EmbeddingProvider:
     """Construct OllamaProvider from config.providers.embedding.local."""
     from finecorpus.embedding.ollama_provider import OllamaProvider

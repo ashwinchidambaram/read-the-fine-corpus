@@ -112,7 +112,8 @@ SUPPORTED_SEGMENT_SET = SpecRange(major=1, min_minor=1)
 """Segment set consumer range — bumped to 1.1 with addition of ExclusionReason.too_short."""
 SUPPORTED_SEGMENT_SET_BATCH = SpecRange(major=1, min_minor=0)
 """Decompose → Plan batch envelope (D-26: promoted to official contract)."""
-SUPPORTED_INGESTION_CONFIG = SpecRange(major=1, min_minor=0)
+SUPPORTED_INGESTION_CONFIG = SpecRange(major=1, min_minor=1)
+"""Ingestion-config consumer range — bumped to 1.1 with addition of ChunkingConfig.tokenizer."""
 SUPPORTED_CHUNK = SpecRange(major=1, min_minor=0)
 SUPPORTED_EVAL_SET = SpecRange(major=1, min_minor=0)
 SUPPORTED_RETRIEVAL_RESPONSE = SpecRange(major=1, min_minor=0)

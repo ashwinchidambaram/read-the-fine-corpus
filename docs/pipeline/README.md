@@ -1,6 +1,6 @@
 # Pipeline
 
-Status: **Phase 1 in progress** (Collect real; Assess/Decompose real for native-text PDF; Plan/Build skeletons).
+Status: **Phase 1 complete** (Collect real; Assess/Decompose real for native-text PDF; Plan skeleton; Build real — recursive-char chunking, shadow-collection write, full §8 provenance, resumability).
 Governing spec: §5, §6, §12, §18.2.
 
 The pipeline is a five-stage linear chain. Each stage consumes the previous stage's artifact,
@@ -118,6 +118,28 @@ same logical inputs within a run, even if processing spans midnight.
 Each stage receives the previous stage's return value as `input_data`. Failures propagate
 immediately — the orchestrator does not catch or swallow stage errors.
 
+**Extended signature (Phase 1):**
+
+```python
+run_pipeline(
+    source_dir: str | pathlib.Path,
+    artifacts_root: str | pathlib.Path,
+    run_id: str,
+    workspace_id: str,
+    kb_id: str,
+    run_started_at: datetime | None = None,
+    embedding_provider: EmbeddingProvider | None = None,
+    index_adapter: IndexAdapter | None = None,
+    build_id: int = 1,
+    promote: bool = False,
+    db_session: Session | None = None,
+) -> dict[str, str]   # stage name → absolute artifact path
+```
+
+When `embedding_provider` and `index_adapter` are both supplied, the real Build stage runs.
+When omitted, Build falls back to the Phase 0 skeleton. Setting `promote=True` triggers
+alias promotion after Build completes (requires `db_session`).
+
 ---
 
 ## Phase 1 stage status
@@ -128,7 +150,7 @@ immediately — the orchestrator does not catch or swallow stage errors.
 | **Assess** | Real — native-text PDF | `ParseResultBatch` (§12, schema v1.0.0) | Per-document `ParseResult` with per-page extraction via pypdf. Quality score heuristic. Honest exclusion for non-PDF, encrypted, image-only, and malformed PDFs. See [assess.md](assess.md). |
 | **Decompose** | Real — prose segmentation | `SegmentSetBatch` (§12, schema v1.0.0) | Paragraph segmentation, heading detection, segment types, structural path breadcrumbs, salience via type priors. Frozen-artifact semantics (content-addressed cache). See [decompose.md](decompose.md). |
 | **Plan** | Skeleton | `IngestionConfig` (§12, schema v1.0.0) | Emits a minimal but contract-valid `IngestionConfig`: `default_rule` only (recursive_char chunking, dense retrieval), no per-class rules. All provenance labelled `heuristic`. `config_version` derived deterministically from build-affecting fields (§10.5). Phase 1+ replaces with real planning. |
-| **Build** | Skeleton | `BuildResult` (pipeline-internal envelope) | Emits 0 chunks with an explanatory report. `skeleton=true` on envelope. Phase 1+ replaces with real chunking, embedding, and shadow-collection writing. |
+| **Build** | Real — recursive-char chunking | `BuildResult` (pipeline-internal envelope) | Recursive character splitting at 512 tokens / 50-token overlap per §9.3. Full §8 provenance carried from segments. Chunks embedded via injected `EmbeddingProvider` and written to a shadow Qdrant collection (C-4). Lifecycle validation gates promotion. Resumability via per-document checkpoint. `skeleton=None` on real runs. See [build.md](build.md). |
 
 The `skeleton: true` field on pipeline-internal envelopes is a machine-readable honesty marker.
 Downstream tooling can check this field rather than guessing whether a run produced real output.
@@ -141,6 +163,7 @@ Phase 1 real implementations set `skeleton=None`.
 - [collect.md](collect.md) — Collect stage: document_id derivation, duplicate detection, field inventory
 - [assess.md](assess.md) — Assess stage: pypdf extraction, quality score heuristic, honest failure modes
 - [decompose.md](decompose.md) — Decompose stage: paragraph segmentation, heading detection, frozen artifacts
+- [build.md](build.md) — Build stage: chunker params, provenance mapping, checkpoint/resume semantics, promote flag
 - [Contracts](../contracts/) — the seven inter-stage data contracts
 - [Architecture overview](../architecture/overview.md) — pipeline decomposition in the full system
 - [Decision ledger D-26](../process/decision-ledger.md) — CLOSED: batch envelope contracts promoted to official §12 contracts

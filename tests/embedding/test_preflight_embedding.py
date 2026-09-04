@@ -15,6 +15,7 @@ import pytest
 
 from finecorpus.config import Config, load_config, run_preflight
 from finecorpus.config.preflight import CheckStatus
+from finecorpus.embedding.preflight_check import make_embedding_check
 
 
 def write_yaml(tmp_path: Path, content: str) -> Path:
@@ -29,14 +30,14 @@ class TestEmbeddingProviderPreflightSkipped:
     def test_no_default_is_skipped(self, tmp_path: Path) -> None:
         cfg_file = write_yaml(tmp_path, "{}\n")
         cfg = load_config(cfg_file)
-        report = run_preflight(cfg)
+        report = run_preflight(cfg, extra_checks=[make_embedding_check()])
         emb = next(r for r in report.results if r.name == "embedding_provider")
         assert emb.status == CheckStatus.SKIPPED
 
     def test_skipped_check_has_informative_message(self, tmp_path: Path) -> None:
         cfg_file = write_yaml(tmp_path, "{}\n")
         cfg = load_config(cfg_file)
-        report = run_preflight(cfg)
+        report = run_preflight(cfg, extra_checks=[make_embedding_check()])
         emb = next(r for r in report.results if r.name == "embedding_provider")
         assert len(emb.message) > 20
 
@@ -69,7 +70,7 @@ class TestEmbeddingProviderPreflightWithFakeProvider:
         fake = FakeProvider(dimensions=768, model_id="nomic-embed-text")
         monkeypatch.setattr(_registry, "build_provider_from_config", lambda *a, **kw: fake)
 
-        report = run_preflight(cfg)
+        report = run_preflight(cfg, extra_checks=[make_embedding_check()])
         emb = next(r for r in report.results if r.name == "embedding_provider")
         assert emb.status == CheckStatus.OK
         assert "confirmed" in emb.message
@@ -84,7 +85,7 @@ class TestEmbeddingProviderPreflightWithFakeProvider:
         fake = FakeProvider(dimensions=768, model_id="nomic-embed-text", fail_on_health=True)
         monkeypatch.setattr(_registry, "build_provider_from_config", lambda *a, **kw: fake)
 
-        report = run_preflight(cfg)
+        report = run_preflight(cfg, extra_checks=[make_embedding_check()])
         emb = next(r for r in report.results if r.name == "embedding_provider")
         assert emb.status == CheckStatus.FAIL
         assert not report.passed
@@ -101,7 +102,7 @@ class TestEmbeddingProviderPreflightWithFakeProvider:
 
         monkeypatch.setattr(_registry, "build_provider_from_config", _raise)
 
-        report = run_preflight(cfg)
+        report = run_preflight(cfg, extra_checks=[make_embedding_check()])
         emb = next(r for r in report.results if r.name == "embedding_provider")
         assert emb.status == CheckStatus.FAIL
 
@@ -149,7 +150,7 @@ class TestEmbeddingProviderPreflightWithFakeProvider:
 
         monkeypatch.setattr(_registry, "build_provider_from_config", lambda *a, **kw: _CloudFake())
 
-        report = run_preflight(cfg)
+        report = run_preflight(cfg, extra_checks=[make_embedding_check()])
         emb = next(r for r in report.results if r.name == "embedding_provider")
         assert emb.status == CheckStatus.FAIL
         assert "air-gap" in emb.message.lower() or "airgap" in emb.message.lower()
@@ -163,7 +164,7 @@ class TestPreflightEmbeddingBackwardCompat:
     def test_no_provider_configured_still_skipped_not_fail(self, tmp_path: Path) -> None:
         cfg_file = write_yaml(tmp_path, "{}\n")
         cfg = load_config(cfg_file)
-        report = run_preflight(cfg)
+        report = run_preflight(cfg, extra_checks=[make_embedding_check()])
         emb = next(r for r in report.results if r.name == "embedding_provider")
         # SKIPPED is not FAIL → preflight still passes for other checks
         assert emb.status == CheckStatus.SKIPPED
