@@ -232,7 +232,8 @@ class TestMismatchFailsClosed:
         from finecorpus.embedding.fake import FakeProvider
         from finecorpus.retrieval.service import query
 
-        # Provider B — different model_id AND different dimensions from what was indexed
+        # Provider B — different model_id AND different dimensions from what was indexed.
+        # This is the exact object passed to query() below; no wrapping or patching.
         provider_b = FakeProvider(dimensions=DIMS_B, model_id=MODEL_ID_B)
         cache = QueryEmbeddingCache(enabled=False)
 

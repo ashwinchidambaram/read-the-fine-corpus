@@ -49,6 +49,7 @@ from __future__ import annotations
 import threading
 import time
 import uuid
+from collections import Counter
 from typing import Any
 
 import pytest
@@ -268,56 +269,72 @@ class TestAliasSwapUnderLoad:
         errors: list[dict] = []  # {"status": ..., "error": ...}
         query_count_lock = threading.Lock()
         query_counts: list[int] = [0]  # mutable list for cross-thread accumulation
+        observed_config_versions: list[str] = []  # config_version seen in each result
+        config_version_lock = threading.Lock()
         stop_event = threading.Event()
 
         def worker() -> None:
             """Issue continuous queries until stop_event is set.
 
-            Each worker creates its own QdrantAdapter instance.  The QdrantClient
-            HTTP connection pool is NOT guaranteed to be safe for concurrent use
-            across threads when the underlying TCP connection can be interrupted
-            mid-swap.  A per-thread adapter gives each worker its own HTTP session,
-            matching the per-request isolation that real production deployments
-            provide (each HTTP request to the retrieval API gets its own connection).
-            This is the correct test setup for measuring swap atomicity — a shared
-            connection pool would introduce spurious VECTOR_DB_UNAVAILABLE errors
-            on connection reuse races that have nothing to do with alias atomicity.
+            Per-worker adapters isolate connection-level state only.  httpcore's
+            connection pool is lock-protected internally, so concurrent use of a
+            shared adapter is safe at the HTTP level.  However, per-worker adapters
+            avoid connection-reuse races (a TCP connection interrupted mid-swap
+            causes a spurious VECTOR_DB_UNAVAILABLE that has nothing to do with
+            alias atomicity).  The production topology uses a shared singleton
+            adapter; see the shared-adapter phase below which explicitly validates
+            that topology.
             """
-            from finecorpus.index.qdrant.backend import QdrantAdapter as _QA
+            try:
+                from finecorpus.index.qdrant.backend import QdrantAdapter as _QA
 
-            worker_adapter = _QA(url=QDRANT_URL, timeout=10)
-            cache = QueryEmbeddingCache(enabled=False)
-            query_texts = [
-                "atomic alias swap without errors",
-                "retrieval availability during promotion",
-                "embedding vectors fake provider",
-            ]
-            q_idx = 0
-            while not stop_event.is_set():
-                qtext = query_texts[q_idx % len(query_texts)]
-                q_idx += 1
-                try:
-                    with Session(engine) as session:
-                        result = query(
-                            kb_id=kb_id,
-                            query_text=qtext,
-                            provider=fake_provider,
-                            adapter=worker_adapter,
-                            session=session,
-                            top_k=5,
-                            cache=cache,
-                        )
-                    if result.result_status == ResultStatus.error:
-                        errors.append(
-                            {
-                                "status": result.result_status,
-                                "error": result.error.code if result.error else "unknown",
-                            }
-                        )
-                    with query_count_lock:
-                        query_counts[0] += 1
-                except Exception as exc:
-                    errors.append({"status": "exception", "error": str(exc)})
+                worker_adapter = _QA(url=QDRANT_URL, timeout=10)
+                cache = QueryEmbeddingCache(enabled=False)
+                query_texts = [
+                    "atomic alias swap without errors",
+                    "retrieval availability during promotion",
+                    "embedding vectors fake provider",
+                ]
+                q_idx = 0
+                while not stop_event.is_set():
+                    qtext = query_texts[q_idx % len(query_texts)]
+                    q_idx += 1
+                    try:
+                        with Session(engine) as session:
+                            result = query(
+                                kb_id=kb_id,
+                                query_text=qtext,
+                                provider=fake_provider,
+                                adapter=worker_adapter,
+                                session=session,
+                                top_k=5,
+                                cache=cache,
+                            )
+                        if result.result_status == ResultStatus.error:
+                            errors.append(
+                                {
+                                    "status": result.result_status,
+                                    "error": result.error.code if result.error else "unknown",
+                                }
+                            )
+                        else:
+                            # Record the config_version from the kb status provenance
+                            # Each result carries the alias record's config_version
+                            # via the status path; we re-read it inline here so
+                            # workers prove queries were routed across both collections.
+                            with Session(engine) as s2:
+                                st = get_kb_status(kb_id=kb_id, session=s2)
+                            if st is not None and st.config_version:
+                                with config_version_lock:
+                                    observed_config_versions.append(st.config_version)
+                        with query_count_lock:
+                            query_counts[0] += 1
+                    except Exception as exc:
+                        errors.append({"status": "exception", "error": str(exc)})
+            except Exception as outer_exc:
+                # Capture any setup-level failure so it surfaces in the errors list
+                # rather than causing a silent thread death.
+                errors.append({"status": "worker_setup_exception", "error": str(outer_exc)})
 
         # Start workers
         workers = [threading.Thread(target=worker, daemon=True) for _ in range(N_WORKERS)]
@@ -347,11 +364,19 @@ class TestAliasSwapUnderLoad:
         for w in workers:
             w.join(timeout=5.0)
 
+        # Assert all workers actually stopped (no silent deaths)
+        for w in workers:
+            assert not w.is_alive(), (
+                f"Worker thread {w.name!r} is still alive after join — "
+                "it may have silently crashed or deadlocked."
+            )
+
         total_queries = query_counts[0]
         post_swap_queries = total_queries - pre_swap_count
         elapsed = LOAD_DURATION_BEFORE_SWAP_S + LOAD_DURATION_AFTER_SWAP_S
         qps = total_queries / elapsed if elapsed > 0 else 0.0
 
+        version_counts = Counter(observed_config_versions)
         print(
             f"\n[T-01] alias swap load test:"
             f"\n  workers:              {N_WORKERS}"
@@ -360,6 +385,7 @@ class TestAliasSwapUnderLoad:
             f"\n  post-swap queries:    {post_swap_queries}"
             f"\n  QPS achieved:         {qps:.1f}"
             f"\n  errors:               {len(errors)}"
+            f"\n  config_versions seen: {dict(version_counts)}"
         )
         if errors:
             print(f"\n  ERROR DETAILS: {errors[:10]}")
@@ -375,8 +401,29 @@ class TestAliasSwapUnderLoad:
             f"This is a FINDING — §18.3 test 1 requires zero errors during swap."
         )
 
-        # Sanity: some queries actually ran
-        assert total_queries > 0, "No queries completed — load harness may be broken"
+        # LIVENESS: prove queries were actually in flight across the swap boundary
+        assert pre_swap_count > 0, (
+            "No queries completed before the swap — load harness did not start correctly. "
+            f"pre_swap_count={pre_swap_count}; "
+            f"LOAD_DURATION_BEFORE_SWAP_S={LOAD_DURATION_BEFORE_SWAP_S}"
+        )
+        assert post_swap_queries > 0, (
+            "No queries completed after the swap — load harness may have stalled. "
+            f"post_swap_queries={post_swap_queries}; "
+            f"LOAD_DURATION_AFTER_SWAP_S={LOAD_DURATION_AFTER_SWAP_S}"
+        )
+
+        # CONFIG_VERSION COVERAGE: workers must have observed BOTH collection A and B
+        assert CONFIG_VERSION_A in version_counts, (
+            f"config_version {CONFIG_VERSION_A!r} (collection A) was never observed in worker "
+            f"results — queries may not have been in flight before the swap. "
+            f"Observed: {dict(version_counts)}"
+        )
+        assert CONFIG_VERSION_B in version_counts, (
+            f"config_version {CONFIG_VERSION_B!r} (collection B) was never observed in worker "
+            f"results — queries may not have continued after the swap. "
+            f"Observed: {dict(version_counts)}"
+        )
 
         # Post-swap: alias record now reflects config_version B
         with Session(engine) as session:
@@ -385,6 +432,95 @@ class TestAliasSwapUnderLoad:
         assert post_status.config_version == CONFIG_VERSION_B, (
             f"After swap, alias record should reflect config_version={CONFIG_VERSION_B!r} "
             f"(collection B), got {post_status.config_version!r}"
+        )
+
+        # -----------------------------------------------------------------------
+        # Shared-adapter phase: validate production topology (F-03)
+        # In production, the retrieval API uses ONE shared adapter singleton across
+        # all concurrent requests.  This short phase (~2s) runs N_WORKERS threads
+        # through a single shared adapter, confirming zero errors — proving that
+        # production's shared adapter is correct and that per-worker adapters in
+        # the main load phase are an isolation choice, not a requirement.
+        # -----------------------------------------------------------------------
+        shared_errors: list[dict] = []
+        shared_query_counts: list[int] = [0]
+        shared_stop = threading.Event()
+        shared_lock = threading.Lock()
+
+        # ONE shared adapter across all threads — fresh instance for the phase so
+        # it starts with a clean connection pool, avoiding stale sockets from the
+        # preceding load phase.  All N_WORKERS threads share this single object,
+        # which is the production singleton topology.
+        from finecorpus.index.qdrant.backend import QdrantAdapter as _SharedQA
+
+        shared_adapter = _SharedQA(url=QDRANT_URL, timeout=5)
+
+        def shared_worker() -> None:
+            """Worker using the shared singleton adapter — mirrors production topology."""
+            try:
+                shared_cache = QueryEmbeddingCache(enabled=False)
+                q_texts = [
+                    "shared adapter concurrent query one",
+                    "shared adapter concurrent query two",
+                ]
+                q_idx = 0
+                while not shared_stop.is_set():
+                    qtext = q_texts[q_idx % len(q_texts)]
+                    q_idx += 1
+                    try:
+                        with Session(engine) as session:
+                            result = query(
+                                kb_id=kb_id,
+                                query_text=qtext,
+                                provider=fake_provider,
+                                adapter=shared_adapter,
+                                session=session,
+                                top_k=5,
+                                cache=shared_cache,
+                            )
+                        if result.result_status == ResultStatus.error:
+                            shared_errors.append(
+                                {
+                                    "status": result.result_status,
+                                    "error": result.error.code if result.error else "unknown",
+                                }
+                            )
+                        with shared_lock:
+                            shared_query_counts[0] += 1
+                    except Exception as exc:
+                        shared_errors.append({"status": "exception", "error": str(exc)})
+            except Exception as outer_exc:
+                shared_errors.append(
+                    {"status": "shared_worker_setup_exception", "error": str(outer_exc)}
+                )
+
+        shared_workers = [
+            threading.Thread(target=shared_worker, daemon=True) for _ in range(N_WORKERS)
+        ]
+        for sw in shared_workers:
+            sw.start()
+        time.sleep(2.0)  # brief ~2s shared-adapter phase
+        shared_stop.set()
+        # Join with timeout > adapter timeout so threads can finish any in-flight request.
+        # shared_adapter has timeout=5; we allow 10s headroom to avoid false is_alive failures.
+        for sw in shared_workers:
+            sw.join(timeout=10.0)
+        for sw in shared_workers:
+            assert not sw.is_alive(), f"Shared-adapter worker {sw.name!r} still alive after join."
+
+        print(
+            f"\n[T-01] shared-adapter phase:"
+            f"\n  queries:  {shared_query_counts[0]}"
+            f"\n  errors:   {len(shared_errors)}"
+        )
+
+        assert len(shared_errors) == 0, (
+            f"T-01 shared-adapter phase FAILED: {len(shared_errors)} error(s) — "
+            "the production singleton adapter topology must be safe under concurrency.\n"
+            f"First errors: {shared_errors[:5]}"
+        )
+        assert shared_query_counts[0] > 0, (
+            "Shared-adapter phase completed zero queries — shared worker may be broken."
         )
 
         # -----------------------------------------------------------------------

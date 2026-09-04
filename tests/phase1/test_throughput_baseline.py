@@ -217,20 +217,34 @@ def _time_pipeline(
 
 
 def _write_baseline_doc(results: list[dict[str, Any]]) -> None:
-    """Append a new baseline entry to docs/baselines/phase1-ingestion.md.
+    """Write a new baseline entry to docs/baselines/phase1-ingestion.md.
 
-    Creates the file (and parent directory) on first run.
-    On subsequent runs, appends a new row to the results table.
+    Writes only when the file is absent OR the environment variable
+    ``RTFC_WRITE_BASELINE=1`` is set.  This prevents duplicate rows
+    accumulating across repeated local test runs.
 
-    The document is structured as the canonical Phase 1 baseline record with:
-    - A fixed header section (written once on first create).
-    - A results table that future phases append to.
+    Set ``RTFC_WRITE_BASELINE=1`` explicitly to record a fresh baseline:
+
+        RTFC_WRITE_BASELINE=1 uv run pytest tests/phase1/test_throughput_baseline.py \\
+            -v -m "qdrant_integration and provider_integration" -s
+
+    Environment variables that customise the recorded row:
+
+        RTFC_BASELINE_MACHINE   — machine description (default: hostname)
+        RTFC_BASELINE_ENV       — deployment description (default: "local Docker Compose")
+        RTFC_BASELINE_DATE      — ISO date override (default: today's date)
     """
+    write_baseline = os.environ.get("RTFC_WRITE_BASELINE", "").strip() in ("1", "true", "yes")
+    if BASELINES_DOC.exists() and not write_baseline:
+        return  # skip to avoid duplicate rows on repeated runs
+
     BASELINES_DOC.parent.mkdir(parents=True, exist_ok=True)
+
+    import datetime
 
     machine = os.environ.get("RTFC_BASELINE_MACHINE", platform.node() or "unknown")
     env_desc = os.environ.get("RTFC_BASELINE_ENV", "local Docker Compose")
-    date_str = os.environ.get("RTFC_BASELINE_DATE", "2026-09-03")
+    date_str = os.environ.get("RTFC_BASELINE_DATE", datetime.date.today().isoformat())
 
     if not BASELINES_DOC.exists():
         _write_baseline_header(machine=machine, env_desc=env_desc)

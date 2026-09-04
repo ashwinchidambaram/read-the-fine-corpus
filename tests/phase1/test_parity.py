@@ -44,7 +44,9 @@ Skip behaviour
 - OpenAI: skipped (with loud warning printed) when ``OPENAI_API_KEY`` is absent.
   This is explicitly NOT a silent skip — a missing key is a misconfiguration of
   the test environment, not an expected condition.
-- If both providers are skipped, the cross-provider invariant is vacuously true.
+- If both providers are skipped, the cross-provider invariant tests are also
+  skipped (not passed).  CI therefore does NOT get credit for this invariant
+  when no providers are available — the gap must be addressed in the environment.
 
 Markers
 -------

@@ -39,12 +39,19 @@ Phase 1 native-PDF files:
 - Parallel workers: none (single-threaded pipeline)
 - Checkpoint: disabled (fresh run_id each time; no resume)
 
+## Writing a new baseline row
+
+Baseline rows are written only when the file is absent **or** when
+``RTFC_WRITE_BASELINE=1`` is set.  This prevents duplicate rows accumulating
+across repeated local runs.  To record a fresh canonical baseline:
+
+```bash
+RTFC_WRITE_BASELINE=1 uv run pytest tests/phase1/test_throughput_baseline.py \
+    -v -m "qdrant_integration and provider_integration" -s
+```
+
 ## Results
 
 | Date | Provider | Docs | Chunks | Elapsed (s) | Docs/s | Chunks/s | Machine | Environment |
 |------|----------|------|--------|-------------|--------|----------|---------|-------------|
 | 2026-09-03 | ollama/nomic-embed-text | 9 | 35 | 1.5 | 6.06 | 23.6 | Ashwin-MacBook | local Docker Compose |
-| 2026-09-03 | ollama/nomic-embed-text | 9 | 35 | 1.5 | 5.88 | 22.9 | Ashwin-MacBook | local Docker Compose |
-| 2026-09-03 | ollama/nomic-embed-text | 9 | 35 | 1.6 | 5.80 | 22.6 | Ashwin-MacBook | local Docker Compose |
-| 2026-09-03 | ollama/nomic-embed-text | 9 | 35 | 1.5 | 5.91 | 23.0 | Ashwin-MacBook | local Docker Compose |
-| 2026-09-03 | ollama/nomic-embed-text | 9 | 35 | 1.5 | 5.98 | 23.2 | Ashwin-MacBook | local Docker Compose |
