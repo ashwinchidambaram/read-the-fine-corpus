@@ -73,8 +73,8 @@ def run_pipeline(
     assess = AssessStage()
     parse_result_batch = assess.run(input_data=inventory_dict, store=store)
 
-    # Stage 3: Decompose
-    decompose = DecomposeStage(run_started_at=collected_at)
+    # Stage 3: Decompose (artifacts_root passed for frozen-artifact cache)
+    decompose = DecomposeStage(run_started_at=collected_at, artifacts_root=artifacts_root)
     segment_set_batch = decompose.run(input_data=parse_result_batch, store=store)
 
     # Stage 4: Plan
