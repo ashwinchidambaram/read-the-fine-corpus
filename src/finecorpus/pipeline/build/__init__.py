@@ -1,24 +1,13 @@
-"""Stage 5 — Build (Phase 0 skeleton).
+"""Stage 5 — Build (Phase 1 real implementation).
 
-Pass-through skeleton: consumes IngestionConfig, produces a BuildResult artifact.
+Consumes SegmentSetBatch (version-checked) + IngestionConfig; produces Chunks via
+the recursive-char chunker with complete provenance (§8); embeds via an injected
+EmbeddingProvider; writes to a shadow Qdrant collection; validates; makes the
+shadow eligible for promotion.
 
-The BuildResult carries:
-  - Zero chunks (no embedding, no index write in Phase 0).
-  - A build report stating why: skeleton phase.
-
-Artifact structure:
-  {
-    "schema_version": "1.0.0",
-    "contract": "build_result",
-    "skeleton": true,
-    "chunk_count": 0,
-    "report": "Phase 0 skeleton: 0 chunks produced. ...",
-    "chunks": []
-  }
-
-Phase 1+ replaces _produce with real building.
+See docs/pipeline/build.md for the full reference.
 """
 
-from finecorpus.pipeline.build.stage import BuildStage
+from finecorpus.pipeline.build.stage import BuildResult, BuildStage
 
-__all__ = ["BuildStage"]
+__all__ = ["BuildStage", "BuildResult"]
