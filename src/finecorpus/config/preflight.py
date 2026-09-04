@@ -16,11 +16,14 @@ Real implementations
                            available, or a raw socket check otherwise.
 - **qdrant**              — HTTP HEAD / GET on ``storage.qdrant.url/healthz``.
 - **object_store**        — TCP socket check against the object-store endpoint.
+- **embedding_provider**  — real health_check() against configured providers
+                           (wired in Phase 1; SKIPPED when no provider is
+                           configured).
 
-SKIPPED stubs (Phase 1 wires them)
------------------------------------
-- **embedding_provider**  — probe embedding model availability / dimensions.
-- **resource_headroom**   — Qdrant memory vs configured hot-retention count.
+SKIPPED stubs
+-------------
+- **resource_headroom**   — Qdrant memory vs configured hot-retention count
+                           (Phase 2+).
 
 Public API
 ----------
@@ -334,29 +337,176 @@ def _check_object_store(config: Config) -> CheckResult:
 
 
 # ---------------------------------------------------------------------------
-# SKIPPED stubs — Phase 1 wires real implementations
+# Embedding provider preflight check (Phase 1 implementation)
 # ---------------------------------------------------------------------------
 
 
 def _check_embedding_provider(config: Config) -> CheckResult:
-    """SKIPPED — Embedding provider availability check.
+    """Embedding provider availability check (§4.6, reference.md §3 check 6).
 
-    Phase 1 wires this to a real provider health_check() that:
-    - Sends a probe string and confirms the endpoint is reachable.
+    Runs ``health_check()`` against each configured embedding provider:
+    - Sends a fixed probe string and confirms the endpoint is reachable.
     - Confirms the declared model ID is available.
-    - Confirms probe embedding dimensions match ``providers.embedding.*.dimensions``.
+    - Confirms probe embedding dimensions match the declared ``*.dimensions``.
     - Reports latency.
-    - In airgap mode: skips cloud providers and confirms all providers are local.
-    - Checks pricing staleness (§16, reference.md §3 check 6).
+    - In airgap mode (``platform.airgap=True``): skips cloud providers and
+      confirms all providers have ``is_local=True``.
+    - Checks pricing staleness (OQ-P-5).
+
+    SKIPPED (not FAIL) when no provider is configured in the default slot.
     """
-    return CheckResult(
-        name="embedding_provider",
-        status=CheckStatus.SKIPPED,
-        message=(
-            "Embedding provider availability check is not yet implemented "
-            "(Phase 1). Configure providers.embedding and re-run after Phase 1."
-        ),
-    )
+    import datetime
+    import os
+
+    emb = config.providers.embedding
+    airgap = config.platform.airgap or os.environ.get("RTFC_AIRGAP", "").lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    pricing_stale_days = config.index_lifecycle.pricing_stale_warn_days
+
+    # If no default provider is configured, SKIP (not an error — first-run prompt
+    # wires this before ingestion begins).
+    if not emb.default:
+        return CheckResult(
+            name="embedding_provider",
+            status=CheckStatus.SKIPPED,
+            message=(
+                "No embedding provider is configured "
+                "(providers.embedding.default is not set). "
+                "Run the first-run prompt or set providers.embedding.default "
+                "to 'openai' or 'ollama' in corpus.yaml."
+            ),
+        )
+
+    results: list[str] = []
+    has_fail = False
+    has_warn = False
+
+    # F-004: check EVERY fully-configured provider, not just the default.
+    # "Fully configured" means the provider section has a non-default / non-empty
+    # model set OR it is the selected default.  We include a provider in the
+    # check list when:
+    #   - it is selected as default, OR
+    #   - its section has a non-empty provider_id (it was explicitly configured).
+    # Each provider gets its own named check line in the report.
+    providers_to_check: list[tuple[str, str]] = []  # (label, which)
+    if (
+        emb.default in {"openai", "cloud"}
+        or (emb.cloud.provider_id and emb.cloud.provider_id != "openai")
+        or emb.default in {"openai", "cloud"}
+    ):
+        # Cloud is the default OR explicitly configured
+        if emb.default in {"openai", "cloud"}:
+            providers_to_check.append(("cloud (openai) [default]", "cloud"))
+        elif emb.cloud.provider_id:
+            providers_to_check.append(("cloud (openai)", "cloud"))
+    if emb.default in {"ollama", "local"} or emb.local.provider_id:
+        if emb.default in {"ollama", "local"}:
+            providers_to_check.append(("local (ollama) [default]", "local"))
+        else:
+            providers_to_check.append(("local (ollama)", "local"))
+
+    # De-duplicate while preserving order (edge case: default matches provider_id)
+    seen: set[str] = set()
+    unique_providers: list[tuple[str, str]] = []
+    for label, which in providers_to_check:
+        if which not in seen:
+            seen.add(which)
+            unique_providers.append((label, which))
+    providers_to_check = unique_providers
+
+    for label, which in providers_to_check:
+        try:
+            import finecorpus.embedding.registry as _registry
+
+            provider = _registry.build_provider_from_config(config, which=which)
+        except Exception as exc:
+            results.append(f"FAIL  {label}: Could not construct provider — {exc}.")
+            has_fail = True
+            continue
+
+        caps = provider.capabilities
+
+        # Air-gap enforcement: cloud providers are blocked
+        if airgap and not caps.is_local:
+            results.append(
+                f"FAIL  {label}: Air-gap mode is enabled (RTFC_AIRGAP) but "
+                f"'{caps.provider_id}' is a cloud provider (is_local=False). "
+                f"Use a local provider in air-gapped deployments."
+            )
+            has_fail = True
+            continue
+
+        # Run health_check()
+        try:
+            hc = provider.health_check()
+        except Exception as exc:
+            results.append(f"FAIL  {label}: health_check() raised {type(exc).__name__}: {exc}.")
+            has_fail = True
+            continue
+
+        if not hc.reachable:
+            results.append(
+                f"FAIL  {label} ({caps.provider_id}/{caps.model_id}): "
+                f"endpoint not reachable. "
+                f"Error: {hc.error or 'none'}. "
+                f"Check that the provider service is running and that the "
+                f"endpoint/API key is configured correctly."
+            )
+            has_fail = True
+            continue
+
+        if not hc.model_available:
+            results.append(
+                f"FAIL  {label} ({caps.provider_id}/{caps.model_id}): "
+                f"model not available at provider. "
+                f"Error: {hc.error or 'none'}."
+            )
+            has_fail = True
+            continue
+
+        if not hc.declared_dimensions_confirmed:
+            results.append(
+                f"FAIL  {label} ({caps.provider_id}/{caps.model_id}): "
+                f"declared dimensions ({caps.vector_dimensions}) do not match "
+                f"probe response. "
+                f"Error: {hc.error or 'none'}. "
+                f"This is a fatal configuration error — the index would be corrupt."
+            )
+            has_fail = True
+            continue
+
+        # Pricing staleness check (cloud only, OQ-P-5)
+        if not caps.is_local and caps.pricing_as_of:
+            try:
+                as_of = datetime.date.fromisoformat(caps.pricing_as_of)
+                age_days = (datetime.date.today() - as_of).days
+                if age_days > pricing_stale_days:
+                    results.append(
+                        f"WARN  {label}: pricing_as_of is {caps.pricing_as_of} "
+                        f"({age_days} days ago). "
+                        f"Run `corpus provider update-pricing {caps.provider_id}` "
+                        f"to refresh cost estimates."
+                    )
+                    has_warn = True
+            except ValueError:
+                pass  # malformed date; not a hard error
+
+        results.append(
+            f"OK    {label} ({caps.provider_id}/{caps.model_id}): "
+            f"reachable; dimensions={caps.vector_dimensions} confirmed; "
+            f"latency={hc.latency_ms:.0f}ms."
+        )
+
+    message = " | ".join(results) if results else "No providers checked."
+
+    if has_fail:
+        return CheckResult(name="embedding_provider", status=CheckStatus.FAIL, message=message)
+    if has_warn:
+        return CheckResult(name="embedding_provider", status=CheckStatus.WARN, message=message)
+    return CheckResult(name="embedding_provider", status=CheckStatus.OK, message=message)
 
 
 def _check_resource_headroom(config: Config) -> CheckResult:
