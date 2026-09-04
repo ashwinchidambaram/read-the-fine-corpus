@@ -232,11 +232,20 @@ class QdrantAdapter(IndexAdapter):
 
         Keyed on ``provenance.source_document_id`` — never on chunk IDs — so
         deletions survive config_version changes (§10.5, §12.1, OQ-L determinism).
+
+        TOCTOU note: the returned deleted-point count is computed as
+        ``count_before - count_after`` using two separate Qdrant ``count``
+        calls that bracket the ``delete`` call.  A concurrent upsert or delete
+        for the same collection between these calls would cause the returned
+        count to be inaccurate.  Callers MUST treat this value as informational
+        (for logging / metrics) rather than as a precise audit count.  The
+        actual deletion is still correct — only the reported count may be off
+        under high concurrency.
         """
         if not self.collection_exists(collection):
             raise CollectionNotFoundError(f"Collection '{collection}' does not exist")
 
-        # Count before for return value
+        # Count before for return value (see TOCTOU note above)
         count_before = self.count_points(collection)
 
         filt = qm.Filter(
@@ -517,6 +526,29 @@ class QdrantAdapter(IndexAdapter):
             return [c.name for c in self._client.get_collections().collections]
         except Exception as exc:
             raise IndexError(f"Failed to list collections: {exc}") from exc
+
+    def list_aliases(self) -> list:
+        """Return all aliases known to Qdrant as AliasRecord value objects.
+
+        Uses the public ``get_aliases()`` client method — not ``_client``
+        internals — so the adapter boundary is clean (F-03).
+
+        Returns:
+            List of ``AliasRecord`` value objects (alias_name → collection_name).
+        """
+        from finecorpus.index.adapter import AliasRecord as AdapterAliasRecord
+
+        try:
+            response = self._client.get_aliases()
+            return [
+                AdapterAliasRecord(
+                    alias_name=a.alias_name,
+                    collection_name=a.collection_name,
+                )
+                for a in response.aliases
+            ]
+        except Exception as exc:
+            raise IndexError(f"Failed to list aliases: {exc}") from exc
 
 
 # ---------------------------------------------------------------------------

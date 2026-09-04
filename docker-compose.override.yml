@@ -1,0 +1,19 @@
+# Local-dev override: expose backing-store ports to the host so the
+# integration test tier (uv run pytest -m qdrant_integration) can reach
+# Qdrant (6333) and Postgres (5432) at localhost.
+#
+# This file is auto-merged by `docker compose up`; it is intentionally
+# NOT committed to CI where containers run in the same network namespace.
+#
+# C-2 is still satisfied for the application services: retrieval-api and
+# ingest-worker communicate with Qdrant only through the rtfc-internal
+# bridge network and never rely on the host-mapped port.
+
+services:
+  qdrant:
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+  postgres:
+    ports:
+      - "5432:5432"

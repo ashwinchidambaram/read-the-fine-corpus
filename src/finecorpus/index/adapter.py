@@ -620,6 +620,19 @@ class IndexAdapter(abc.ABC):
             List of collection name strings.
         """
 
+    @abc.abstractmethod
+    def list_aliases(self) -> list[AliasRecord]:
+        """Return all aliases known to the backend.
+
+        Used by the startup reconciliation pass (OQ-L-1) to discover all
+        ``rtfc_`` aliases without reaching into adapter internals.  This is
+        the public surface for alias enumeration; callers MUST use this method
+        rather than accessing ``_client`` directly (F-03).
+
+        Returns:
+            List of AliasRecord value objects (alias_name → collection_name).
+        """
+
 
 # ---------------------------------------------------------------------------
 # Promoted timestamp helper

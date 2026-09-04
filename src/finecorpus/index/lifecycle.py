@@ -606,13 +606,11 @@ def startup_reconcile(
 
     # Build the list of aliases to inspect
     if aliases_to_check is None:
-        # Discover all rtfc_ aliases from Qdrant
+        # Discover all rtfc_ aliases from Qdrant via the public ABC method (F-03).
         try:
-            all_aliases_response = adapter._client.get_aliases()  # type: ignore[attr-defined]
+            all_aliases = adapter.list_aliases()
             aliases_to_check = [
-                a.alias_name
-                for a in all_aliases_response.aliases
-                if a.alias_name.startswith("rtfc_")
+                a.alias_name for a in all_aliases if a.alias_name.startswith("rtfc_")
             ]
         except Exception as exc:
             logger.error("startup_reconcile: failed to list aliases from Qdrant: %s", exc)

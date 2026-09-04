@@ -31,11 +31,15 @@ depends_on: str | None = None
 
 def upgrade() -> None:
     """Create the alias_records table."""
+    # NOTE: index=True is intentionally absent from all sa.Column() calls below.
+    # Indexes are created exclusively via the explicit op.create_index() calls that
+    # follow.  Using index=True AND op.create_index() for the same column emits
+    # duplicate CREATE INDEX statements which fail on re-runs (F-02).
     op.create_table(
         "alias_records",
         sa.Column("alias", sa.String(255), primary_key=True, nullable=False),
-        sa.Column("kb_id", sa.String(64), nullable=False, index=True),
-        sa.Column("workspace_id", sa.String(64), nullable=False, index=True),
+        sa.Column("kb_id", sa.String(64), nullable=False),
+        sa.Column("workspace_id", sa.String(64), nullable=False),
         # Current live collection (null until first promotion)
         sa.Column("collection_name", sa.String(255), nullable=True),
         # Build ID of the current collection
@@ -47,8 +51,14 @@ def upgrade() -> None:
         sa.Column("config_version", sa.Text(), nullable=True),
         # Promotion tracking
         sa.Column("promoted_at", sa.DateTime(timezone=True), nullable=True),
-        # N-1 collection retained for instant rollback (§10.3)
+        # N-1 collection + denormalized model identity (written at promote time, §10.3)
+        # Stored alongside previous_collection so rollback is a pure in-record swap
+        # with no external reads needed (F-01).
         sa.Column("previous_collection", sa.String(255), nullable=True),
+        sa.Column("previous_embedding_provider", sa.String(128), nullable=True),
+        sa.Column("previous_embedding_model", sa.String(255), nullable=True),
+        sa.Column("previous_embedding_dimensions", sa.Integer(), nullable=True),
+        sa.Column("previous_config_version", sa.Text(), nullable=True),
     )
     # Index on kb_id for fast KB-based lookups
     op.create_index("ix_alias_records_kb_id", "alias_records", ["kb_id"])

@@ -139,6 +139,14 @@ class FakeAdapter:
     def list_collections(self) -> list[str]:
         return list(self.collections.keys())
 
+    def list_aliases(self) -> list:
+        from finecorpus.index.adapter import AliasRecord as AdapterAliasRecord
+
+        return [
+            AdapterAliasRecord(alias_name=alias, collection_name=coll)
+            for alias, coll in self.aliases.items()
+        ]
+
 
 # ---------------------------------------------------------------------------
 # Fake SQLAlchemy session for unit tests
@@ -429,6 +437,86 @@ class TestRollback:
 
         assert result == n1_coll
         assert adapter.aliases[alias_name("kb1")] == n1_coll
+
+    def test_rollback_restores_n1_model_identity(self) -> None:
+        """F-01: after rollback the record's model identity equals N-1's, not N's."""
+        adapter = FakeAdapter()
+        n_coll = collection_name("kb1", 2)
+        n1_coll = collection_name("kb1", 1)
+        adapter.collections[n_coll] = {"points": [], "metadata": {}}
+        adapter.collections[n1_coll] = {"points": [], "metadata": {}}
+        adapter.aliases[alias_name("kb1")] = n_coll
+
+        # Simulate a fully-promoted alias record (N live, N-1 in previous_*)
+        n1_provider = "openai"
+        n1_model = "text-embedding-3-small"
+        n1_dimensions = 768
+        n1_config = "cfg_n1"
+
+        n_provider = "cohere"
+        n_model = "embed-english-v3"
+        n_dimensions = 1024
+        n_config = "cfg_n"
+
+        with patch("finecorpus.index.lifecycle.AliasRepository") as MockRepo:
+            mock_repo = MagicMock()
+            MockRepo.return_value = mock_repo
+
+            mock_record = MagicMock()
+            mock_record.previous_collection = n1_coll
+            mock_record.collection_name = n_coll
+            # N-1 model identity (stored in previous_* fields at promote time)
+            mock_record.embedding_provider = n_provider
+            mock_record.embedding_model = n_model
+            mock_record.embedding_dimensions = n_dimensions
+            mock_record.config_version = n_config
+            mock_repo.get.return_value = mock_record
+
+            # Simulate rollback_to_previous swapping the fields
+            def _fake_rollback_to_previous(als: str) -> MagicMock:
+                # Swap collection pointer
+                mock_record.collection_name, mock_record.previous_collection = (
+                    mock_record.previous_collection,
+                    mock_record.collection_name,
+                )
+                # Swap model identity (the fix in F-01)
+                mock_record.embedding_provider, mock_record.previous_embedding_provider = (
+                    n1_provider,
+                    mock_record.embedding_provider,
+                )
+                mock_record.embedding_model, mock_record.previous_embedding_model = (
+                    n1_model,
+                    mock_record.embedding_model,
+                )
+                mock_record.embedding_dimensions, mock_record.previous_embedding_dimensions = (
+                    n1_dimensions,
+                    mock_record.embedding_dimensions,
+                )
+                mock_record.config_version, mock_record.previous_config_version = (
+                    n1_config,
+                    mock_record.config_version,
+                )
+                return mock_record
+
+            mock_repo.rollback_to_previous.side_effect = _fake_rollback_to_previous
+
+            session = FakeSession()
+            result = rollback(adapter, session, "kb1", {n_provider, n1_provider})
+
+        assert result == n1_coll
+        # F-01 assertion: after rollback the live model identity equals N-1's values
+        assert mock_record.embedding_provider == n1_provider, (
+            "After rollback, embedding_provider must equal N-1's provider"
+        )
+        assert mock_record.embedding_model == n1_model, (
+            "After rollback, embedding_model must equal N-1's model"
+        )
+        assert mock_record.embedding_dimensions == n1_dimensions, (
+            "After rollback, embedding_dimensions must equal N-1's dimensions"
+        )
+        assert mock_record.config_version == n1_config, (
+            "After rollback, config_version must equal N-1's config_version"
+        )
 
 
 # ---- startup_reconcile ----

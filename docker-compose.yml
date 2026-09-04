@@ -43,7 +43,7 @@ services:
 
   # C-2: no `ports:` block — Qdrant is internal-only
   qdrant:
-    image: qdrant/qdrant:v1.15.1
+    image: qdrant/qdrant:v1.19.0
     restart: unless-stopped
     volumes:
       - qdrant-data:/qdrant/storage

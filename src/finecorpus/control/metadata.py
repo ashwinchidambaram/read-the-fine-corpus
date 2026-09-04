@@ -18,6 +18,7 @@ Spec references: index-lifecycle.md §2.3, §4.2 (two-phase swap), §10.3
 from __future__ import annotations
 
 import logging
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -61,24 +62,31 @@ class AliasRecord(_Base):
     Updated atomically in Phase 2 of the two-phase alias swap (§4.2).
 
     Columns:
-        alias:               Alias name, e.g. ``rtfc_{kb_id}``. Primary key.
-        kb_id:               Knowledge-base UUID (stable, the FK anchor).
-        workspace_id:        Owning workspace UUID.
-        collection_name:     Current live collection name.
-        build_id:            Build ID of the current collection (for ordering).
-        embedding_provider:  Denormalized from ModelIdentity.provider.
-        embedding_model:     Denormalized from ModelIdentity.model.
-        embedding_dimensions: Denormalized from ModelIdentity.dimensions.
-        config_version:      Denormalized from ModelIdentity.config_version.
-        promoted_at:         UTC timestamp of the last successful promotion.
-        previous_collection: N-1 collection name (null before second promotion).
+        alias:                    Alias name, e.g. ``rtfc_{kb_id}``. Primary key.
+        kb_id:                    Knowledge-base UUID (stable, the FK anchor).
+        workspace_id:             Owning workspace UUID.
+        collection_name:          Current live collection name.
+        build_id:                 Build ID of the current collection (for ordering).
+        embedding_provider:       Denormalized from ModelIdentity.provider.
+        embedding_model:          Denormalized from ModelIdentity.model.
+        embedding_dimensions:     Denormalized from ModelIdentity.dimensions.
+        config_version:           Denormalized from ModelIdentity.config_version.
+        promoted_at:              UTC timestamp of the last successful promotion.
+        previous_collection:      N-1 collection name (null before second promotion).
+        previous_embedding_provider:  N-1 model identity — provider. Written at
+            promote time alongside ``previous_collection``; swapped wholesale on
+            rollback so the record is always self-consistent (§10.3).
+        previous_embedding_model:     N-1 model identity — model identifier.
+        previous_embedding_dimensions: N-1 model identity — vector dimensionality.
+        previous_config_version:      N-1 model identity — config version hash.
     """
 
     __tablename__ = "alias_records"
 
     alias: Mapped[str] = mapped_column(String(255), primary_key=True)
-    kb_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-    workspace_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    # index=False: indexes are created explicitly in the Alembic migration (F-02).
+    kb_id: Mapped[str] = mapped_column(String(64), nullable=False, index=False)
+    workspace_id: Mapped[str] = mapped_column(String(64), nullable=False, index=False)
     collection_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     build_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     embedding_provider: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -86,7 +94,12 @@ class AliasRecord(_Base):
     embedding_dimensions: Mapped[int | None] = mapped_column(Integer, nullable=True)
     config_version: Mapped[str | None] = mapped_column(Text, nullable=True)
     promoted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # N-1 collection + denormalized model identity (written at promote time, §10.3)
     previous_collection: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    previous_embedding_provider: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    previous_embedding_model: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    previous_embedding_dimensions: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    previous_config_version: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     def __repr__(self) -> str:
         return (
@@ -101,8 +114,28 @@ class AliasRecord(_Base):
 # ---------------------------------------------------------------------------
 
 
+def _redact_dsn(dsn: str) -> str:
+    """Return the DSN with the password component replaced by ``***``.
+
+    Prevents credentials from leaking into exception messages or log output.
+
+    Args:
+        dsn: PostgreSQL connection URL (any scheme).
+
+    Returns:
+        DSN string with the password redacted, or the original string if no
+        password component is detected.
+    """
+    return re.sub(r"(://[^:@/]+:)[^@]+(@)", r"\1***\2", dsn)
+
+
 def create_engine(dsn: str, **kwargs: Any) -> Engine:
     """Create a SQLAlchemy engine from a PostgreSQL DSN.
+
+    The engine is created with ``hide_parameters=True`` so that bound
+    parameter values (which may include credentials) are not included in
+    exception messages or tracebacks.  The DSN password component is
+    additionally redacted before the URL is stored in the engine's repr.
 
     Args:
         dsn: PostgreSQL connection URL.
@@ -112,7 +145,13 @@ def create_engine(dsn: str, **kwargs: Any) -> Engine:
     Returns:
         Configured SQLAlchemy Engine.
     """
-    return sa_create_engine(dsn, **kwargs)
+    kwargs.setdefault("hide_parameters", True)
+
+    try:
+        return sa_create_engine(dsn, **kwargs)
+    except Exception as exc:
+        # Re-raise with the password redacted so it cannot appear in tracebacks.
+        raise type(exc)(str(exc).replace(dsn, _redact_dsn(dsn))) from None
 
 
 def create_tables(engine: Engine) -> None:
@@ -203,6 +242,10 @@ class AliasRepository:
             config_version=None,
             promoted_at=None,
             previous_collection=None,
+            previous_embedding_provider=None,
+            previous_embedding_model=None,
+            previous_embedding_dimensions=None,
+            previous_config_version=None,
         )
         self._session.add(record)
         logger.info("Created alias record '%s' for kb '%s'", alias, kb_id)
@@ -222,7 +265,9 @@ class AliasRepository:
         """Update the alias record for a successful promotion (§4.2 Phase 2).
 
         Atomically (within the caller's transaction):
-        - Moves the current ``collection_name`` to ``previous_collection``.
+        - Saves the current model identity into ``previous_*`` fields alongside
+          ``previous_collection`` so that rollback can restore the full N-1
+          model identity without any external reads (§10.3, F-01).
         - Sets ``collection_name`` to ``new_collection``.
         - Updates all model identity fields.
         - Sets ``promoted_at`` to now.
@@ -254,7 +299,15 @@ class AliasRepository:
         if promoted_at is None:
             promoted_at = datetime.now(tz=UTC)
 
+        # Snapshot current live model identity into previous_* fields before
+        # overwriting.  This ensures rollback_to_previous() can restore the
+        # complete N-1 model identity without any external reads (§10.3).
         record.previous_collection = record.collection_name
+        record.previous_embedding_provider = record.embedding_provider
+        record.previous_embedding_model = record.embedding_model
+        record.previous_embedding_dimensions = record.embedding_dimensions
+        record.previous_config_version = record.config_version
+
         record.collection_name = new_collection
         record.build_id = new_build_id
         record.embedding_provider = embedding_provider
@@ -275,9 +328,24 @@ class AliasRepository:
     def rollback_to_previous(self, alias: str) -> AliasRecord:
         """Swap the current collection with the previous (N-1) collection (§10.3).
 
+        Precondition: the alias record MUST already exist (call ``get`` and check
+        before calling this method).  A missing record indicates the alias was
+        never promoted, which is a programming error; this method will raise
+        ``ValueError`` in that case.
+
+        After rollback, the record is fully self-consistent — the N-1 collection
+        AND its model identity (provider/model/dimensions/config_version) become
+        the live values, while the current values are moved into the previous_*
+        fields.  No external reads are required (§10.3, F-01).
+
         After rollback:
-        - ``collection_name`` = former ``previous_collection`` (N-1 is now live).
-        - ``previous_collection`` = former ``collection_name`` (former live is now N-1).
+        - ``collection_name``          = former ``previous_collection`` (N-1 is now live).
+        - ``embedding_provider``       = former ``previous_embedding_provider``.
+        - ``embedding_model``          = former ``previous_embedding_model``.
+        - ``embedding_dimensions``     = former ``previous_embedding_dimensions``.
+        - ``config_version``           = former ``previous_config_version``.
+        - ``previous_collection``      = former ``collection_name`` (N is now standby).
+        - ``previous_embedding_*``     = former live values (N's model identity).
 
         This mirrors the Qdrant alias retarget that must have already succeeded.
 
@@ -288,6 +356,7 @@ class AliasRepository:
             Updated AliasRecord.
 
         Raises:
+            ValueError: If the alias record does not exist.
             ValueError: If there is no previous_collection (rollback impossible).
         """
         record = self.get(alias)
@@ -298,15 +367,32 @@ class AliasRepository:
                 f"No N-1 collection available for alias '{alias}'; rollback impossible"
             )
 
-        old_current = record.collection_name
+        # Wholesale swap of collection pointer AND model identity (pure in-record
+        # swap; no external reads needed — §10.3).
+        old_collection = record.collection_name
+        old_provider = record.embedding_provider
+        old_model = record.embedding_model
+        old_dimensions = record.embedding_dimensions
+        old_config_version = record.config_version
+
         record.collection_name = record.previous_collection
-        record.previous_collection = old_current
+        record.embedding_provider = record.previous_embedding_provider
+        record.embedding_model = record.previous_embedding_model
+        record.embedding_dimensions = record.previous_embedding_dimensions
+        record.config_version = record.previous_config_version
+
+        record.previous_collection = old_collection
+        record.previous_embedding_provider = old_provider
+        record.previous_embedding_model = old_model
+        record.previous_embedding_dimensions = old_dimensions
+        record.previous_config_version = old_config_version
+
         record.promoted_at = datetime.now(tz=UTC)
 
         logger.info(
             "Rolled back alias '%s': %s -> %s",
             alias,
-            old_current,
+            old_collection,
             record.collection_name,
         )
         return record
@@ -329,6 +415,14 @@ class AliasRepository:
         The Qdrant alias is the leading state; the control-plane record is the
         lagging state. This method brings the record up to match Qdrant.
 
+        Precondition: the alias record MUST already exist in the control-plane DB.
+        ``startup_reconcile`` only calls this method after confirming that
+        ``db_record is not None``.  An empty ``kb_id`` or ``workspace_id`` is
+        never acceptable — empty-string tenancy would corrupt the record and make
+        it unqueryable.  If the record is missing, ``startup_reconcile`` logs the
+        inconsistency and marks it as a repair failure rather than calling this
+        method (F-06).
+
         Args:
             alias: Alias name.
             qdrant_collection: Collection name that Qdrant currently resolves to.
@@ -340,18 +434,25 @@ class AliasRepository:
 
         Returns:
             Updated AliasRecord.
+
+        Raises:
+            ValueError: If no alias record exists (caller must not call this
+                method when the record is missing — see startup_reconcile).
         """
         record = self.get(alias)
         if record is None:
-            # Create the record from scratch if it is missing
-            record = AliasRecord(
-                alias=alias,
-                kb_id="",  # Will be filled if caller provides it
-                workspace_id="",
+            raise ValueError(
+                f"Alias record '{alias}' not found; reconcile_from_qdrant requires a "
+                f"pre-existing record.  Empty-string tenancy (kb_id='', workspace_id='') "
+                f"is never acceptable.  Investigate why the record is absent."
             )
-            self._session.add(record)
 
         record.previous_collection = record.collection_name
+        record.previous_embedding_provider = record.embedding_provider
+        record.previous_embedding_model = record.embedding_model
+        record.previous_embedding_dimensions = record.embedding_dimensions
+        record.previous_config_version = record.config_version
+
         record.collection_name = qdrant_collection
         record.build_id = build_id
         record.embedding_provider = embedding_provider
@@ -372,6 +473,7 @@ class AliasRepository:
 __all__ = [
     "AliasRecord",
     "AliasRepository",
+    "_redact_dsn",
     "create_engine",
     "create_tables",
 ]

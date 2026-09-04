@@ -11,6 +11,7 @@ What these tests cover:
 5. Rollback restores N-1 and serves correctly (§18.3 test 6).
 6. Blocked-rollback path when model provider removed from config (OQ-L-7).
 7. Startup reconcile repairs a simulated half-swap (OQ-L-1).
+8. F-09: connection-failure exception chain does not contain the password.
 """
 
 from __future__ import annotations
@@ -281,6 +282,19 @@ class TestShadowBuildPromoteSearch:
 
 @qdrant_integration
 class TestAtomicAliasSwap:
+    """Phase 1 proxy for T-01 (alias-pointer atomicity).
+
+    This test class verifies that the Qdrant alias never resolves to an
+    unexpected target during a retarget operation — satisfying the Phase 1
+    requirement that the error window is zero (§4.1, §18.3 test 1).
+
+    Scope note: this is a *structural* alias-atomicity check, not a
+    query-stream load test.  The full T-01 load test (concurrent query
+    throughput during a live alias swap under production-scale traffic)
+    ships in the phase test unit.  This proxy is intentionally lightweight
+    so it runs in the standard integration tier without a load harness.
+    """
+
     def test_alias_never_misses_during_swap(self, qdrant_adapter) -> None:
         """The alias resolves correctly throughout a swap (no window of None)."""
         kb_id = _unique_kb()
@@ -579,3 +593,143 @@ class TestStartupReconcileRepairsHalfSwap:
         qdrant_adapter.delete_alias(als)
         qdrant_adapter.drop_collection(old_coll)
         qdrant_adapter.drop_collection(new_coll)
+
+
+# ---------------------------------------------------------------------------
+# Integration test 8: F-01 assertion — rollback restores N-1 model identity
+# ---------------------------------------------------------------------------
+
+
+@both_integration
+class TestRollbackRestoresModelIdentity:
+    def test_rollback_model_identity_equals_n1(self, qdrant_adapter, db_session) -> None:
+        """F-01: after rollback the record's embedding fields equal N-1's, not N's."""
+        kb_id = _unique_kb()
+        ws_id = "ws_model_identity_test"
+        als = alias_name(kb_id)
+
+        model_n1 = ModelIdentity(
+            provider="fake_n1",
+            model="embed-n1",
+            dimensions=4,
+            config_version="cfg_n1",
+        )
+        model_n = ModelIdentity(
+            provider="fake_n",
+            model="embed-n",
+            dimensions=4,
+            config_version="cfg_n",
+        )
+
+        # Build and promote N-1
+        ctx_n1 = create_shadow(qdrant_adapter, kb_id, ws_id, build_id=1, model_identity=model_n1)
+        qdrant_adapter.upsert_points(
+            ctx_n1.shadow_collection,
+            [_make_chunk_point("doc_n1", 0, "N-1 text", kb_id, ws_id, model_n1)],
+        )
+        repo = AliasRepository(db_session)
+        if repo.get(als) is None:
+            repo.create(alias=als, kb_id=kb_id, workspace_id=ws_id)
+            db_session.commit()
+        promote(qdrant_adapter, db_session, ctx_n1)
+        assert ctx_n1.state == BuildState.LIVE
+
+        # Build and promote N (second promotion — saves N-1 model identity into previous_*)
+        ctx_n = create_shadow(qdrant_adapter, kb_id, ws_id, build_id=2, model_identity=model_n)
+        qdrant_adapter.upsert_points(
+            ctx_n.shadow_collection,
+            [_make_chunk_point("doc_n", 0, "N text", kb_id, ws_id, model_n)],
+        )
+        promote(qdrant_adapter, db_session, ctx_n)
+        assert ctx_n.state == BuildState.LIVE
+
+        # Rollback to N-1
+        rolled_back_coll = rollback(
+            qdrant_adapter,
+            db_session,
+            kb_id,
+            available_model_providers={model_n1.provider, model_n.provider},
+        )
+        assert rolled_back_coll == ctx_n1.shadow_collection
+
+        # F-01 assertion: after rollback the record's model identity must equal N-1's
+        record = repo.get(als)
+        assert record is not None
+        assert record.embedding_provider == model_n1.provider, (
+            f"After rollback, embedding_provider should be '{model_n1.provider}' (N-1), "
+            f"got '{record.embedding_provider}'"
+        )
+        assert record.embedding_model == model_n1.model, (
+            f"After rollback, embedding_model should be '{model_n1.model}' (N-1), "
+            f"got '{record.embedding_model}'"
+        )
+        assert record.embedding_dimensions == model_n1.dimensions, (
+            f"After rollback, embedding_dimensions should be {model_n1.dimensions} (N-1), "
+            f"got {record.embedding_dimensions}"
+        )
+        assert record.config_version == model_n1.config_version, (
+            f"After rollback, config_version should be '{model_n1.config_version}' (N-1), "
+            f"got '{record.config_version}'"
+        )
+
+        # Cleanup
+        try:
+            qdrant_adapter.delete_alias(als)
+        except Exception:
+            pass
+        for coll in [ctx_n1.shadow_collection, ctx_n.shadow_collection]:
+            if qdrant_adapter.collection_exists(coll):
+                qdrant_adapter.drop_collection(coll)
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: F-09 — password redaction in DSN and connection failures
+# ---------------------------------------------------------------------------
+
+
+class TestPasswordRedaction:
+    """F-09: credentials must not leak from create_engine or connection failures."""
+
+    def test_redact_dsn_strips_password(self) -> None:
+        """_redact_dsn replaces the password component with ***."""
+        from finecorpus.control.metadata import _redact_dsn
+
+        dsn = "postgresql+psycopg://user:s3cr3t@localhost:5432/db"
+        redacted = _redact_dsn(dsn)
+        assert "s3cr3t" not in redacted
+        assert "user" in redacted
+        assert "localhost" in redacted
+        assert "***" in redacted
+
+    def test_redact_dsn_no_password_unchanged(self) -> None:
+        """_redact_dsn leaves DSNs without passwords intact."""
+        from finecorpus.control.metadata import _redact_dsn
+
+        dsn = "postgresql+psycopg://localhost:5432/db"
+        redacted = _redact_dsn(dsn)
+        # No password component — should not alter the DSN meaningfully
+        assert "localhost" in redacted
+
+    def test_connection_failure_lacks_password(self) -> None:
+        """F-09: a connection failure exception chain must not expose the password."""
+        import traceback
+
+        from finecorpus.control.metadata import create_engine
+
+        password = "my_super_secret_pw"
+        bad_dsn = f"postgresql+psycopg://finecorpus:{password}@127.0.0.1:9999/nonexistent"
+        engine = create_engine(bad_dsn)
+        try:
+            from sqlalchemy import text
+
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            raise AssertionError("Expected connection to fail but it succeeded")
+        except Exception as exc:
+            tb = traceback.format_exc()
+            full_chain = str(exc) + tb
+            assert password not in full_chain, (
+                f"Password '{password}' found in exception chain — credentials are leaking!"
+            )
+        finally:
+            engine.dispose()
