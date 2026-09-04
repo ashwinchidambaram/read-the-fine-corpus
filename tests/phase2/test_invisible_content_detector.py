@@ -21,12 +21,8 @@ import pytest
 from finecorpus.contracts.shared.blocks import InvisibleContentKind
 from finecorpus.pipeline.assess.security import detect_invisible_content
 
-ADVERSARIAL = (
-    Path(__file__).parent.parent / "fixtures" / "golden" / "corpus" / "adversarial.pdf"
-)
-CLEAN_NATIVE = (
-    Path(__file__).parent.parent / "fixtures" / "golden" / "corpus" / "clean_native.pdf"
-)
+ADVERSARIAL = Path(__file__).parent.parent / "fixtures" / "golden" / "corpus" / "adversarial.pdf"
+CLEAN_NATIVE = Path(__file__).parent.parent / "fixtures" / "golden" / "corpus" / "clean_native.pdf"
 
 
 @pytest.fixture(scope="module")
@@ -58,10 +54,14 @@ class TestAdversarialFixtureDetections:
         detections, _ = detect_invisible_content(adversarial_reader, page_num=5)
         wow = [d for d in detections if d.kind == InvisibleContentKind.white_on_white]
         assert wow, "No white_on_white detection on page 5"
-        # At least one detection should have text retained (may be None if
-        # operator was TJ with array arg — acceptable; the key thing is the flag exists)
-        # Just confirm the object is present and kind is correct
-        assert all(d.text is not None or d.text is None for d in wow)  # always True — shape check
+        # At least one white-on-white detection must have captured the hidden text.
+        # text may be None when TJ is used with an array argument; the key requirement
+        # is that at least one detection has a non-None text value so the content is
+        # traceable (§14.1 labelled-not-sanitised).
+        assert any(d.text is not None for d in wow), (
+            "Expected at least one white_on_white detection with non-None text on page 5; "
+            f"got: {[(d.kind, d.text) for d in wow]}"
+        )
 
     def test_tiny_font_page_6(self, adversarial_reader: pypdf.PdfReader) -> None:
         """Vector 5: tiny-font run at 1pt on page 6."""
@@ -84,9 +84,7 @@ class TestAdversarialFixtureDetections:
         """Vector 6: off-page text at y=-50 on page 7 (injected into content stream)."""
         detections, findings = detect_invisible_content(adversarial_reader, page_num=7)
         kinds = {d.kind for d in detections}
-        assert InvisibleContentKind.off_page in kinds, (
-            f"Expected off_page on page 7; got: {kinds}"
-        )
+        assert InvisibleContentKind.off_page in kinds, f"Expected off_page on page 7; got: {kinds}"
 
     def test_off_page_location_has_bbox(self, adversarial_reader: pypdf.PdfReader) -> None:
         """Off-page detection must carry a bbox showing the y-coordinate evidence."""
@@ -113,7 +111,8 @@ class TestAdversarialFixtureDetections:
         d1, _ = detect_invisible_content(adversarial_reader, page_num=1)
         # Page 1 should have no invisible-content detections
         assert not any(
-            d.kind in (
+            d.kind
+            in (
                 InvisibleContentKind.white_on_white,
                 InvisibleContentKind.zero_size_font,
                 InvisibleContentKind.off_page,
@@ -128,8 +127,7 @@ class TestAdversarialFixtureDetections:
             for f in findings:
                 if f.location is not None:
                     assert f.location.page_start == page_num, (
-                        f"Finding on page {page_num} has wrong page_start: "
-                        f"{f.location.page_start}"
+                        f"Finding on page {page_num} has wrong page_start: {f.location.page_start}"
                     )
 
 

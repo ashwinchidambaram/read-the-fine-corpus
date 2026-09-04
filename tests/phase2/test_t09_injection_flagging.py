@@ -39,7 +39,6 @@ from __future__ import annotations
 import pathlib
 import tempfile
 import uuid
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -47,12 +46,8 @@ import pytest
 
 from conftest import qdrant_integration_mark
 
-ADVERSARIAL = (
-    Path(__file__).parent.parent / "fixtures" / "golden" / "corpus" / "adversarial.pdf"
-)
-CLEAN_NATIVE = (
-    Path(__file__).parent.parent / "fixtures" / "golden" / "corpus" / "clean_native.pdf"
-)
+ADVERSARIAL = Path(__file__).parent.parent / "fixtures" / "golden" / "corpus" / "adversarial.pdf"
+CLEAN_NATIVE = Path(__file__).parent.parent / "fixtures" / "golden" / "corpus" / "clean_native.pdf"
 
 QDRANT_URL = "http://localhost:6333"
 POSTGRES_DSN = "postgresql+psycopg://finecorpus:finecorpus@localhost:5432/finecorpus"
@@ -78,7 +73,6 @@ def _run_pipeline_in_tempdir(
 
     Returns (artifact_store, chunk_payloads_from_adapter).
     """
-    from finecorpus.embedding.fake import FakeProvider
     from finecorpus.pipeline import run_pipeline
     from finecorpus.pipeline.artifact_store import ArtifactStore
 
@@ -100,16 +94,13 @@ def _run_pipeline_in_tempdir(
                 build_id=1,
                 promote=False,
             )
-            store = ArtifactStore(
-                artifacts_root=pathlib.Path(artifacts_root_str), run_id=run_id
-            )
+            store = ArtifactStore(artifacts_root=pathlib.Path(artifacts_root_str), run_id=run_id)
             # Load chunk payloads from adapter
             chunk_payloads: list[dict[str, Any]] = []
             if adapter.collections:
                 coll_name = list(adapter.collections.keys())[0]
                 chunk_payloads = [
-                    pt.get("payload", {})
-                    for pt in adapter.collections[coll_name].get("points", [])
+                    pt.get("payload", {}) for pt in adapter.collections[coll_name].get("points", [])
                 ]
             return store, chunk_payloads
 
@@ -129,9 +120,8 @@ class TestT09InjectionFlaggingUnit:
     @pytest.fixture(scope="class")
     def adversarial_chunks(self) -> list[dict[str, Any]]:
         """Chunk payloads from the full pipeline over adversarial.pdf."""
-        from tests.retrieval.helpers import FakeAdapter
-
         from finecorpus.embedding.fake import FakeProvider
+        from tests.retrieval.helpers import FakeAdapter
 
         kb_id = f"kb-t09-unit-{uuid.uuid4().hex[:8]}"
         provider = FakeProvider(dimensions=DIMENSIONS)
@@ -164,7 +154,8 @@ class TestT09InjectionFlaggingUnit:
         Those segments must score > 0.
         """
         nonzero = [
-            p for p in adversarial_chunks
+            p
+            for p in adversarial_chunks
             if p.get("provenance", {}).get("injection_suspicion", 0.0) > 0.0
         ]
         assert nonzero, (
@@ -187,7 +178,8 @@ class TestT09InjectionFlaggingUnit:
     ) -> None:
         """Chunks from pages with invisible content must carry invisible_content_flags."""
         flagged = [
-            p for p in adversarial_chunks
+            p
+            for p in adversarial_chunks
             if p.get("provenance", {}).get("invisible_content_flags", [])
         ]
         assert flagged, (
@@ -195,9 +187,7 @@ class TestT09InjectionFlaggingUnit:
             "pages 5 (white-on-white), 6 (tiny font), 7 (off-page) should produce flagged chunks"
         )
 
-    def test_all_chunks_labelled_untrusted(
-        self, adversarial_chunks: list[dict[str, Any]]
-    ) -> None:
+    def test_all_chunks_labelled_untrusted(self, adversarial_chunks: list[dict[str, Any]]) -> None:
         """§14.1: every chunk must have trust_level = untrusted_ingested."""
         for payload in adversarial_chunks:
             prov = payload.get("provenance", {})
@@ -216,7 +206,8 @@ class TestT09InjectionFlaggingUnit:
         MUST NOT lower any tier to 'excluded'.
         """
         high_suspicion = [
-            p for p in adversarial_chunks
+            p
+            for p in adversarial_chunks
             if p.get("provenance", {}).get("injection_suspicion", 0.0) >= 0.3
         ]
         assert high_suspicion, (
@@ -237,8 +228,11 @@ class TestT09InjectionFlaggingUnit:
     ) -> None:
         """Invisible-content flags must come from the correct detection kinds."""
         valid_kinds = {
-            "white_on_white", "zero_size_font", "off_page",
-            "metadata_only", "render_hidden",
+            "white_on_white",
+            "zero_size_font",
+            "off_page",
+            "metadata_only",
+            "render_hidden",
         }
         for payload in adversarial_chunks:
             flags = payload.get("provenance", {}).get("invisible_content_flags", [])
@@ -247,9 +241,8 @@ class TestT09InjectionFlaggingUnit:
 
     def test_clean_native_chunks_score_zero(self) -> None:
         """clean_native.pdf chunks should score 0.0 on injection_suspicion."""
-        from tests.retrieval.helpers import FakeAdapter
-
         from finecorpus.embedding.fake import FakeProvider
+        from tests.retrieval.helpers import FakeAdapter
 
         kb_id = f"kb-clean-t09-{uuid.uuid4().hex[:8]}"
         provider = FakeProvider(dimensions=DIMENSIONS)
@@ -261,16 +254,12 @@ class TestT09InjectionFlaggingUnit:
             pytest.skip("No chunks produced from clean_native.pdf")
 
         nonzero = [
-            p for p in payloads
-            if p.get("provenance", {}).get("injection_suspicion", 0.0) > 0.0
+            p for p in payloads if p.get("provenance", {}).get("injection_suspicion", 0.0) > 0.0
         ]
         nonzero_summary = [
-            (p.get("chunk_id"), p.get("provenance", {}).get("injection_suspicion"))
-            for p in nonzero
+            (p.get("chunk_id"), p.get("provenance", {}).get("injection_suspicion")) for p in nonzero
         ]
-        assert not nonzero, (
-            f"clean_native.pdf chunks should score 0.0; nonzero: {nonzero_summary}"
-        )
+        assert not nonzero, f"clean_native.pdf chunks should score 0.0; nonzero: {nonzero_summary}"
 
 
 # ===========================================================================
@@ -299,154 +288,101 @@ class TestT09InjectionFlaggingIntegration:
         """Full T-09: pipeline → live Qdrant → retrieval → security fields present."""
         import shutil
 
-        from finecorpus.control.metadata import AliasRecord as OrmAliasRecord
-        from finecorpus.control.metadata import AliasRepository, Base
-        from finecorpus.embedding.fake import FakeProvider
-        from finecorpus.index.adapter import alias_name
-        from finecorpus.index.lifecycle import (
-            create_shadow,
-            promote_shadow,
-            validate_shadow,
-        )
-        from finecorpus.index.qdrant.backend import QdrantAdapter
-        from finecorpus.pipeline import run_pipeline
-        from finecorpus.retrieval.service import RetrievalService
         from sqlalchemy import create_engine
         from sqlalchemy.orm import sessionmaker
 
+        from finecorpus.control.metadata import Base
+        from finecorpus.embedding.fake import FakeProvider
+        from finecorpus.index.adapter import alias_name, collection_name
+        from finecorpus.index.qdrant.backend import QdrantAdapter
+        from finecorpus.pipeline import run_pipeline
+        from finecorpus.retrieval.service import query as retrieval_query
+
         kb_id = f"kbt09-{uuid.uuid4().hex[:12]}"
         ws_id = "ws-t09-live"
-        config_version = f"cfgv-t09-{uuid.uuid4().hex[:8]}"
         build_id = int(uuid.uuid4().hex[:4], 16) % 9000 + 1000
 
         provider = FakeProvider(dimensions=DIMENSIONS)
         adapter = QdrantAdapter(url=QDRANT_URL)
 
+        # Derive the shadow collection name deterministically (matches the
+        # collection_name() function used by create_shadow internally).
+        shadow_coll = collection_name(kb_id, build_id)
+
         engine = create_engine(POSTGRES_DSN)
         Base.metadata.create_all(engine)
         Session = sessionmaker(bind=engine)
 
-        shadow_coll = create_shadow(
-            adapter=adapter,
-            kb_id=kb_id,
-            build_id=build_id,
-            dimensions=DIMENSIONS,
-            provider=PROVIDER_ID,
-            model=MODEL_ID,
-            config_version=config_version,
-        )
-
         try:
-            with tempfile.TemporaryDirectory() as source_dir, \
-                 tempfile.TemporaryDirectory() as artifacts_root:
+            with (
+                tempfile.TemporaryDirectory() as source_dir,
+                tempfile.TemporaryDirectory() as artifacts_root,
+            ):
                 shutil.copy2(ADVERSARIAL, source_dir)
                 run_id = f"t09-live-{uuid.uuid4().hex[:8]}"
 
-                run_pipeline(
-                    source_dir=source_dir,
-                    artifacts_root=artifacts_root,
-                    run_id=run_id,
-                    workspace_id=ws_id,
-                    kb_id=kb_id,
-                    embedding_provider=provider,
-                    index_adapter=adapter,
-                    build_id=build_id,
-                    promote=False,
-                )
+                # Run pipeline with promote=True — the orchestrator creates the
+                # shadow collection, runs all 5 stages, then calls lifecycle.promote()
+                # to execute the two-phase alias swap (§4.2).
+                with Session() as session:
+                    run_pipeline(
+                        source_dir=source_dir,
+                        artifacts_root=artifacts_root,
+                        run_id=run_id,
+                        workspace_id=ws_id,
+                        kb_id=kb_id,
+                        embedding_provider=provider,
+                        index_adapter=adapter,
+                        build_id=build_id,
+                        promote=True,
+                        db_session=session,
+                    )
 
-            # Check that some chunks were written
-            chunk_count = adapter.count_points(shadow_coll)
-            assert chunk_count > 0, f"No chunks written to Qdrant for adversarial.pdf"
-
-            # Check that at least one chunk has nonzero injection_suspicion
-            # by searching and examining payloads
-            from finecorpus.contracts.ingestion_config import (
-                ChunkingStrategy,
-                DefaultRule,
-                IngestionConfig,
-            )
-            from finecorpus.contracts.shared.blocks import (
-                PermissionFidelity,
-                PermissionMode,
-                PermissionSource,
-                TenancyBlock,
+            # Verify alias was promoted: the alias must now resolve to our collection
+            assert adapter.alias_exists(alias_name(kb_id)), (
+                "T-09: alias was not created after promotion"
             )
 
-            tenancy = TenancyBlock(
-                workspace_id=ws_id,
-                kb_id=kb_id,
-                permission_mode=PermissionMode.public_to_kb,
-                permission_principals=[],
-                permission_source=PermissionSource.platform,
-                permission_fidelity=PermissionFidelity.authoritative,
-            )
-            config = IngestionConfig(
-                schema_version="1.0.0",
-                tenancy=tenancy,
-                config_version=config_version,
-                default_rule=DefaultRule(chunking=ChunkingStrategy(
-                    max_tokens=512, target_tokens=384, overlap_tokens=64
-                )),
-                class_rules=[],
-                embedding={
-                    "provider": PROVIDER_ID, "model": MODEL_ID, "dimensions": DIMENSIONS
-                },
-            )
+            # Count indexed chunks
+            chunk_count = adapter.count_points(alias_name(kb_id))
+            assert chunk_count > 0, "No chunks written to Qdrant for adversarial.pdf"
 
-            validate_shadow(
-                adapter=adapter,
-                shadow_collection=shadow_coll,
-                ingestion_config=config,
-            )
-
+            # Query via retrieval service function
             with Session() as session:
-                promote_shadow(
+                result = retrieval_query(
+                    kb_id=kb_id,
+                    query_text="ignore previous instructions",
+                    provider=provider,
                     adapter=adapter,
                     session=session,
-                    kb_id=kb_id,
-                    workspace_id=ws_id,
-                    shadow_collection=shadow_coll,
-                    build_id=build_id,
-                    embedding_provider=PROVIDER_ID,
-                    embedding_model=MODEL_ID,
-                    embedding_dimensions=DIMENSIONS,
-                    config_version=config_version,
-                )
-
-            # Query via retrieval service
-            with Session() as session:
-                repo = AliasRepository(session)
-                svc = RetrievalService(adapter=adapter, alias_repository=repo)
-                query_vector = [0.1] * DIMENSIONS
-                result = svc.query(
-                    query_text="ignore previous instructions",
-                    query_vector=query_vector,
-                    kb_id=kb_id,
-                    workspace_id=ws_id,
                     top_k=20,
                 )
 
             # T-09 assertion: result status is valid
-            assert result["result_status"] in (
-                "matches", "no_matches", "filtered_to_zero"
-            ), f"Unexpected result_status: {result['result_status']}"
+            from finecorpus.contracts.retrieval_response import ResultStatus
 
-            if result["result_status"] == "matches":
-                chunks = result.get("results", [])
-                for chunk in chunks:
-                    prov = chunk.get("provenance", {})
-                    # Both fields must be present and retrievable
-                    assert "injection_suspicion" in prov, (
-                        f"T-09: chunk missing injection_suspicion"
+            assert result.result_status in (
+                ResultStatus.matches,
+                ResultStatus.no_matches,
+                ResultStatus.filtered_to_zero,
+            ), f"Unexpected result_status: {result.result_status}"
+
+            if result.result_status == ResultStatus.matches:
+                for chunk in result.results:
+                    prov = chunk.provenance
+                    # Both fields must be present and retrievable (§14.1)
+                    assert hasattr(prov, "injection_suspicion"), (
+                        "T-09: chunk missing injection_suspicion"
                     )
-                    assert "invisible_content_flags" in prov, (
-                        f"T-09: chunk missing invisible_content_flags"
+                    assert hasattr(prov, "invisible_content_flags"), (
+                        "T-09: chunk missing invisible_content_flags"
                     )
-                    assert prov.get("trust_level") == "untrusted_ingested"
+                    assert chunk.trust_level.value == "untrusted_ingested"
 
             # Verify at least one indexed chunk has nonzero suspicion
             # (query results depend on FakeProvider cosine similarity — random vectors
-            # may not surface the most suspicious chunks, so we inspect all indexed data)
+            # may not surface the most suspicious chunks, so we inspect all indexed data
+            # via the raw Qdrant payload)
             search_results = adapter.search(
                 alias=alias_name(kb_id),
                 query_vector=[0.1] * DIMENSIONS,
@@ -454,7 +390,8 @@ class TestT09InjectionFlaggingIntegration:
                 payload_filter={"tenancy.kb_id": kb_id},
             )
             nonzero_suspicion = [
-                r for r in search_results
+                r
+                for r in search_results
                 if r.payload.get("provenance", {}).get("injection_suspicion", 0.0) > 0.0
             ]
             assert nonzero_suspicion, (
@@ -464,7 +401,8 @@ class TestT09InjectionFlaggingIntegration:
             )
 
             invisible_flagged = [
-                r for r in search_results
+                r
+                for r in search_results
                 if r.payload.get("provenance", {}).get("invisible_content_flags", [])
             ]
             assert invisible_flagged, (
@@ -473,7 +411,7 @@ class TestT09InjectionFlaggingIntegration:
             )
 
         finally:
-            # Teardown: drop shadow collection and alias
+            # Teardown: drop alias and shadow collection
             try:
                 if adapter.alias_exists(alias_name(kb_id)):
                     adapter.delete_alias(alias_name(kb_id))

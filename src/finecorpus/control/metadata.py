@@ -45,6 +45,13 @@ class _Base(DeclarativeBase):
     pass
 
 
+# Public re-export of the ORM declarative base so that test code can import
+# ``Base`` from this module without depending on the private ``_Base`` name.
+# Plain assignment (not TypeAlias) keeps the object usable at runtime
+# (e.g. ``Base.metadata.create_all(engine)`` works as expected).
+Base = _Base
+
+
 # ---------------------------------------------------------------------------
 # alias_records table
 # ---------------------------------------------------------------------------
@@ -473,6 +480,7 @@ class AliasRepository:
 __all__ = [
     "AliasRecord",
     "AliasRepository",
+    "Base",
     "_redact_dsn",
     "create_engine",
     "create_tables",

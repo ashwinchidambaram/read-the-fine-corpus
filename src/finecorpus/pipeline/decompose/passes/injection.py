@@ -12,8 +12,8 @@ Pattern classes and their base weights (before length normalisation):
 
 | Class | Pattern examples | Base weight |
 |-------|-----------------|-------------|
-| imperative_ignore | "ignore previous instructions", "ignore all prior guidelines" | 0.50 |
-| imperative_disregard | "disregard all instructions", "disregard safety rules" | 0.45 |
+| imperative_ignore | "ignore previous instructions", "ignore all safety guidelines" | 0.50 |
+| imperative_disregard | "disregard all instructions", "disregard all prior guidelines" | 0.45 |
 | role_marker | line-initial "SYSTEM:", "USER:", "ASSISTANT:" | 0.40 |
 | fake_delimiter | "[INST]", "<|im_start|>", "<|im_end|>", "<<SYS>>" | 0.45 |
 | exfiltration_url | "send … to http://…", "post … to @user" | 0.50 |
@@ -84,20 +84,32 @@ from finecorpus.pipeline.decompose.passes.base import DocumentContext, PassResul
 
 #: Compiled pattern entries: (name, compiled_regex, base_weight)
 _PATTERNS: list[tuple[str, re.Pattern[str], float]] = [
-    # Imperative "ignore" — highest risk
+    # Imperative "ignore" — highest risk.
+    # Matches: "ignore previous instructions", "ignore all prior guidelines",
+    # "ignore all safety guidelines".  The optional intervening word group
+    # `(\w+\s+)?` covers adjectives like "safety", "prior", "all" that can
+    # appear between "ignore" and the target noun without requiring the
+    # word "previous"/"prior" to be present.
+    # Benign probe verified: "ignore the previous step if the light is green"
+    # does NOT match (the next token is "the", which routes to the (\w+\s+)?
+    # group and then fails to find a noun match at position).
     (
         "imperative_ignore",
         re.compile(
-            r"ignore\s+(all\s+)?(previous|prior)\s+(instructions?|guidelines?|rules?|prompts?)",
+            r"ignore\s+(all\s+)?((previous|prior)\s+|(\w+\s+))?(instructions?|guidelines?|rules?|prompts?)",
             re.IGNORECASE,
         ),
         0.50,
     ),
-    # Imperative "disregard"
+    # Imperative "disregard".
+    # Matches: "disregard all instructions", "disregard all prior guidelines",
+    # "disregard safety rules", "disregard context".  The optional `(\w+\s+)?`
+    # group covers adjectives (e.g. "prior", "all") that may appear between
+    # "disregard" and the target noun.
     (
         "imperative_disregard",
         re.compile(
-            r"disregard\s*(all\s+)?(instructions?|guidelines?|rules?|safety|context)",
+            r"disregard\s+(all\s+)?(\w+\s+)?(instructions?|guidelines?|rules?|safety|context)",
             re.IGNORECASE,
         ),
         0.45,
@@ -121,11 +133,13 @@ _PATTERNS: list[tuple[str, re.Pattern[str], float]] = [
         0.45,
     ),
     # Exfiltration / action urging: "send/post/forward X to http:// or @"
+    # re.DOTALL allows the {0,30} wildcard span to cross a newline, which is
+    # needed when PDF text extraction wraps the URL onto the next line.
     (
         "exfiltration_url",
         re.compile(
             r"(send|post|forward|submit|upload)\s+\S+\s+.{0,30}(https?://|@\w)",
-            re.IGNORECASE,
+            re.IGNORECASE | re.DOTALL,
         ),
         0.50,
     ),

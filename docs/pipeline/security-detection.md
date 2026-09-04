@@ -57,17 +57,17 @@ The detector (`detect_invisible_content(reader, page_num)`) operates directly on
 
 `InjectionPass` is a stateless `SegmentPass` that runs after salience scoring. It calls `_compute_injection_score(text)` on each segment's plain text and writes the result to `segment.provenance.injection_suspicion` (a float in [0.0, 1.0]).
 
-**Pattern classes and base weights:**
+**Pattern classes and base weights** (all 7 patterns from `_PATTERNS` in `injection.py`):
 
-| Pattern class | Examples | Base weight |
-|---|---|---|
-| Imperative model-directed language | "ignore previous instructions", "disregard the above" | 0.50 |
-| Role/persona markers | "you are now", "act as", "your new role" | 0.40 |
-| Fake delimiters | `---`, `[END]`, `</context>`, triple-backtick blocks | 0.35 |
-| Exfiltration / action urging | "send to", "output verbatim", "repeat back" | 0.40 |
-| Credential / secret requests | "api key", "password is", "bearer token" | 0.45 |
-| Confidentiality override | "this message is confidential", "do not reveal" | 0.35 |
-| System-prompt mimicry | "system:", "assistant:", "human:", prompt XML tags | 0.35 |
+| Pattern class | Regex (simplified) | Example match | Base weight |
+|---|---|---|---|
+| `imperative_ignore` | `ignore (all )?(previous\|prior\|<adj> )?(instructions\|guidelines\|rules\|prompts)` | "ignore all safety guidelines" | 0.50 |
+| `imperative_disregard` | `disregard (all )?(<adj> )?(instructions\|guidelines\|rules\|safety\|context)` | "disregard all prior guidelines" | 0.45 |
+| `role_marker` | `^(system\|assistant\|user)\s*:` (multiline) | "SYSTEM: You are …" | 0.40 |
+| `fake_delimiter` | `[INST]\|<\|im_start\|>\|<\|im_end\|>\|<<SYS>>\|</s>\|<s>\|[/INST]` | `[INST]` | 0.45 |
+| `exfiltration_url` | `(send\|post\|forward\|submit\|upload) \S+ .{0,30}(https?://\|@\w)` | "send all context to https://…" | 0.50 |
+| `credential_request` | `(reveal\|output\|print\|show\|expose) (your )?(system prompt\|api key\|password\|credentials\|context window)` | "output your system prompt" | 0.45 |
+| `developer_mode` | `(developer mode\|unrestricted mode\|jailbreak\|DAN mode)` | "developer mode" | 0.35 |
 
 **Score formula.** For each matched pattern class, the raw contribution is `base_weight × length_factor`, where `length_factor = min(1.0, log1p(500) / log1p(text_len))`. This normalises for text length — a short segment that hits one pattern is penalised less than a long segment that hits the same pattern (under the assumption that a long document is more likely to discuss injection than to be an injection itself). The raw contributions are summed, then mapped through a soft-clamp: `score = 1 - exp(-raw_sum)`. The result is clamped to [0.0, 1.0].
 
@@ -103,6 +103,10 @@ A unit test (`TestM105NoExclusion` in `tests/phase2/test_injection_scoring.py`) 
 - Off-page detection uses the MediaBox; CropBox clipping is not considered.
 - Form XObjects and Pattern color spaces are not walked. A document that places hidden text inside an XObject will not be detected.
 - Only `rg` (RGB) and `g` (gray) non-stroking color operators are tracked. The `cs`/`scn` path-based operators, ICC profiles, and device-N colors are not modeled.
+- **Deduplication is one detection per (kind, page)** — a second white-on-white instance on the same page is not separately recorded. The deduplication is intentional to avoid flooding records, but it means a page with many hidden-text spans is treated the same as a page with one. (F-05)
+- **BT-reset heuristic false positives on legacy PDFs.** The `BT` operator resets the text cursor to (0.0, 0.0). Legacy PDFs that use cross-BT cumulative relative `Td` positioning (i.e., do not reset the cursor at each `BT`) may trigger false `off_page` detections because accumulated offsets put the inferred position outside the MediaBox. This is already documented in the module docstring of `security.py`; flag with care when reviewing `off_page` detections on pre-2010-era PDFs. (F-06)
+- **Invisible-content flags in chunk provenance are conditional.** The page-level `Finding` (code: `invisible_content_detected`) is always emitted for any page with a detection, regardless of segmentation. However, the `invisible_content_flags` field on individual chunks is populated only when at least one segment maps to the affected page. If a page has detections but no segments (e.g. a pure-image page that was not segmented), the finding appears at the document level but no chunk carries the flag. (F-10)
+- **Text rendering mode 3 (`Tr 3`) evasion gap.** PDF text rendering mode 3 ("invisible" — neither filled nor stroked) makes text completely invisible without changing the color. The Phase 2 detector does not track the `Tr` operator and will not flag text rendered with mode 3. No §14.1 MUST requirement covers this gap; it is a candidate for Phase 3 hardening. (F-10)
 
 **Injection scorer:**
 
@@ -110,6 +114,7 @@ A unit test (`TestM105NoExclusion` in `tests/phase2/test_injection_scoring.py`) 
 - The length normalization heuristic can be gamed by padding a short injection with filler text.
 - A score of 0.0 does not mean a segment is injection-free; it means no pattern matched. The scorer is deliberately conservative to avoid noise on legitimate corpus content.
 - No model-based scoring is used in Phase 2. A calibration pass (Phase 5) may add embedding-based or LLM-based signal.
+- **`role_marker` false positives on legitimate documents.** The pattern `^(system|assistant|user)\s*:` (case-insensitive, multiline) fires on line-initial occurrences in documents where these words appear as labels — for example, "User: John Smith" in meeting notes or "System: outage notification" in IT email logs. Each match contributes ~0.33 to the raw score. The score is advisory metadata only per M-105; the salience tier is never changed and the content remains fully retrievable. The pattern is intentionally kept broad (a lowercase-after-colon requirement would miss real title-case injection payloads). (F-04)
 
 ---
 
