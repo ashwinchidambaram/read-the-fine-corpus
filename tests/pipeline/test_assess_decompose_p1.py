@@ -470,7 +470,11 @@ class TestUnservableFiles:
         ],
     )
     def test_spreadsheet_excluded_produces_empty_segment_set(self, tmp_path, fixture_name):
-        """Database/model spreadsheets must produce empty SegmentSet (excluded_pre_parse)."""
+        """Database/model spreadsheets must produce empty SegmentSet with exclusion records.
+
+        Strengthened per F-05: exclusions must be non-empty and reason_detail must
+        mention the triage classification so the operator knows why content was excluded.
+        """
         src_dir = tmp_path / "src"
         src_dir.mkdir()
         shutil.copy2(FIXTURE_CORPUS / fixture_name, src_dir / fixture_name)
@@ -480,6 +484,21 @@ class TestUnservableFiles:
 
         assert ss.get("segments") == [], (
             f"{fixture_name}: expected empty segments (excluded), got {ss.get('segments')}"
+        )
+
+        exclusions = ss.get("exclusions", [])
+        assert exclusions != [], (
+            f"{fixture_name}: expected non-empty exclusions for excluded spreadsheet, got none"
+        )
+
+        # reason_detail must mention the triage classification (DATABASE or MODEL)
+        all_details = " ".join(e.get("reason_detail", "") for e in exclusions)
+        mentions_triage = (
+            "DATABASE" in all_details or "MODEL" in all_details or "triaged" in all_details.lower()
+        )
+        assert mentions_triage, (
+            f"{fixture_name}: exclusion reason_detail must mention triage classification. "
+            f"Got: {all_details[:300]!r}"
         )
 
 

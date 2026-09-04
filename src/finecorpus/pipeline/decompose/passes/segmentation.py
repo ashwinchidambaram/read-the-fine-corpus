@@ -134,6 +134,44 @@ def _exclusion_id(document_id: str, suffix: str) -> str:
     return "excl-" + hashlib.sha256(raw).hexdigest()[:24]
 
 
+def _source_loc_from_region(location_raw: dict[str, Any]) -> SourceLocation:
+    """Build a SourceLocation that faithfully propagates the region's locator kind.
+
+    The SourceLocation contract invariant requires the coordinate set named by
+    locator_kind to be populated.  For dom_path and cell_range regions the
+    original code fell back to locator_kind=page with page_start=None, violating
+    the invariant.  This helper dispatches on the locator_kind in the raw region
+    location dict and constructs a properly-populated SourceLocation.
+
+    For page-located regions, page_start falls back to 1 if absent (PDF default).
+    For dom_path regions, dom_path is populated from the raw dict.
+    For cell_range regions, cell_range is populated from the raw dict.
+    """
+    kind_str = location_raw.get("locator_kind", LocatorKind.page)
+    # LocatorKind may arrive as the enum value string or the enum itself
+    if hasattr(kind_str, "value"):
+        kind_str = kind_str.value
+
+    if kind_str == LocatorKind.dom_path:
+        return SourceLocation(
+            locator_kind=LocatorKind.dom_path,
+            dom_path=location_raw.get("dom_path") or "",
+        )
+    if kind_str == LocatorKind.cell_range:
+        return SourceLocation(
+            locator_kind=LocatorKind.cell_range,
+            cell_range=location_raw.get("cell_range") or "",
+        )
+    # Default: page-based (native PDF path)
+    page_start = location_raw.get("page_start", 1) or 1
+    page_end = location_raw.get("page_end", page_start) or page_start
+    return SourceLocation(
+        locator_kind=LocatorKind.page,
+        page_start=page_start,
+        page_end=page_end,
+    )
+
+
 def _is_heading(line: str, is_first_in_paragraph: bool) -> bool:
     stripped = line.strip()
     if not stripped or len(stripped) > _HEADING_MAX_CHARS:
@@ -288,6 +326,17 @@ class SegmentationPass:
             text = region.get("text") or ""
             location_raw = region.get("location", {})
             page_num = location_raw.get("page_start", 1)
+            # Build a SourceLocation that preserves the region's locator kind
+            # (dom_path for HTML, cell_range for spreadsheets, page for PDFs).
+            region_loc = _source_loc_from_region(location_raw)
+            # Carry detected_class_hint through to segment_type so that
+            # table regions become SegmentType.table segments (used by the
+            # Build stage to emit the table_to_markdown TransformationRecord
+            # per D-11).
+            _class_hint = region.get("detected_class_hint")
+            if hasattr(_class_hint, "value"):
+                _class_hint = _class_hint.value
+            _region_is_table = _class_hint == "table"
 
             # Failed/empty regions → exclusion record
             if extract_status in ("failed", "empty") or not text.strip():
@@ -395,11 +444,7 @@ class SegmentationPass:
                     seg_path = _build_segment_path(structural_path, path_ordinals[path_key])
                     path_ordinals[path_key] += 1
 
-                    seg_loc = SourceLocation(
-                        locator_kind=LocatorKind.page,
-                        page_start=page_num,
-                        page_end=page_num,
-                    )
+                    seg_loc = region_loc
                     prior_signal = _type_prior_signal(seg_type)
                     new_segments.append(
                         Segment(
@@ -485,11 +530,7 @@ class SegmentationPass:
                         continue
                     if len(stripped_para) < _MIN_SEGMENT_CHARS:
                         excl_suffix = f"short-para-{region_id}-{para_idx}"
-                        seg_loc_short = SourceLocation(
-                            locator_kind=LocatorKind.page,
-                            page_start=page_num,
-                            page_end=page_num,
-                        )
+                        seg_loc_short = region_loc
                         new_exclusions.append(
                             ExclusionRecord(
                                 exclusion_id=_exclusion_id(document_id, excl_suffix),
@@ -506,17 +547,20 @@ class SegmentationPass:
                         )
                         continue
 
-                    prose_type = _classify_prose(para_text, is_first_page, para_idx, page_num)
+                    # Table regions (detected_class_hint=table) are Markdown-serialized
+                    # tables; bypass the prose classifier and use SegmentType.table so
+                    # the Build stage can emit the table_to_markdown TransformationRecord
+                    # per D-11.
+                    if _region_is_table:
+                        prose_type = SegmentType.table
+                    else:
+                        prose_type = _classify_prose(para_text, is_first_page, para_idx, page_num)
 
                     path_key = tuple(structural_path)
                     seg_path = _build_segment_path(structural_path, path_ordinals[path_key])
                     path_ordinals[path_key] += 1
 
-                    seg_loc = SourceLocation(
-                        locator_kind=LocatorKind.page,
-                        page_start=page_num,
-                        page_end=page_num,
-                    )
+                    seg_loc = region_loc
                     prior_signal = _type_prior_signal(prose_type)
                     new_segments.append(
                         Segment(

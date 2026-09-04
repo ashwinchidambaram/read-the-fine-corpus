@@ -386,3 +386,23 @@ locations in A1 notation, e.g. `Sheet1!B2:D5`.
 As with the HTML parser, table regions are Markdown-serialized with no blank lines,
 making them safe to pass through Phase 1 segmentation. The `detected_class_hint`
 field marks them for Phase 3 taxonomy promotion.
+
+### Known limitation: narrative-table triage (deferred to Phase 3)
+
+The database heuristic samples only the **header row** for structural signals
+(uniformity, wrap_text, long text) and does not scan data rows for narrative
+content.  As a result, a findings register or audit log with 50+ uniform rows
+but narrative prose in body cells may be classified as `database` and excluded,
+even though it contains retrievable narrative.
+
+**Workaround:** Use the `spreadsheet_triage` `user_override` in `IngestionConfig`
+to reclassify such a document as `report`:
+
+```yaml
+spreadsheet_triage:
+  - source_path_glob: "**/findings_register_*.xlsx"
+    override_kind: report
+    rationale: "Narrative body cells; uniform header is misleading signal."
+```
+
+Data-row narrative sampling is deferred to Phase 3.

@@ -169,9 +169,11 @@ class _HTMLStructureParser(HTMLParser):
         # Tag stack: list of (tag, attrs_dict, dom_path_str)
         self._tag_stack: list[tuple[str, dict[str, str], str]] = []
 
-        # Per-tag ordinal counters for dom_path generation
-        # key = tuple(ancestor_path) -> {tag -> count}
-        self._ordinals: dict[tuple[str, ...], dict[str, int]] = {}
+        # Per-tag ordinal counters for dom_path generation.
+        # key = parent dom_path string (e.g. "body[1]/div[1]") -> {tag -> count}
+        # Keying on the concrete parent dom_path (not ancestor tag tuple) ensures
+        # ordinals reset per real parent, so sibling tables each start tbody[1].
+        self._ordinals: dict[str, dict[str, int]] = {}
 
         # Text accumulation
         self._text_buffer: list[str] = []
@@ -212,14 +214,24 @@ class _HTMLStructureParser(HTMLParser):
     # ------------------------------------------------------------------
 
     def _dom_path(self, tag: str) -> str:
-        """Compute the dom_path for the current tag being opened."""
-        parent_key = tuple(t for t, _, _ in self._tag_stack)
+        """Compute the dom_path for the current tag being opened.
+
+        Ordinals are keyed by the PARENT's dom_path string so that sibling tags
+        under different parents (e.g. two sibling <table> elements, each with
+        a <tbody>) get independent counters.  Keying on ancestor TAG NAMES alone
+        (the former approach) caused all same-tag siblings at any depth to share
+        a counter, producing inflated ordinals like tbody[2] for the first tbody
+        of the second table.
+        """
+        parent_path = self._tag_stack[-1][2] if self._tag_stack else ""
+        # Key the ordinal counter on the concrete parent dom_path string, not
+        # just the sequence of ancestor tag names.
+        parent_key = parent_path
         if parent_key not in self._ordinals:
             self._ordinals[parent_key] = {}
         count = self._ordinals[parent_key].get(tag, 0) + 1
         self._ordinals[parent_key][tag] = count
 
-        parent_path = self._tag_stack[-1][2] if self._tag_stack else ""
         if parent_path:
             return f"{parent_path}/{tag}[{count}]"
         return f"{tag}[{count}]"

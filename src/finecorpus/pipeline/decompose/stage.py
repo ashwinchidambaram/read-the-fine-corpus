@@ -236,18 +236,33 @@ def _make_empty_segment_set(
     elif "unservable_cad" in finding_codes:
         reason = ExclusionReason.unservable_content
         reason_detail = "CAD/binary file: no text extraction possible."
-    elif "excluded_content_type_html" in finding_codes:
-        reason = ExclusionReason.other
-        reason_detail = "HTML excluded in Phase 1 scope (native-text PDF only)."
-    elif "excluded_content_type_spreadsheet" in finding_codes:
-        reason = ExclusionReason.other
-        reason_detail = "Spreadsheet excluded in Phase 1 scope (native-text PDF only)."
+    elif "spreadsheet_database_excluded" in finding_codes:
+        reason = ExclusionReason.spreadsheet_database
+        # Extract reason_detail from the triage finding message for honest traceability
+        excl_finding = next(
+            (f for f in findings if f.get("code") == "spreadsheet_database_excluded"), None
+        )
+        reason_detail = (
+            excl_finding.get("message", "Spreadsheet triaged as DATABASE; excluded per §6.4.")
+            if excl_finding
+            else "Spreadsheet triaged as DATABASE; excluded per §6.4."
+        )
+    elif "spreadsheet_model_excluded" in finding_codes:
+        reason = ExclusionReason.spreadsheet_model
+        excl_finding = next(
+            (f for f in findings if f.get("code") == "spreadsheet_model_excluded"), None
+        )
+        reason_detail = (
+            excl_finding.get("message", "Spreadsheet triaged as MODEL; excluded per §6.4.")
+            if excl_finding
+            else "Spreadsheet triaged as MODEL; excluded per §6.4."
+        )
     elif parse_status == "failed":
         reason = ExclusionReason.parse_failed
         reason_detail = "Document parse failed; no segments produced."
     else:
         reason = ExclusionReason.other
-        reason_detail = "Document type not supported in Phase 1 (native-text PDF scope only)."
+        reason_detail = "Document format not yet supported for content extraction."
 
     exclusions: list[ExclusionRecord] = []
     for region in regions:

@@ -111,6 +111,7 @@ from finecorpus.pipeline.assess.parsers.base import ParserContext
 # ---------------------------------------------------------------------------
 
 _SPREADSHEET_EXTENSIONS = frozenset({".xlsx", ".xls", ".ods"})
+_CSV_EXTENSIONS = frozenset({".csv"})
 
 #: Fraction of data cells that must be formula-bearing → model classification.
 MODEL_FORMULA_RATIO: float = 0.30
@@ -802,7 +803,8 @@ class SpreadsheetFormatParser:
     """
 
     def can_parse(self, item: dict[str, Any]) -> bool:
-        return Path(item.get("source_path", "")).suffix.lower() in _SPREADSHEET_EXTENSIONS
+        suffix = Path(item.get("source_path", "")).suffix.lower()
+        return suffix in _SPREADSHEET_EXTENSIONS or suffix in _CSV_EXTENSIONS
 
     def parse(
         self,
@@ -815,6 +817,45 @@ class SpreadsheetFormatParser:
         document_id = item["document_id"]
         content_hash = item["content_hash"]
         source_path = item["source_path"]
+
+        # CSV is claimed by can_parse (so the fallback's wrong Phase-1 message is never shown)
+        # but openpyxl cannot parse CSV.  Return an honest excluded result immediately.
+        if Path(source_path).suffix.lower() in _CSV_EXTENSIONS:
+            return ParseResult(
+                schema_version="1.0.0",
+                tenancy=tenancy,
+                document_id=document_id,
+                content_hash=content_hash,
+                parser=ParserRef(name=_PARSER_NAME, version=_OPENPYXL_VERSION, ocr_engine=None),
+                parsed_at=parsed_at,
+                parse_status=ParseStatus.excluded_pre_parse,
+                document_kind=DocumentKind.spreadsheet,
+                quality=QualityScore(
+                    overall=0.0,
+                    text_extraction_ratio=0.0,
+                    table_structure_retained=TableStructureRetained.n_a,
+                    is_near_empty=True,
+                    mean_ocr_confidence=None,
+                ),
+                pages=[],
+                regions=[],
+                boilerplate_candidates=[],
+                content_classes=["csv_not_supported"],
+                encoding_issues=[],
+                language_distribution=[],
+                findings=[
+                    Finding(
+                        code="csv_not_supported",
+                        severity=FindingSeverity.error,
+                        location=None,
+                        message=(
+                            "CSV files are not supported in Phase 2: openpyxl cannot parse CSV. "
+                            "CSV support is future work. "
+                            "Remediation: convert to .xlsx before ingestion, or wait for Phase 3."
+                        ),
+                    )
+                ],
+            )
 
         if not _OPENPYXL_AVAILABLE:
             return ParseResult(
