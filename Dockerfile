@@ -33,6 +33,15 @@ FROM python:3.12-slim-bookworm AS runtime
 
 WORKDIR /app
 
+# System dependencies for OCR (Phase 2 — scanned PDF support).
+# tesseract-ocr is required by pytesseract for scanned-PDF extraction.
+# Without it, the ScannedPDFParser returns an honest failed result with
+# a missing_dependency finding rather than crashing.
+# See docs/pipeline/assess.md "Scanned PDF parser — system dependency".
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        tesseract-ocr \
+    && rm -rf /var/lib/apt/lists/*
+
 # Non-root user for security
 RUN groupadd --gid 1001 finecorpus && \
     useradd --uid 1001 --gid finecorpus --shell /bin/bash --create-home finecorpus

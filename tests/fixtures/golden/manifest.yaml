@@ -379,25 +379,27 @@ fixtures:
   - unservable_video
   sha256: 9a4b8abae4dae7f59f4872ab80f61f774f5c3ad01c957819baf4ebcd964a2edf
 - file: corpus/image_only.pdf
-  role: '§18.1 — unservable: image-only PDF (no text layer)'
+  role: '§18.1 — image-only PDF parsed via OCR (Phase 2)'
   generator: generators/gen_unservable.py
   content_summary: 'Single-page PDF whose only content is a rasterized JPEG image
     showing a synthetic diagram/schematic. No text layer, no native text objects.
-    OCR cannot recover machine-readable text without a vision model. Must produce
-    an exclusion record (or scanned_region with no recoverable text) flagged as unservable.
+    Phase 2: parsed via OCR (pytesseract) — produces scanned_region segments with
+    per-page OCR confidence (~0.64). Previously produced unservable_image_only
+    finding; now produces low_ocr_confidence finding (confidence in warn band
+    [0.60, 0.80)) and is assigned supporting salience tier.
 
     '
   expected_segment_types:
   - scanned_region
   expected_tiers:
-  - excluded
-  expected_triage_class: image_only_pdf
+  - supporting
+  expected_triage_class: scanned_pdf
   expected_findings:
-  - code: unservable_image_only
+  - code: low_ocr_confidence
     severity: warning
   flags:
-  - document_level_exclusion
-  - no_text_layer
+  - ocr_parsed
+  - low_confidence_page
   sha256: 7ddfe5289a1c41a373a58a56163b6343acf16437f975e3eb9c7d3b680bb3ff23
 - file: corpus/cad_binary.dwg
   role: '§18.1 — unservable: CAD/binary file with plausible magic bytes'

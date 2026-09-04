@@ -16,6 +16,12 @@ jobs:
         with:
           python-version: "3.12"
 
+      # System dependency for Phase 2 OCR (ScannedPDFParser — see docs/pipeline/assess.md).
+      # Without tesseract-ocr, ScannedPDFParser returns an honest failed result rather than
+      # crashing, but the test suite verifies real OCR output so the binary is required here.
+      - name: Install system dependencies (tesseract-ocr)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends tesseract-ocr
+
       - run: uv sync
 
       - run: uv run ruff check .

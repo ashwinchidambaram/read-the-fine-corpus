@@ -58,11 +58,24 @@ class ParserContext:
             flagged ``is_near_empty=True``.
         page_nonempty_chars: Minimum characters on a page for it to count
             as non-empty in quality scoring.
+        ocr_confidence_exclude_floor: OCR confidence below which a
+            scanned_region is assigned tier ``excluded``
+            (assessment.ocr_confidence_exclude_floor in reference.md, OQ-7).
+        ocr_confidence_warn_level: OCR confidence below which (but above
+            floor) a scanned_region is assigned tier ``supporting`` with a
+            low-confidence flag (assessment.ocr_confidence_warn_level, OQ-7).
+        ocr_sub_decompose_confidence_floor: OCR confidence above which
+            sub-decomposition of a scanned_region into typed sub-segments is
+            attempted (assessment.ocr_sub_decompose_confidence_floor, OQ-4).
     """
 
     min_chars_per_page: int = 200
     near_empty_threshold: float = 0.20
     page_nonempty_chars: int = 50
+    # OCR thresholds (Phase 2) — see docs/configuration/reference.md §2.5
+    ocr_confidence_exclude_floor: float = 0.60
+    ocr_confidence_warn_level: float = 0.80
+    ocr_sub_decompose_confidence_floor: float = 0.85
 
 
 class FormatParser(Protocol):

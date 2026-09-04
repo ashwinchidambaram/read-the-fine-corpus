@@ -57,6 +57,15 @@ class DocumentContext:
         parse_result: Full parse result dict for this document (the entry from
             ``ParseResultBatch.results``).
         decomposed_at: Run timestamp from the orchestrator.
+        ocr_confidence_exclude_floor: OCR confidence below which a
+            scanned_region is assigned tier ``excluded``
+            (assessment.ocr_confidence_exclude_floor; default 0.60, OQ-7).
+        ocr_confidence_warn_level: OCR confidence below which (but above
+            floor) a scanned_region is assigned tier ``supporting`` with a
+            low-confidence flag (assessment.ocr_confidence_warn_level; default 0.80, OQ-7).
+        ocr_sub_decompose_confidence_floor: OCR confidence above which
+            sub-decomposition of a scanned_region into typed sub-segments is
+            attempted (assessment.ocr_sub_decompose_confidence_floor; default 0.85, OQ-4).
     """
 
     document_id: str
@@ -64,6 +73,10 @@ class DocumentContext:
     tenancy: TenancyBlock
     parse_result: dict[str, Any]
     decomposed_at: datetime
+    # OCR thresholds — mirrored from ParserContext / docs/configuration/reference.md §2.5
+    ocr_confidence_exclude_floor: float = 0.60
+    ocr_confidence_warn_level: float = 0.80
+    ocr_sub_decompose_confidence_floor: float = 0.85
 
 
 @dataclass

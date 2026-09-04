@@ -388,19 +388,35 @@ class TestUnservableFiles:
         assert "password_protected" in codes, f"Expected password_protected finding, got: {codes}"
 
     def test_image_only_pdf_parse_status(self, tmp_path):
-        """image_only.pdf must produce parse_status=failed with unservable_image_only finding."""
+        """image_only.pdf is now OCR-parsed (Phase 2): parse_status=parsed, scanned_pdf kind.
+
+        Phase 1 behaviour was: failed with unservable_image_only finding.
+        Phase 2 behaviour: pdf_scanned_parser claims the file, runs tesseract,
+        returns parse_status=parsed with document_kind=scanned_pdf and
+        per-page ocr_confidence populated.  The finding changes from
+        unservable_image_only to low_ocr_confidence (confidence ~0.64).
+        """
         src_dir = tmp_path / "src"
         src_dir.mkdir()
         shutil.copy2(FIXTURE_CORPUS / "image_only.pdf", src_dir / "image_only.pdf")
 
         _, parse_batch, _ = _run_pipeline_over_corpus(tmp_path, source_dir=src_dir)
         pr = parse_batch["results"][0]
-        assert pr["parse_status"] == "failed", (
-            f"Expected failed for image-only PDF, got {pr['parse_status']!r}"
+        assert pr["parse_status"] == "parsed", (
+            f"Phase 2: image-only PDF should be OCR-parsed, got {pr['parse_status']!r}"
         )
+        assert pr["document_kind"] == "scanned_pdf", (
+            f"Expected document_kind=scanned_pdf, got {pr['document_kind']!r}"
+        )
+        # Per-page OCR confidence must be populated (not None) for scanned pages
+        for page in pr.get("pages", []):
+            assert page.get("ocr_confidence") is not None, (
+                "Scanned page must have ocr_confidence populated (§6.2 MUST retain)"
+            )
+        # Finding must reference low_ocr_confidence (not unservable_image_only)
         codes = {f["code"] for f in pr.get("findings", [])}
-        assert "unservable_image_only" in codes, (
-            f"Expected unservable_image_only finding, got: {codes}"
+        assert "unservable_image_only" not in codes, (
+            "Phase 2: image_only.pdf should no longer emit unservable_image_only finding"
         )
 
     @pytest.mark.parametrize(

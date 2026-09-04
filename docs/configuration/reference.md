@@ -265,6 +265,29 @@ Exit code is non-zero if any check fails.
 
 ---
 
+## 3a. System dependencies (Phase 2+)
+
+Some parsers require OS-level binaries in addition to Python packages.
+
+### tesseract-ocr (Phase 2 — scanned PDF support)
+
+**Required by:** `ScannedPDFParser` (`src/finecorpus/pipeline/assess/parsers/pdf_scanned.py`)
+**Python package:** `pytesseract` (in `pyproject.toml` dependencies)
+**Binary:** `tesseract` (from OS package `tesseract-ocr`)
+
+| Environment | Install command |
+|---|---|
+| Debian/Ubuntu (CI, Docker) | `apt-get install -y tesseract-ocr` |
+| macOS (local dev) | `brew install tesseract` |
+| Alpine | `apk add tesseract-ocr` |
+
+**If absent:** `ScannedPDFParser` returns an honest `parse_status=failed` result with
+a `missing_dependency` finding — no exception, no crash. Native-text PDFs are unaffected.
+
+**Verification:** `which tesseract` or `tesseract --version`.
+
+---
+
 ## 4. Open questions
 
 The following ambiguities were encountered during this reference page's compilation. None is
