@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from .models import _SKIP_MODEL_SECRET_CHECK, Config
 
@@ -56,7 +56,7 @@ PATH_SEP = "__"
 # Pydantic error.
 
 
-def _allowed_keys_for_model(model_cls: type) -> set[str]:
+def _allowed_keys_for_model(model_cls: type[BaseModel]) -> set[str]:
     """Return the set of field names accepted by *model_cls* (aliases included)."""
     names: set[str] = set()
     for field_name, field_info in model_cls.model_fields.items():
@@ -66,7 +66,9 @@ def _allowed_keys_for_model(model_cls: type) -> set[str]:
     return names
 
 
-def _validate_unknown_keys(data: dict[str, Any], model_cls: type, path: str = "") -> None:
+def _validate_unknown_keys(
+    data: dict[str, Any], model_cls: type[BaseModel], path: str = ""
+) -> None:
     """Recursively check that every key in *data* is known to *model_cls*.
 
     Raises ``ValueError`` naming the first offending key path.

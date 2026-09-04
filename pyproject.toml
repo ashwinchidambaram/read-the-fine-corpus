@@ -29,10 +29,48 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 
+[tool.mypy]
+python_version = "3.12"
+plugins = ["pydantic.mypy"]
+disallow_untyped_defs = true
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disallow_untyped_defs = false
+
+[tool.importlinter]
+root_packages = ["finecorpus"]
+
+[[tool.importlinter.contracts]]
+name = "C-5: CLI and services must not be imported by core modules"
+type = "forbidden"
+source_modules = [
+    "finecorpus.contracts",
+    "finecorpus.pipeline",
+    "finecorpus.config",
+]
+forbidden_modules = [
+    "finecorpus.cli",
+    "finecorpus.services",
+]
+
+[[tool.importlinter.contracts]]
+name = "C-5: layers — cli/services sit above pipeline/config above contracts"
+type = "layers"
+layers = [
+    "finecorpus.cli | finecorpus.services",
+    "finecorpus.pipeline | finecorpus.config",
+    "finecorpus.contracts",
+]
+exhaustive = false
+
 [dependency-groups]
 dev = [
     "fpdf2>=2.7",
     "httpx>=0.28.1",
+    "import-linter>=2.14",
+    "mypy>=2.3.1",
     "openpyxl>=3.1",
     "pillow>=10.0",
     "pytest>=9.1.1",
