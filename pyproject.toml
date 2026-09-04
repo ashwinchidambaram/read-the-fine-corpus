@@ -9,9 +9,13 @@ authors = [
 requires-python = ">=3.12"
 license = { text = "Apache-2.0" }
 dependencies = [
+    "alembic>=1.13",
     "fastapi>=0.141.1",
+    "psycopg[binary]>=3.3.5",
     "pydantic>=2.13.5",
     "pyyaml>=6.0.3",
+    "qdrant-client>=1.19.0",
+    "sqlalchemy>=2.0.52",
     "uvicorn>=0.52.4",
 ]
 
@@ -49,6 +53,8 @@ source_modules = [
     "finecorpus.contracts",
     "finecorpus.pipeline",
     "finecorpus.config",
+    "finecorpus.index",
+    "finecorpus.control",
 ]
 forbidden_modules = [
     "finecorpus.cli",
@@ -56,14 +62,39 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
-name = "C-5: layers — cli/services sit above pipeline/config above contracts"
+name = "C-5: layers — cli/services sit above pipeline/config/index/control above contracts"
 type = "layers"
 layers = [
     "finecorpus.cli | finecorpus.services",
-    "finecorpus.pipeline | finecorpus.config",
-    "finecorpus.contracts",
+    "finecorpus.pipeline | finecorpus.config | finecorpus.index",
+    "finecorpus.control | finecorpus.contracts",
 ]
 exhaustive = false
+
+[[tool.importlinter.contracts]]
+name = "C-2: index adapter/qdrant must not import from control (pure adapter boundary)"
+type = "forbidden"
+source_modules = [
+    "finecorpus.index.adapter",
+    "finecorpus.index.qdrant",
+]
+forbidden_modules = [
+    "finecorpus.control",
+    "finecorpus.cli",
+    "finecorpus.services",
+]
+
+[[tool.importlinter.contracts]]
+name = "C-5b: control layer must not import from index (no circular dependency)"
+type = "forbidden"
+source_modules = [
+    "finecorpus.control",
+]
+forbidden_modules = [
+    "finecorpus.index",
+    "finecorpus.cli",
+    "finecorpus.services",
+]
 
 [dependency-groups]
 dev = [
