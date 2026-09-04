@@ -1,3 +1,7 @@
+# Integration-test overlay — exposes Qdrant and Postgres host ports.
+# NEVER merged into the default compose flow: C-2 (spec 4.2) forbids exposing
+# the vector DB beyond the internal network in normal operation. Use explicitly:
+#   docker compose -f docker-compose.yml -f docker-compose.integration.yml up -d qdrant postgres
 # Local-dev override: expose backing-store ports to the host so the
 # integration test tier (uv run pytest -m qdrant_integration) can reach
 # Qdrant (6333) and Postgres (5432) at localhost.
