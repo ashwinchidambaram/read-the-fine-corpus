@@ -3,14 +3,11 @@
 Tests that two runs with the same run_id inputs produce byte-identical
 inventory artifacts.
 
-mtime caveat: source_modified_at and source_created_at are read from file
-metadata and may change between test runs if test fixtures are re-generated.
-discovered_at (= collected_at) is passed explicitly by the caller and fixed.
-
 Strategy:
-  - Compare all inventory item fields EXCEPT those that are inherently volatile
-    across runs: source_created_at, source_modified_at, discovered_at.
-  - These volatile fields are explicitly excluded from the byte-identical comparison.
+  - Compare all inventory item fields EXCEPT source_created_at, which reflects
+    inode ctime and is the only genuinely uncontrollable field: copy2 preserves
+    mtime (so source_modified_at is stable), and discovered_at derives from the
+    caller-fixed collected_at (so it is also stable).
   - The core content: document_id, content_hash, source_path, size_bytes, media_type
     must be identical across runs.
 
@@ -23,13 +20,17 @@ import pathlib
 import shutil
 from datetime import UTC, datetime
 
+from finecorpus.pipeline import run_pipeline
 from finecorpus.pipeline.artifact_store import ArtifactStore
 from finecorpus.pipeline.collect import CollectStage
 
 FIXTURE_CORPUS = pathlib.Path(__file__).parent.parent / "fixtures" / "golden" / "corpus"
 
-# Fields excluded from byte-identical comparison (volatile across runs).
-_VOLATILE_ITEM_FIELDS = {"source_created_at", "source_modified_at", "discovered_at"}
+# Fields excluded from byte-identical comparison.
+# source_created_at reflects inode ctime and is the only genuinely uncontrollable field:
+# copy2 preserves mtime (so source_modified_at is stable), and discovered_at derives from
+# the caller-fixed collected_at (so it is also stable).
+_VOLATILE_ITEM_FIELDS = {"source_created_at"}
 # Top-level inventory fields that are volatile
 _VOLATILE_TOP_FIELDS = {"collected_at"}
 
@@ -161,3 +162,56 @@ class TestInventoryDeterminism:
         hashes2 = {item["source_path"]: item["content_hash"] for item in inv2["items"]}
 
         assert hashes1 == hashes2, "Content hashes changed between runs"
+
+
+class TestRunTimestampDeterminism:
+    """Formerly-wall-clock fields are deterministic when run_started_at is fixed."""
+
+    def test_built_at_is_deterministic_with_fixed_run_started_at(self, tmp_path):
+        """Two full pipeline runs with the same run_started_at produce the same built_at.
+
+        BuildStage previously called datetime.now() independently; the run_started_at
+        thread ensures it uses the caller-supplied timestamp instead.
+        """
+        source_dir = tmp_path / "source"
+        source_dir.mkdir()
+
+        fixture_files = sorted(FIXTURE_CORPUS.glob("*.pdf"))[:2]
+        for f in fixture_files:
+            shutil.copy2(f, source_dir / f.name)
+
+        fixed_time = datetime(2026, 9, 1, 12, 0, 0, tzinfo=UTC)
+
+        run_pipeline(
+            source_dir=source_dir,
+            artifacts_root=tmp_path / "run1",
+            run_id="det-ts-1",
+            workspace_id="ws-ts",
+            kb_id="kb-ts",
+            run_started_at=fixed_time,
+        )
+        run_pipeline(
+            source_dir=source_dir,
+            artifacts_root=tmp_path / "run2",
+            run_id="det-ts-2",
+            workspace_id="ws-ts",
+            kb_id="kb-ts",
+            run_started_at=fixed_time,
+        )
+
+        store1 = ArtifactStore(artifacts_root=tmp_path / "run1", run_id="det-ts-1")
+        store2 = ArtifactStore(artifacts_root=tmp_path / "run2", run_id="det-ts-2")
+
+        build1 = store1.load("build")
+        build2 = store2.load("build")
+
+        assert build1["built_at"] == build2["built_at"], (
+            f"built_at differs between runs with the same run_started_at: "
+            f"{build1['built_at']!r} vs {build2['built_at']!r}. "
+            "BuildStage must not call wall-clock independently."
+        )
+        # Verify it equals the fixed timestamp we passed in
+        assert fixed_time.isoformat() in build1["built_at"], (
+            f"built_at {build1['built_at']!r} does not reflect the fixed run_started_at "
+            f"{fixed_time.isoformat()!r}"
+        )

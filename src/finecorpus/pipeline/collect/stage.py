@@ -146,10 +146,13 @@ class CollectStage(Stage):
             hash_to_items.setdefault(item.content_hash, []).append(item)
 
         duplicate_groups: list[DuplicateGroup] = []
-        # Assign dedup roles
+        # Assign dedup roles: build plain dicts first, construct InventoryItem once with
+        # final values.
+        updated_items: list[InventoryItem] = []
         for content_hash, group in hash_to_items.items():
             if len(group) == 1:
-                # Unique — role is already 'unique'
+                # Unique — role is already 'unique'; keep as-is
+                updated_items.extend(group)
                 continue
             # Multiple items with same hash: pick primary deterministically
             # (lexicographic on source_path for stability).
@@ -160,13 +163,16 @@ class CollectStage(Stage):
             _digest = hashlib.sha256(content_hash.encode()).digest()[:10]
             group_id = f"GRP{base64.b32encode(_digest).decode('ascii')}"
 
-            for item in group:
-                item_mut = item
-                object.__setattr__(item_mut, "dedup_group_id", group_id)
-                if item.source_path == primary.source_path:
-                    object.__setattr__(item_mut, "dedup_role", DedupRole.primary)
-                else:
-                    object.__setattr__(item_mut, "dedup_role", DedupRole.exact_duplicate)
+            for item in sorted_group:
+                role = (
+                    DedupRole.primary
+                    if item.source_path == primary.source_path
+                    else DedupRole.exact_duplicate
+                )
+                item_data = item.model_dump(mode="python")
+                item_data["dedup_group_id"] = group_id
+                item_data["dedup_role"] = role
+                updated_items.append(InventoryItem(**item_data))
 
             dup_group = DuplicateGroup(
                 group_id=group_id,
@@ -175,6 +181,8 @@ class CollectStage(Stage):
                 primary_document_id=primary.document_id,
             )
             duplicate_groups.append(dup_group)
+
+        items = updated_items
 
         inventory = Inventory(
             schema_version=_INVENTORY_SCHEMA_VERSION,

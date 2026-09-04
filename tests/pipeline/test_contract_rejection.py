@@ -16,10 +16,132 @@ import pytest
 from finecorpus.contracts.versions import ContractVersionError
 from finecorpus.pipeline.artifact_store import ArtifactStore, ArtifactStoreError
 from finecorpus.pipeline.assess import AssessStage
+from finecorpus.pipeline.build import BuildStage
 
 
 def _make_store(tmp_path: pathlib.Path, run_id: str = "test-rejection") -> ArtifactStore:
     return ArtifactStore(artifacts_root=tmp_path, run_id=run_id)
+
+
+def _make_bad_ingestion_config(schema_version: str = "99.0.0") -> dict:
+    """Build a minimal IngestionConfig-shaped dict with an unsupported schema_version."""
+    return {
+        "schema_version": schema_version,
+        "tenancy": {
+            "workspace_id": "ws-test",
+            "kb_id": "kb-test",
+            "permission_mode": "public_to_kb",
+            "permission_principals": [],
+            "permission_source": "platform",
+            "permission_fidelity": "authoritative",
+            "permission_resolved_at": None,
+        },
+        "config_version": "abc123",
+        "created_at": "2026-09-01T00:00:00+00:00",
+        "naive_baseline": {
+            "reference_id": "naive-baseline-v0",
+            "description": "test",
+        },
+        "class_rules": [],
+        "default_rule": {
+            "segment_class": "prose",
+            "transformation": {
+                "tier1_enabled": True,
+                "tier1_operations": ["whitespace_repair"],
+                "tier2_enabled": False,
+                "tier2_operations": [],
+                "tier3_enabled": False,
+                "tier3_settings": None,
+            },
+            "chunking": {
+                "strategy": "recursive_char",
+                "max_tokens": 512,
+                "overlap_tokens": 64,
+                "respect_headings": False,
+                "atomic_rows": None,
+                "repeat_headers_on_split": None,
+                "split_boundaries": None,
+            },
+            "embedding_override": None,
+            "metadata_schema": [],
+            "retrieval_treatment": {
+                "default_salience_filter": ["primary"],
+                "salience_weights": None,
+                "rerank_eligible": False,
+                "strategy": "dense",
+                "confidence_floor": None,
+            },
+        },
+        "embedding": {
+            "provider": "ollama",
+            "model": "nomic-embed-text",
+            "dimensions": 768,
+            "normalize": True,
+            "supports_languages": ["en"],
+        },
+        "retrieval_defaults": {
+            "default_salience_filter": ["primary"],
+            "salience_weights": None,
+            "rerank_eligible": False,
+            "strategy": "dense",
+            "confidence_floor": None,
+        },
+        "language_support": {
+            "detected_languages": [],
+            "unsupported_languages": [],
+            "decision": "proceed",
+            "cross_lingual_supported": None,
+        },
+        "spreadsheet_triage": [],
+        "exclusions_confirmed": [],
+        "provenance": [],
+        "secret_free_attestation": True,
+    }
+
+
+class TestBuildStageContractVersionRejection:
+    """BuildStage MUST reject IngestionConfig with unsupported schema_version (§12).
+
+    IngestionConfig is a real §12 contract at the Plan→Build boundary;
+    BuildStage declares consumed_version_range = SUPPORTED_INGESTION_CONFIG.
+    """
+
+    def test_build_rejects_unsupported_ingestion_config_version_through_load_run(self, tmp_path):
+        """BuildStage raises ContractVersionError for schema_version 99.0.0 via load+run path.
+
+        The artifact is saved to the store (simulating how Plan would persist it),
+        then loaded and fed to BuildStage.run() — the real production path.
+        """
+        store = _make_store(tmp_path, run_id="test-build-rejection")
+
+        bad_config = _make_bad_ingestion_config(schema_version="99.0.0")
+
+        # Persist the bad artifact as if Plan had written it (save bypasses version checks)
+        store.save("plan", bad_config)
+        loaded_config = store.load("plan")
+
+        stage = BuildStage()
+        with pytest.raises(ContractVersionError) as exc_info:
+            stage.run(input_data=loaded_config, store=store)
+
+        err = exc_info.value
+        assert "99.0.0" in str(err), f"Error should mention the bad version: {err}"
+        assert "ingestion_config" in str(err).lower(), (
+            f"Error should mention the contract name: {err}"
+        )
+
+    def test_build_accepts_supported_ingestion_config_version(self, tmp_path):
+        """BuildStage accepts schema_version 1.0.0 without raising."""
+        store = _make_store(tmp_path, run_id="test-build-accept")
+
+        good_config = _make_bad_ingestion_config(schema_version="1.0.0")
+        store.save("plan", good_config)
+        loaded_config = store.load("plan")
+
+        stage = BuildStage()
+        result = stage.run(input_data=loaded_config, store=store)
+        assert result["schema_version"] == "1.0.0"
+        assert result["chunk_count"] == 0
 
 
 class TestContractVersionRejection:

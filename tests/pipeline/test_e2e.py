@@ -119,14 +119,17 @@ class TestInventoryCorrectness:
     """Inventory must cover all files and have correct hashes."""
 
     def test_inventory_covers_all_fixture_files(self, pipeline_run):
-        """Inventory count equals actual file count in corpus directory."""
+        """Inventory source_path set equals actual file set in corpus directory (§6 rule 6)."""
         store: ArtifactStore = pipeline_run["store"]
         inv = store.load_with_model_validation("collect", Inventory)
 
-        # Count actual files in fixture directory
-        actual_files = [p for p in FIXTURE_CORPUS.rglob("*") if p.is_file()]
-        assert len(inv.items) == len(actual_files), (
-            f"Inventory has {len(inv.items)} items but corpus has {len(actual_files)} files. "
+        # Build set of actual files and compare with inventory source_path set
+        actual_files = {str(p) for p in FIXTURE_CORPUS.rglob("*") if p.is_file()}
+        inventory_paths = {item.source_path for item in inv.items}
+        assert inventory_paths == actual_files, (
+            f"Inventory source_paths do not match corpus files. "
+            f"Missing from inventory: {actual_files - inventory_paths}. "
+            f"Extra in inventory: {inventory_paths - actual_files}. "
             "Nothing must be silently dropped (§6 rule 6)."
         )
 
@@ -227,6 +230,16 @@ class TestInventoryCorrectness:
         batch = store.load_with_model_validation("assess", ParseResultBatch)
         assert len(batch.results) == len(inv.items), (
             f"Assess has {len(batch.results)} results but inventory has {len(inv.items)} items"
+        )
+
+    def test_decompose_has_same_count_as_inventory(self, pipeline_run):
+        """Decompose output has one SegmentSet per inventory item (nothing dropped)."""
+        store: ArtifactStore = pipeline_run["store"]
+        inv = store.load_with_model_validation("collect", Inventory)
+        batch = store.load_with_model_validation("decompose", SegmentSetBatch)
+        assert len(batch.segment_sets) == len(inv.items), (
+            f"Decompose has {len(batch.segment_sets)} segment_sets but inventory has "
+            f"{len(inv.items)} items (nothing must be silently dropped)"
         )
 
     def test_plan_has_secret_free_attestation(self, pipeline_run):

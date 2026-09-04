@@ -104,6 +104,11 @@ class PreflightReport:
         """``True`` when no check has status ``FAIL``."""
         return all(r.status != CheckStatus.FAIL for r in self.results)
 
+    @property
+    def has_failures(self) -> bool:
+        """``True`` when at least one check has status ``FAIL``."""
+        return any(r.status == CheckStatus.FAIL for r in self.results)
+
     def __str__(self) -> str:
         lines = [str(r) for r in self.results]
         lines.append("")

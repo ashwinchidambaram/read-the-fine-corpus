@@ -58,13 +58,23 @@ class DecomposeStage(Stage):
     """Stage 3 — Decompose (skeleton).
 
     Consumes ParseResultBatch, emits SegmentSetBatch.
+
+    Args:
+        run_started_at: Single run timestamp threaded from the orchestrator.
+            All stages share this timestamp so no stage calls wall-clock.
+            Defaults to the collected_at value already established at run start.
     """
 
     name = "decompose"
     consumed_contract = "parse_result_batch"
-    consumed_version_range = None  # Envelope; version check done by ArtifactStore load()
+    consumed_version_range = (
+        None  # no version check: envelope contract not in the §12 table (see decision D-26)
+    )
     produced_contract = "segment_set_batch"
     output_model = SegmentSetBatch
+
+    def __init__(self, run_started_at: datetime | None = None) -> None:
+        self._run_started_at = run_started_at or datetime.now(tz=UTC)
 
     def _produce(self, input_data: dict[str, Any] | None) -> dict[str, Any]:
         """Produce one empty SegmentSet per parse result entry."""
@@ -91,7 +101,7 @@ class DecomposeStage(Stage):
             permission_resolved_at=None,
         )
 
-        decomposed_at = datetime.now(tz=UTC)
+        decomposed_at = self._run_started_at
         segment_sets: list[dict[str, Any]] = []
 
         for parse_result in results:

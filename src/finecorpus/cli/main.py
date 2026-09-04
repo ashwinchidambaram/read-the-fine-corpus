@@ -20,7 +20,6 @@ It is NOT allowed to contain business logic.
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 
 
@@ -70,10 +69,9 @@ def _cmd_preflight(args: argparse.Namespace) -> int:
         return 1
 
     report = run_preflight(config)
-    print(json.dumps(report.to_dict(), indent=2))
+    print(str(report))
 
-    failed = any(r.status == "FAIL" for r in report.checks)
-    return 1 if failed else 0
+    return 1 if report.has_failures else 0
 
 
 def _build_parser() -> argparse.ArgumentParser:

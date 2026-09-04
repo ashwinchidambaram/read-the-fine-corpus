@@ -32,6 +32,7 @@ def run_pipeline(
     run_id: str,
     workspace_id: str,
     kb_id: str,
+    run_started_at: datetime | None = None,
 ) -> dict[str, str]:
     """Run all five pipeline stages end-to-end.
 
@@ -41,6 +42,9 @@ def run_pipeline(
         run_id: Caller-supplied run identity; must be non-empty.
         workspace_id: Tenancy workspace ULID (or identifier string).
         kb_id: Tenancy knowledge base ULID (or identifier string).
+        run_started_at: Optional caller-supplied run timestamp (UTC).  When
+            provided, all stages use this value instead of calling wall-clock,
+            making the full run deterministic.  Defaults to now() when None.
 
     Returns:
         A dict mapping stage name → absolute artifact path (as str).
@@ -52,8 +56,9 @@ def run_pipeline(
     """
     store = ArtifactStore(artifacts_root=artifacts_root, run_id=run_id)
 
-    # Fix the collection timestamp for determinism across the full run.
-    collected_at = datetime.now(tz=UTC)
+    # Fix a single run timestamp for determinism across the full run.
+    # All stages use this value — no stage calls wall-clock independently.
+    collected_at = run_started_at or datetime.now(tz=UTC)
 
     # Stage 1: Collect
     collect = CollectStage(
@@ -69,15 +74,15 @@ def run_pipeline(
     parse_result_batch = assess.run(input_data=inventory_dict, store=store)
 
     # Stage 3: Decompose
-    decompose = DecomposeStage()
+    decompose = DecomposeStage(run_started_at=collected_at)
     segment_set_batch = decompose.run(input_data=parse_result_batch, store=store)
 
     # Stage 4: Plan
-    plan = PlanStage()
+    plan = PlanStage(run_started_at=collected_at)
     ingestion_config = plan.run(input_data=segment_set_batch, store=store)
 
     # Stage 5: Build
-    build = BuildStage()
+    build = BuildStage(run_started_at=collected_at)
     build.run(input_data=ingestion_config, store=store)
 
     # Return artifact paths for all five stages
