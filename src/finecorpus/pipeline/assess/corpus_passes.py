@@ -40,15 +40,30 @@ Near-duplicate clustering (§6.1):
 Boilerplate detection (§6.2):
 
   The extracted text of each document is split into normalised paragraph
-  blocks (lower-cased, whitespace-collapsed).  A block that appears in more
-  than the configured proportion of documents is classified as corpus-wide
-  boilerplate.  Two thresholds apply:
+  blocks (lower-cased, whitespace-collapsed).  A block is classified as
+  corpus-wide boilerplate when EITHER of two branches fires (D-32):
 
-  * Normal corpus  (≥ ``boilerplate_small_corpus_doc_count`` docs): proportion
-    must exceed ``boilerplate_corpus_proportion`` (default 0.30).
-  * Small corpus   (< ``boilerplate_small_corpus_doc_count`` docs): proportion
+  Branch (a) — dominant-prevalence (normal corpus):
+  * Normal corpus  (≥ ``boilerplate_small_corpus_doc_count`` docs): fraction of
+    unique docs containing the block must exceed ``boilerplate_corpus_proportion``
+    (default 0.30).
+  * Small corpus   (< ``boilerplate_small_corpus_doc_count`` docs): fraction
     must exceed ``boilerplate_small_corpus_proportion`` (default 0.50),
     raising the bar to avoid false positives.
+
+  Branch (b) — absolute-floor (D-32, for larger corpora where fraction silently
+  falls below branch-a threshold):
+  * Total corpus occurrences of the block ≥ ``boilerplate_abs_floor_count``
+    (default 3, counting multiple occurrences within a single document), AND
+  * Unique-document fraction ≥ ``boilerplate_abs_floor_fraction`` (default 0.05,
+    preventing single-document repetitions in very large corpora from misfiring).
+
+  Rationale: the pure-fraction rule (branch a) was validated on 3-doc subsets where
+  fraction is trivially 1.0; at full corpus scale (15+ eligible docs) shared footers
+  appearing in 3 docs give fraction ≈ 0.20, below the 0.30 threshold.  The absolute
+  floor keeps the 70%-line match threshold and R6 (structural retype only, never byte
+  removal) unchanged; the 0.05 minimum prevalence prevents a 3-occurrence template
+  in a 1000-doc corpus from blanket-classifying.
 
   The boilerplate block set is recorded in the ParseResultBatch so the
   Decompose stage can pass it to the BoilerplatePass.
@@ -93,6 +108,36 @@ DEFAULT_BOILERPLATE_SMALL_CORPUS_PROPORTION: float = 0.50
 
 DEFAULT_BOILERPLATE_SMALL_CORPUS_DOC_COUNT: int = 10
 """Corpus size below which the small-corpus threshold applies."""
+
+DEFAULT_BOILERPLATE_ABS_FLOOR_COUNT: int = 3
+"""Absolute-floor branch (D-32): minimum total corpus occurrences for boilerplate.
+
+A block that appears at least this many times across the corpus (counting multiple
+occurrences within a single document, e.g. repeated nav chrome) triggers the
+absolute-floor branch when fraction also meets ``DEFAULT_BOILERPLATE_ABS_FLOOR_FRACTION``.
+
+Rationale (D-32): the pure-fraction rule (branch a) was validated only on 3-doc subsets
+where fraction is trivially 1.0; at full corpus scale it silently stops firing (measured:
+3/13 = 0.23 at 21-fixture scale).  The absolute floor keeps the 70%-line match threshold
+and R6 (structural retype only, never byte removal) unchanged.
+
+Configurable via ``assessment.boilerplate_abs_floor_count`` in corpus.yaml.
+"""
+
+DEFAULT_BOILERPLATE_ABS_FLOOR_FRACTION: float = 0.05
+"""Absolute-floor branch (D-32): minimum unique-document fraction for the absolute floor.
+
+A block must appear in at least this fraction of eligible documents (by unique-document
+count, not total occurrences) to trigger the absolute-floor branch.  This prevents a
+block appearing 3+ times within a single document in a large corpus from being
+classified as corpus-wide boilerplate.
+
+Example: 3 total occurrences in a 100-document corpus → unique_docs/n_docs = 0.01 < 0.05
+→ does NOT fire.  3 total occurrences in a 15-document corpus → unique_docs/n_docs
+≥ 0.05 → fires.
+
+Configurable via ``assessment.boilerplate_abs_floor_fraction`` in corpus.yaml.
+"""
 
 _SHINGLE_N = 5
 """Word n-gram size for near-duplicate shingling."""
@@ -359,12 +404,29 @@ def compute_boilerplate_blocks(
     corpus_proportion: float = DEFAULT_BOILERPLATE_CORPUS_PROPORTION,
     small_corpus_proportion: float = DEFAULT_BOILERPLATE_SMALL_CORPUS_PROPORTION,
     small_corpus_doc_count: int = DEFAULT_BOILERPLATE_SMALL_CORPUS_DOC_COUNT,
+    abs_floor_count: int = DEFAULT_BOILERPLATE_ABS_FLOOR_COUNT,
+    abs_floor_fraction: float = DEFAULT_BOILERPLATE_ABS_FLOOR_FRACTION,
 ) -> set[str]:
     """Detect corpus-wide boilerplate text blocks.
 
-    A normalised paragraph block is boilerplate when it appears in more than
-    the threshold proportion of corpus documents.  The threshold is raised for
-    small corpora (§6.2, OQ-8).
+    A normalised paragraph block is boilerplate when EITHER of two branches fires (D-32):
+
+    Branch (a) — dominant-prevalence:
+      The fraction of unique documents containing the block exceeds the applicable
+      threshold.  The threshold is raised for small corpora (§6.2, OQ-8):
+      * Normal corpus (≥ ``small_corpus_doc_count`` docs): fraction > ``corpus_proportion``
+        (default 0.30).
+      * Small corpus  (< ``small_corpus_doc_count`` docs): fraction > ``small_corpus_proportion``
+        (default 0.50, raising the bar to avoid false positives).
+
+    Branch (b) — absolute-floor (D-32):
+      Total corpus occurrences of the block ≥ ``abs_floor_count`` (default 3, counting
+      multiple occurrences within a single document) AND the unique-document fraction ≥
+      ``abs_floor_fraction`` (default 0.05).  This branch fires when the pure-fraction
+      rule would silently miss blocks repeated in a small fraction of a large corpus
+      — e.g. 3/15 = 0.20 falls below the 0.30 branch-a threshold but has absolute count 3.
+      The 0.05 minimum prevalence prevents a block appearing 3+ times within one document
+      in a 100+ doc corpus (fraction 0.01) from blanket-classifying.
 
     Block matching uses exact normalised string equality (lower-case,
     whitespace-collapsed).  This reuses the same dedup principle as
@@ -374,9 +436,11 @@ def compute_boilerplate_blocks(
 
     Args:
         parse_results: All ParseResult dicts from the batch.
-        corpus_proportion: Fraction of docs for boilerplate (normal corpus).
-        small_corpus_proportion: Fraction for small corpora.
-        small_corpus_doc_count: Threshold for "small corpus" classification.
+        corpus_proportion: Fraction of docs for boilerplate (normal corpus, branch a).
+        small_corpus_proportion: Fraction for small corpora (branch a).
+        small_corpus_doc_count: Threshold for "small corpus" classification (branch a).
+        abs_floor_count: Minimum total corpus occurrences to trigger branch (b).
+        abs_floor_fraction: Minimum unique-doc fraction to trigger branch (b).
 
     Returns:
         Set of normalised block strings that are boilerplate.
@@ -395,16 +459,33 @@ def compute_boilerplate_blocks(
     if n_docs < 2:
         return set()
 
-    # Pick the applicable threshold
+    # Pick the applicable branch-a threshold
     threshold = small_corpus_proportion if n_docs < small_corpus_doc_count else corpus_proportion
 
-    # Count block occurrences across documents (one count per document)
+    # Count block occurrences across documents.
+    #
+    # block_doc_count: unique-document count — at most 1 per document per block.
+    #   Used for fraction calculation in both branches.
+    #
+    # block_total_count: total corpus occurrences of the block, counting each
+    #   paragraph-level appearance once per document even when the block appears
+    #   multiple times within the same document (e.g. nav chrome repeated across
+    #   pages).  _split_paragraphs() produces both paragraph-level and line-level
+    #   splits; we count only paragraph-level repetitions to avoid double-counting
+    #   the same content unit.
     block_doc_count: dict[str, int] = {}
+    block_total_count: dict[str, int] = {}
 
     for pr in eligible:
         text = _extract_doc_text(pr)
         paragraphs = _split_paragraphs(text)
         seen_in_doc: set[str] = set()
+        # Track paragraph-level occurrences within this document (for total count).
+        # A single-line paragraph appears in _split_paragraphs() twice (as a paragraph
+        # and as a line); we must count it only once per paragraph-level occurrence.
+        # The multi-pass design: first pass counts paragraphs, second pass picks up
+        # line-level splits for detection.  Here we use seen_in_doc to deduplicate
+        # so that identical paragraph and line representations are counted once.
         for para in paragraphs:
             norm = _normalise_block(para)
             if len(norm) < _MIN_BLOCK_CHARS:
@@ -412,10 +493,52 @@ def compute_boilerplate_blocks(
             if norm not in seen_in_doc:
                 seen_in_doc.add(norm)
                 block_doc_count[norm] = block_doc_count.get(norm, 0) + 1
+                # First time seeing this block in this document: increment the cross-document
+                # total by 1 (one occurrence per document).  Within-document repetitions
+                # (e.g. nav chrome repeated across pages in a single HTML export) are NOT
+                # captured here — that excess is added by the second pass below, which counts
+                # how many paragraph-level occurrences the block has in each document and
+                # adds (count - 1) to block_total_count for every repeated occurrence.
+                block_total_count[norm] = block_total_count.get(norm, 0) + 1
+
+    # NOTE: to capture within-document repetitions (branch b use case: nav chrome
+    # appearing twice in a single HTML export), we need a second pass that counts
+    # how many non-overlapping PARAGRAPH-level occurrences exist per document.
+    # The approach: for each document, count how many times each block appears at
+    # the paragraph level (the raw paragraph-split, not the line-level expansion).
+    # We then add the excess occurrences (count - 1) to block_total_count.
+    for pr in eligible:
+        text = _extract_doc_text(pr)
+        # Paragraph-level split only (not the line-level expansion in _split_paragraphs)
+        raw_text = text.replace("\r\n", "\n").replace("\r", "\n")
+        paragraphs_only = re.split(r"\n\s*\n+", raw_text)
+        para_counter: dict[str, int] = {}
+        for para in paragraphs_only:
+            para = para.strip()
+            if not para:
+                continue
+            norm = _normalise_block(para)
+            if len(norm) < _MIN_BLOCK_CHARS:
+                continue
+            para_counter[norm] = para_counter.get(norm, 0) + 1
+        # For each block appearing > 1 times in this document (within-doc repetition),
+        # add the extra occurrences to block_total_count.
+        for norm, count in para_counter.items():
+            if count > 1 and norm in block_doc_count:
+                block_total_count[norm] = block_total_count.get(norm, 0) + (count - 1)
 
     boilerplate: set[str] = set()
-    for block, count in block_doc_count.items():
-        if count / n_docs > threshold:
+    for block, unique_count in block_doc_count.items():
+        fraction = unique_count / n_docs
+        total = block_total_count.get(block, unique_count)
+
+        # Branch (a): dominant-prevalence
+        if fraction > threshold:
+            boilerplate.add(block)
+            continue
+
+        # Branch (b): absolute-floor (D-32)
+        if total >= abs_floor_count and fraction >= abs_floor_fraction:
             boilerplate.add(block)
 
     return boilerplate
@@ -432,6 +555,8 @@ def run_corpus_passes(
     boilerplate_corpus_proportion: float = DEFAULT_BOILERPLATE_CORPUS_PROPORTION,
     boilerplate_small_corpus_proportion: float = DEFAULT_BOILERPLATE_SMALL_CORPUS_PROPORTION,
     boilerplate_small_corpus_doc_count: int = DEFAULT_BOILERPLATE_SMALL_CORPUS_DOC_COUNT,
+    boilerplate_abs_floor_count: int = DEFAULT_BOILERPLATE_ABS_FLOOR_COUNT,
+    boilerplate_abs_floor_fraction: float = DEFAULT_BOILERPLATE_ABS_FLOOR_FRACTION,
 ) -> tuple[list[dict[str, Any]], set[str]]:
     """Run near-dup clustering and boilerplate detection over the full corpus.
 
@@ -442,9 +567,11 @@ def run_corpus_passes(
     Args:
         parse_results: All ParseResult dicts (mutable).
         near_duplicate_threshold: Jaccard threshold for near-dup membership.
-        boilerplate_corpus_proportion: Boilerplate threshold (normal corpus).
-        boilerplate_small_corpus_proportion: Boilerplate threshold (small corpus).
-        boilerplate_small_corpus_doc_count: Small-corpus size cutoff.
+        boilerplate_corpus_proportion: Boilerplate threshold (normal corpus, branch a).
+        boilerplate_small_corpus_proportion: Boilerplate threshold (small corpus, branch a).
+        boilerplate_small_corpus_doc_count: Small-corpus size cutoff (branch a).
+        boilerplate_abs_floor_count: Minimum total occurrences for branch b (D-32).
+        boilerplate_abs_floor_fraction: Minimum unique-doc fraction for branch b (D-32).
 
     Returns:
         Tuple of:
@@ -496,6 +623,8 @@ def run_corpus_passes(
         corpus_proportion=boilerplate_corpus_proportion,
         small_corpus_proportion=boilerplate_small_corpus_proportion,
         small_corpus_doc_count=boilerplate_small_corpus_doc_count,
+        abs_floor_count=boilerplate_abs_floor_count,
+        abs_floor_fraction=boilerplate_abs_floor_fraction,
     )
 
     return version_families, boilerplate_blocks
@@ -506,6 +635,8 @@ __all__ = [
     "DEFAULT_BOILERPLATE_CORPUS_PROPORTION",
     "DEFAULT_BOILERPLATE_SMALL_CORPUS_PROPORTION",
     "DEFAULT_BOILERPLATE_SMALL_CORPUS_DOC_COUNT",
+    "DEFAULT_BOILERPLATE_ABS_FLOOR_COUNT",
+    "DEFAULT_BOILERPLATE_ABS_FLOOR_FRACTION",
     "compute_version_families",
     "compute_boilerplate_blocks",
     "run_corpus_passes",

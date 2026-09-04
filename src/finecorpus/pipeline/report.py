@@ -338,6 +338,24 @@ def _build_document_entry(
         for f in pr.get("findings", [])
     ]
 
+    # Synthesise table_structure_retained finding when quality.table_structure_retained
+    # reports that table structure was actually retained by the parser.
+    # The finding fires ONLY when quality.table_structure_retained is "full" or "partial"
+    # — values set by HTML/spreadsheet parsers that detect table structure natively.
+    # A quality value of "lost" or None means structure was NOT retained and must NOT
+    # produce a finding claiming retention (F-2 fix: segment-existence-only branch removed).
+    _quality_tsr = quality.get("table_structure_retained")
+    _has_table_quality = _quality_tsr in ("full", "partial")
+    _tsr_codes = {f.get("code") for f in pr.get("findings", [])}
+    if _has_table_quality and "table_structure_retained" not in _tsr_codes:
+        findings_list.append(
+            {
+                "code": "table_structure_retained",
+                "severity": "info",
+                "message": f"Table structure retained ({_quality_tsr})",
+            }
+        )
+
     return {
         "document_id": doc_id,
         "source_path": source_path,

@@ -460,6 +460,26 @@ class AssessmentConfig(BaseModel):
             "boilerplate proportion applies. **(proposed)**"
         ),
     )
+    boilerplate_abs_floor_count: int = Field(
+        default=3,
+        description=(
+            "§6.2, D-32 — Branch (b) absolute-floor: minimum total corpus occurrences "
+            "(counting within-document repetitions) for the absolute-floor boilerplate "
+            "branch. A block appearing at least this many times triggers branch (b) when "
+            "``boilerplate_abs_floor_fraction`` is also met. **(proposed)**"
+        ),
+    )
+    boilerplate_abs_floor_fraction: float = Field(
+        default=0.05,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "§6.2, D-32 — Branch (b) absolute-floor: minimum unique-document fraction "
+            "for the absolute-floor boilerplate branch. Prevents a block appearing 3+ "
+            "times within a single document in a large corpus from being classified as "
+            "corpus-wide boilerplate. **(proposed)**"
+        ),
+    )
     inline_split_min_lines: int = Field(
         default=3,
         description=(

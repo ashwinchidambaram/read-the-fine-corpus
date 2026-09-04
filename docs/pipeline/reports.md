@@ -135,6 +135,7 @@ The findings report surfaces per-document parse quality, security flags, triage 
 - `document.boilerplate_segment_count` counts segments with `salience_tier == "boilerplate"` (not `boilerplate_candidate_count`).
 - `language_distribution` is a list of `{language, fraction}` objects (not a flat dict).
 - There is no `generated_at` field — the report is deterministic and wall-clock timestamps are omitted.
+- `findings[*].code == "table_structure_retained"` is **synthesised by the report generator** from the parser's `quality.table_structure_retained` field — it is not a Finding emitted by the pipeline stages. It fires only when `quality.table_structure_retained` is `"full"` or `"partial"` (set by HTML/spreadsheet parsers). The message states the actual quality value: `"Table structure retained (full)"` or `"Table structure retained (partial)"`.
 
 ### Markdown sections
 

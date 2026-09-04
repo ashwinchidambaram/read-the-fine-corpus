@@ -75,8 +75,6 @@ fixtures:
     location: pages 1-2
   - code: mixed_pdf
     severity: info
-  - code: table_structure_retained
-    severity: info
   flags:
   - boilerplate_legal_preamble
   - cross_reference_see_section_4_2
@@ -250,11 +248,13 @@ fixtures:
   - code: boilerplate_detected
     severity: info
     location: navigation chrome
+  - code: table_structure_retained
+    severity: info
   flags:
   - boilerplate_nav_chrome
   - internal_wiki_links
   - code_blocks_bash_python_yaml
-  sha256: 5077f036888ee401d5ab15540106d440622a298e0c24baa7b77ecf572a5ec0ff
+  sha256: 41b73dff7c855896dbdd6b4cbf4e6c6de70d8686fc51a323c1e6ce7d5caf09a8
 - file: corpus/policy_v1.pdf
   role: '§18.1 — near-duplicate family: policy version 1 (oldest, superseded)'
   generator: generators/gen_near_duplicates.py

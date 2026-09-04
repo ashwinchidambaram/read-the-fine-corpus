@@ -205,3 +205,107 @@ without a connection proxy (e.g., a PgBouncer equivalent) is not supported. Each
 process should construct its own `QdrantAdapter` singleton.
 
 This note was added from the PR #13 review (concurrency review finding F-03).
+
+---
+
+## Phase 2 failure modes
+
+### `missing_dependency` (finding code on scanned PDFs)
+
+**Symptom:** A scanned PDF document's `ParseResult` has `parse_status: failed` and a
+finding with `code: missing_dependency`. The document is recorded as failed in the
+Assess artifact; it will appear in the exclusion report with reason `parse_failed`.
+
+**Meaning:** The `tesseract` binary was not found on `PATH` at the time the Assess
+stage ran. The scanned-PDF parser checks for `tesseract` using `shutil.which` before
+performing any OCR work. If the binary is absent the parser returns an honest failed
+result rather than crashing; no pages are processed.
+
+**Operator action:**
+
+1. Install the `tesseract-ocr` OS package:
+   - **Debian/Ubuntu:** `sudo apt-get install tesseract-ocr`
+   - **macOS (Homebrew):** `brew install tesseract`
+   - **RHEL/CentOS:** `sudo yum install tesseract`
+2. Confirm the binary is on PATH: `which tesseract` should return a path.
+3. If running in Docker, rebuild the image — `tesseract-ocr` is included in the
+   provided Dockerfile. Confirm with `docker compose build ingest-worker`.
+4. Re-run the pipeline from the Collect stage. The scanned-PDF parser will retry
+   the previously failed documents automatically (they remain in the inventory).
+5. Confirm by checking that the Assess artifact no longer contains `missing_dependency`
+   findings for scanned-PDF documents.
+
+Note: tests that depend on tesseract are skipped with `pytest.skip()` when the binary
+is absent. This is the expected CI behaviour in environments without tesseract.
+
+---
+
+### `spreadsheet_open_failed` (finding code on spreadsheet documents)
+
+**Symptom:** A spreadsheet document's `ParseResult` has `parse_status: failed` and a
+finding with `code: spreadsheet_open_failed`. The document appears in the exclusion
+report.
+
+**Meaning:** The spreadsheet parser could not open the file with `openpyxl`. This
+typically indicates the file is corrupt, is not a valid `.xlsx` file (e.g., a `.csv`
+renamed to `.xlsx`), or uses a format not supported by `openpyxl` (e.g., legacy `.xls`
+binary format).
+
+**Operator action:**
+
+1. Try opening the file in Excel or LibreOffice to confirm it is valid.
+2. If the file is a legacy `.xls` format, convert it to `.xlsx` using
+   `libreoffice --headless --convert-to xlsx <file>` before ingesting.
+3. If the file is a `.csv`, add it as a plaintext document instead — CSV files are
+   handled by the plaintext parser, not the spreadsheet parser.
+4. If the file is corrupt, obtain a fresh copy from the source system.
+
+---
+
+### `html_read_failed` / `html_parse_failed` (finding codes on HTML documents)
+
+**Symptom:** An HTML document's `ParseResult` has `parse_status: failed` with finding
+code `html_read_failed` (file could not be opened) or `html_parse_failed` (file opened
+but `html.parser` raised an error).
+
+**Meaning:** `html_read_failed` indicates the file could not be read (wrong encoding,
+permission issue, or the file was removed after the Collect stage). `html_parse_failed`
+indicates a severe structural defect in the HTML that caused the stdlib `html.parser`
+to fail; this is rare since `html.parser` is permissive.
+
+**Operator action:**
+
+1. For `html_read_failed`: confirm the file exists at the path recorded in the
+   Collect artifact and is readable. Check file encoding — the parser uses
+   UTF-8 with `errors="replace"` so pure encoding issues should not normally
+   cause this error.
+2. For `html_parse_failed`: inspect the file for embedded null bytes or binary
+   data masquerading as HTML. Run `file <path>` to confirm the MIME type.
+3. Re-run the pipeline after fixing the file. If the file cannot be fixed,
+   exclude it from the source directory.
+
+---
+
+### Missing decompose artifact in report
+
+**Symptom:** Running `corpus report` produces an exclusion report that opens with the
+warning: *"WARNING: The decompose artifact is missing for this run."* Segment-level
+exclusions are absent from the report.
+
+**Meaning:** The `generate_report()` function found the Assess artifact but not the
+Decompose artifact for the requested run ID. This happens when the pipeline was
+interrupted after the Assess stage completed but before the Decompose stage wrote its
+artifact, or when the Decompose artifact was deleted.
+
+**Operator action:**
+
+1. Check whether the Decompose artifact file exists:
+   `ls <artifacts-dir>/<run-id>/decompose.json`.
+2. If the file is missing, re-run the pipeline starting from the Decompose stage.
+   The pipeline is resumable — pass the same `--run-id` to pick up from the
+   last completed stage.
+3. Once the Decompose artifact exists, re-run `corpus report` to produce the
+   complete exclusion report.
+4. If resuming is not possible (e.g., source files were deleted after Collect),
+   the partial exclusion report is still valid for Assess-level exclusions.
+   Document the gap in your audit trail.

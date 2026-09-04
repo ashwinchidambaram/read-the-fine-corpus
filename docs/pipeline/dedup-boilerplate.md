@@ -146,12 +146,31 @@ than being silently omitted.
    lines — line-level blocks are needed to detect them reliably.
 3. Normalise each block: lower-case + whitespace-collapse (`re.sub(r"\s+", " ", ...)` ).
 4. Discard blocks shorter than **20 characters** (not enough signal).
-5. Count the number of distinct documents each block appears in (one count per document, even if
-   the block appears multiple times within one document).
-6. Apply the threshold:
-   - Normal corpus (≥ 10 documents): block is boilerplate if `count / n_docs > 0.30`.
-   - Small corpus (< 10 documents): block is boilerplate if `count / n_docs > 0.50`.
+5. Count block occurrences at two levels:
+   - **Unique-document count**: how many distinct documents contain the block (at most 1 per document).
+   - **Total-occurrence count**: how many times the block appears in total, counting within-document
+     repetitions (e.g. nav chrome repeated across multiple pages in a single HTML export).
+6. Apply the **two-branch rule (D-32)**:
+
+   **Branch (a) — dominant-prevalence:** the ratio `unique_doc_count / n_docs` must exceed the
+   applicable corpus-size threshold:
+   - Normal corpus (≥ 10 documents): `unique_doc_count / n_docs > 0.30`.
+   - Small corpus (< 10 documents): `unique_doc_count / n_docs > 0.50`.
      The raised threshold avoids false positives when there are few documents.
+
+   **Branch (b) — absolute-floor (D-32):** fires when branch (a) would not, for blocks that
+   repeat a meaningful number of times without reaching the proportional threshold:
+   - `total_occurrence_count ≥ 3` (counting within-document repetitions), **AND**
+   - `unique_doc_count / n_docs ≥ 0.05` (minimum prevalence — prevents a block appearing 3+
+     times within a single document in a large corpus from blanket-classifying).
+
+   **Rationale for D-32:** the pure-fraction rule (branch a) was validated only on 3-document
+   subsets where fraction is trivially 1.0.  At full corpus scale (e.g. 15 eligible documents),
+   a legal preamble shared by 3 documents gives fraction ≈ 0.20, which silently falls below the
+   0.30 threshold.  The absolute floor keeps the 70%-line match threshold and R6 (structural
+   retype only, never byte removal) unchanged; the 0.05 minimum prevalence prevents false
+   positives in large corpora.
+
 7. The resulting set of normalised boilerplate block strings is stored in
    `ParseResultBatch.boilerplate_blocks` (added in schema 1.1.0).
 
@@ -212,9 +231,11 @@ See `docs/configuration/reference.md §2.5` for full descriptions.
 |---|---|---|
 | `ingestion.dedup.near_duplicate_threshold` | `0.50` | Minimum Jaccard for near-dup grouping |
 | `ingestion.dedup.index_superseded_versions` | `false` | Allow/suppress superseded doc indexing |
-| `assessment.boilerplate_corpus_proportion` | `0.30` | Boilerplate block frequency threshold (normal corpus) |
-| `assessment.boilerplate_small_corpus_proportion` | `0.50` | Boilerplate threshold for small corpora |
-| `assessment.boilerplate_small_corpus_doc_count` | `10` | Corpus size below which "small" threshold applies |
+| `assessment.boilerplate_corpus_proportion` | `0.30` | Branch (a): boilerplate fraction threshold (normal corpus) |
+| `assessment.boilerplate_small_corpus_proportion` | `0.50` | Branch (a): boilerplate fraction threshold for small corpora |
+| `assessment.boilerplate_small_corpus_doc_count` | `10` | Corpus size below which "small" threshold applies (branch a) |
+| `assessment.boilerplate_abs_floor_count` | `3` | Branch (b) / D-32: minimum total occurrences to trigger absolute-floor detection |
+| `assessment.boilerplate_abs_floor_fraction` | `0.05` | Branch (b) / D-32: minimum unique-document fraction for absolute-floor detection |
 
 ---
 

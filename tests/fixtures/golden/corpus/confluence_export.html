@@ -33,6 +33,9 @@
 </head>
 <body>
 
+<!-- Site banner (appears on every page — triggers boilerplate detection) -->
+<div class="site-banner"><p>Powered by Atlassian Confluence — ACME Engineering Wiki export.</p></div>
+
 <!-- ===== PAGE 1: Deployment Runbook ===== -->
 <div style="display:flex; flex-direction:column; width:100%;">
   <div style="display:flex;">
@@ -217,6 +220,7 @@ uv run alembic downgrade -1
   </div>
 
   <hr class="page-separator">
+  <div class="site-banner"><p>Powered by Atlassian Confluence — ACME Engineering Wiki export.</p></div>
 
   <!-- ===== PAGE 2: Widget Service Architecture ===== -->
   <div style="display:flex;">
@@ -346,6 +350,7 @@ targetCPUUtilizationPercentage: 70
       </div>
     </div>
   </div>
+  <div class="site-banner"><p>Powered by Atlassian Confluence — ACME Engineering Wiki export.</p></div>
 </div>
 
 </body>

@@ -39,6 +39,15 @@ NAV_CHROME = """\
 </div>
 """
 
+# Site-wide banner (verbatim text repeated 3× in the export — once before page 1,
+# once between pages, once after page 2) to trigger the D-32 absolute-floor boilerplate
+# detection branch (total occurrences ≥ 3, unique-doc fraction 1/15 ≥ 0.05).
+SITE_BANNER = (
+    '<div class="site-banner">'
+    "<p>Powered by Atlassian Confluence — ACME Engineering Wiki export.</p>"
+    "</div>"
+)
+
 HTML = f"""\
 <!DOCTYPE html>
 <html lang="en">
@@ -74,6 +83,9 @@ HTML = f"""\
 </style>
 </head>
 <body>
+
+<!-- Site banner (appears on every page — triggers boilerplate detection) -->
+{SITE_BANNER}
 
 <!-- ===== PAGE 1: Deployment Runbook ===== -->
 <div style="display:flex; flex-direction:column; width:100%;">
@@ -234,6 +246,7 @@ uv run alembic downgrade -1
   </div>
 
   <hr class="page-separator">
+  {SITE_BANNER}
 
   <!-- ===== PAGE 2: Widget Service Architecture ===== -->
   <div style="display:flex;">
@@ -338,6 +351,7 @@ targetCPUUtilizationPercentage: 70
       </div>
     </div>
   </div>
+  {SITE_BANNER}
 </div>
 
 </body>
