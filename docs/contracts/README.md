@@ -42,33 +42,53 @@ nothing ambiguous is resolved silently.
 
 ---
 
-## Phase 0 implementation notes
+## Batch envelope contracts (D-26, CLOSED 2026-09-03)
 
-The pipeline skeleton introduced in PR #6 implements five stages. Only the Collect stage
-produces an official §12 contract (`Inventory`). The three middle skeleton stages (Assess,
-Decompose, Build) exchange pipeline-internal batch envelope models that are not (yet) official
-contracts:
+The batch envelope contracts wrap per-document contracts for inter-stage handoffs. Both are
+official §12 contracts with `schema_version: "1.0.0"`, dedicated modules, and SpecRange version
+checks on every consuming stage. D-26 (CLOSED) promoted these from pipeline-internal models.
+
+### §12a — ParseResultBatch (`Assess → Decompose`)
+
+Source: `src/finecorpus/contracts/parse_result_batch.py`. Wraps a list of `ParseResult` objects.
+
+| Field | Type | Required | Semantics |
+|---|---|---|---|
+| `schema_version` | `str` (semver) | yes | Must be `"1.0.0"`. Checked by `DecomposeStage` against `SUPPORTED_PARSE_RESULT_BATCH`. |
+| `run_id` | `str` | yes | Identifies the pipeline run that produced this batch. |
+| `produced_at` | `datetime` (UTC, ISO 8601) | yes | When AssessStage produced this batch. |
+| `results` | `list[ParseResult]` | yes | One entry per inventory item. Nothing dropped: len(results) == len(inventory.items). |
+| `skeleton` | `bool \| None` | no | `True` = Phase 0 pass-through (no real parsing). `None` in real Phase 1+ runs. |
+
+Invariants:
+- `len(results)` equals the inventory item count. Every inventory item produces exactly one `ParseResult` regardless of parse outcome (`parsed`, `partial`, `failed`, `excluded_pre_parse`).
+- Version checked by `DecomposeStage` via `SUPPORTED_PARSE_RESULT_BATCH = SpecRange(major=1, min_minor=0)`.
+
+### §12b — SegmentSetBatch (`Decompose → Plan`)
+
+Source: `src/finecorpus/contracts/segment_set_batch.py`. Wraps a list of `SegmentSet` objects.
+
+| Field | Type | Required | Semantics |
+|---|---|---|---|
+| `schema_version` | `str` (semver) | yes | Must be `"1.0.0"`. Checked by `PlanStage` against `SUPPORTED_SEGMENT_SET_BATCH`. |
+| `run_id` | `str` | yes | Identifies the pipeline run that produced this batch. |
+| `produced_at` | `datetime` (UTC, ISO 8601) | yes | When DecomposeStage produced this batch. |
+| `segment_sets` | `list[SegmentSet]` | yes | One entry per ParseResult. Nothing dropped. |
+| `skeleton` | `bool \| None` | no | `True` = Phase 0 pass-through (empty segments). `None` in real Phase 1+ runs. |
+
+Invariants:
+- `len(segment_sets)` equals `len(ParseResultBatch.results)`. Every ParseResult produces exactly one SegmentSet (excluded/failed documents produce an empty SegmentSet with an ExclusionRecord).
+- Version checked by `PlanStage` via `SUPPORTED_SEGMENT_SET_BATCH = SpecRange(major=1, min_minor=0)`.
+
+### Phase status table
 
 | Stage boundary | Artifact model | Official §12 contract? |
 |---|---|---|
 | Collect → Assess | `Inventory` | Yes — `schema_version: 1.0.0`, all fields validated |
-| Assess → Decompose | `ParseResultBatch` | No — pipeline-internal envelope wrapping `ParseResult` objects |
-| Decompose → Plan | `SegmentSetBatch` | No — pipeline-internal envelope wrapping `SegmentSet` objects |
+| Assess → Decompose | `ParseResultBatch` | Yes (Phase 1, D-26) — `schema_version: 1.0.0`, version-checked by DecomposeStage |
+| Decompose → Plan | `SegmentSetBatch` | Yes (Phase 1, D-26) — `schema_version: 1.0.0`, version-checked by PlanStage |
 | Plan → Build | `IngestionConfig` | Yes — `schema_version: 1.0.0`, all fields validated |
-| Build → (Serve) | `BuildResult` | No — pipeline-internal envelope; 0 chunks in Phase 0 |
-
-The batch envelopes (`ParseResultBatch`, `SegmentSetBatch`, `BuildResult`) are defined as
-pydantic models inside their respective stage packages. They carry a `schema_version` field
-so the `ArtifactStore`'s malformed-input check passes, and a `skeleton: true` field as a
-machine-readable honesty marker.
-
-**Open Phase 1 decision (D-26):** whether collection-level batch envelopes (`ParseResultBatch`,
-`SegmentSetBatch`) should be elevated to official §12-level contracts — with their own contract
-pages, versioned `SpecRange` declarations, and MAJOR/MINOR discipline — or remain stage-internal
-implementation details is unresolved. The current stages that consume these envelopes
-(`DecomposeStage`, `PlanStage`) opt out of `check_version()` by setting
-`consumed_version_range = None`; they still receive a well-formed, `schema_version`-bearing dict
-from the `ArtifactStore`. See [D-26 in the decision ledger](../process/decision-ledger.md).
+| Build → (Serve) | `BuildResult` | No — pipeline-internal envelope; 0 chunks in Phase 0 skeleton |
 
 ---
 

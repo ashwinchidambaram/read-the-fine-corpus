@@ -106,7 +106,11 @@ class SpecRange:
 
 SUPPORTED_INVENTORY = SpecRange(major=1, min_minor=0)
 SUPPORTED_PARSE_RESULT = SpecRange(major=1, min_minor=0)
+SUPPORTED_PARSE_RESULT_BATCH = SpecRange(major=1, min_minor=0)
+"""Assess → Decompose batch envelope (D-26: promoted to official contract)."""
 SUPPORTED_SEGMENT_SET = SpecRange(major=1, min_minor=0)
+SUPPORTED_SEGMENT_SET_BATCH = SpecRange(major=1, min_minor=0)
+"""Decompose → Plan batch envelope (D-26: promoted to official contract)."""
 SUPPORTED_INGESTION_CONFIG = SpecRange(major=1, min_minor=0)
 SUPPORTED_CHUNK = SpecRange(major=1, min_minor=0)
 SUPPORTED_EVAL_SET = SpecRange(major=1, min_minor=0)
@@ -133,7 +137,9 @@ __all__ = [
     "check_version",
     "SUPPORTED_INVENTORY",
     "SUPPORTED_PARSE_RESULT",
+    "SUPPORTED_PARSE_RESULT_BATCH",
     "SUPPORTED_SEGMENT_SET",
+    "SUPPORTED_SEGMENT_SET_BATCH",
     "SUPPORTED_INGESTION_CONFIG",
     "SUPPORTED_CHUNK",
     "SUPPORTED_EVAL_SET",

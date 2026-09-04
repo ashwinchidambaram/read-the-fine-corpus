@@ -126,6 +126,16 @@ from finecorpus.contracts.parse_result import (
 )
 
 # ---------------------------------------------------------------------------
+# Batch envelope contracts (D-26: promoted from pipeline-internal)
+# ---------------------------------------------------------------------------
+from finecorpus.contracts.parse_result_batch import (
+    BATCH_SCHEMA_VERSION as PARSE_RESULT_BATCH_SCHEMA_VERSION,
+)
+from finecorpus.contracts.parse_result_batch import (
+    ParseResultBatch,
+)
+
+# ---------------------------------------------------------------------------
 # Contract 7 — Retrieval response
 # ---------------------------------------------------------------------------
 from finecorpus.contracts.retrieval_response import (
@@ -155,6 +165,12 @@ from finecorpus.contracts.segment_set import (
     ReassemblyRecord,
     Segment,
     SegmentSet,
+)
+from finecorpus.contracts.segment_set_batch import (
+    BATCH_SCHEMA_VERSION as SEGMENT_SET_BATCH_SCHEMA_VERSION,
+)
+from finecorpus.contracts.segment_set_batch import (
+    SegmentSetBatch,
 )
 from finecorpus.contracts.shared.blocks import (
     AppliedBy,
@@ -187,14 +203,23 @@ from finecorpus.contracts.versions import (
     SUPPORTED_INGESTION_CONFIG,
     SUPPORTED_INVENTORY,
     SUPPORTED_PARSE_RESULT,
+    SUPPORTED_PARSE_RESULT_BATCH,
     SUPPORTED_RETRIEVAL_RESPONSE,
     SUPPORTED_SEGMENT_SET,
+    SUPPORTED_SEGMENT_SET_BATCH,
     ContractVersionError,
     SpecRange,
     check_version,
 )
 
 __all__ = [
+    # Batch envelope contracts (D-26: promoted from pipeline-internal)
+    "ParseResultBatch",
+    "PARSE_RESULT_BATCH_SCHEMA_VERSION",
+    "SUPPORTED_PARSE_RESULT_BATCH",
+    "SegmentSetBatch",
+    "SEGMENT_SET_BATCH_SCHEMA_VERSION",
+    "SUPPORTED_SEGMENT_SET_BATCH",
     # Shared blocks
     "TenancyBlock",
     "PermissionMode",
@@ -221,7 +246,9 @@ __all__ = [
     "check_version",
     "SUPPORTED_INVENTORY",
     "SUPPORTED_PARSE_RESULT",
+    "SUPPORTED_PARSE_RESULT_BATCH",
     "SUPPORTED_SEGMENT_SET",
+    "SUPPORTED_SEGMENT_SET_BATCH",
     "SUPPORTED_INGESTION_CONFIG",
     "SUPPORTED_CHUNK",
     "SUPPORTED_EVAL_SET",
