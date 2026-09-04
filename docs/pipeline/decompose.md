@@ -74,18 +74,31 @@ is the most reliable single signal for heading classification.
 
 ---
 
-## Segment types produced (Phase 1)
+## Segment types produced
+
+### Phase 1 (SegmentationPass — all sources)
 
 | Type | When produced |
 |---|---|
 | `heading` | Line classified as a heading by the heuristic |
 | `front_matter` | Paragraph on page 1, among the first 3 paragraphs, matching a front-matter pattern (title/author/date/abstract/revision) |
-| `cross_reference` | Paragraph matching cross-reference patterns (`see section`, `refer to`, `as described in`, `ibid`, etc.) |
-| `prose` | All other non-empty paragraphs |
+| `revision_history` | Heading matching "Revision History", "Change Log", etc. |
+| `prose` | All other non-empty native-text paragraphs |
 | `unknown` | Paragraphs that cannot be classified (reserved for edge cases; rarely emitted in practice) |
+| `table` | Regions with `detected_class_hint=table` (HTML/spreadsheet tables serialised to Markdown) |
+| `scanned_region` | OCR page regions below the sub-decompose confidence floor (Phase 2 OCR path) |
 
-Segment types not produced in Phase 1 (Phase 2+): `table`, `list_`, `code`, `figure_caption`,
-`figure_region`, `form_field`, `boilerplate`, `revision_history`, `scanned_region`.
+### Phase 2 additions (TaxonomyPass, BoilerplatePass)
+
+| Type | When produced |
+|---|---|
+| `code` | Regions with `detected_class_hint=code` (HTML `<pre>`/`<code>` elements; Phase 2 TaxonomyPass) |
+| `list_` | Regions with `detected_class_hint=list` (HTML list elements; Phase 2 TaxonomyPass) |
+| `figure_region` | Regions with `detected_class_hint=figure` (chart/diagram regions; Phase 2 TaxonomyPass) |
+| `form_field` | Regions with `detected_class_hint=form_field` (Phase 2 TaxonomyPass) |
+| `boilerplate` | Segments whose normalised text matches the corpus-wide boilerplate block set (Phase 2 BoilerplatePass) |
+
+Segment types not yet produced (Phase 3+): `figure_caption`, `cross_reference` (direct type — cross-refs are recorded as `CrossReference` objects, not yet promoted to their own segment type).
 
 ---
 
@@ -184,25 +197,22 @@ Ordering rules:
 - `salience_pass` must follow segmentation — it has access to all structural context.
 - Future passes (boilerplate, language, injection scoring) append **after** salience.
 
-Current pass order (Phase 1):
+Current pass order (Phase 2):
 
 ```
-segmentation_pass  → paragraph/heading splitting, exclusion recording,
-                     cross-reference detection, segment_type_prior salience
-salience_pass      → Phase 1: no-op (pass-through); Phase 2+ extension point
-                     for class-description / LLM-scored salience signals
+segmentation_pass     → paragraph/heading splitting, exclusion recording,
+                        cross-reference surface detection, segment_type_prior salience
+salience_pass         → OCR-confidence overrides (ocr_confidence_floor, ocr_confidence_warn)
+boilerplate_pass      → corpus-wide boilerplate reclassification
+taxonomy_pass         → hint-driven full taxonomy typing (code/list/figure_region/form_field)
+language_pass         → per-segment BCP-47 language detection (§7.6)
+xref_resolve_pass     → intra-document cross-reference target resolution (§6.4)
+injection_pass        → injection-suspicion scoring and invisible-content flag propagation
+superseded_version_pass → D-25 tier override (must be last)
 ```
 
-Phase 2 example — adding a language-tagging pass:
-
-```python
-# passes/__init__.py
-PASSES = [
-    segmentation_pass,
-    salience_pass,
-    language_pass,  # ← new: sets segment.language from langdetect / fastText
-]
-```
+See `docs/pipeline/taxonomy-language-xref.md` for full documentation of the three
+Phase 2 typing passes.
 
 ### `PassResult` fields
 
