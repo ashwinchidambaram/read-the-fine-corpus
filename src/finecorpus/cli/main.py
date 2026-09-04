@@ -8,6 +8,7 @@ Commands:
   corpus init           -- first-run provider prompt (M-103, spec §4.6)
   corpus pipeline run   -- run_pipeline over a source directory
   corpus preflight      -- run_preflight over a config file
+  corpus report         -- generate findings + exclusion reports from artifacts
 
 Logic stays in the library (constraint C-5).  This module is allowed to:
   - Parse arguments.
@@ -83,6 +84,52 @@ def _cmd_pipeline_run(args: argparse.Namespace) -> int:
     print("Pipeline complete. Artifacts:")
     for stage, path in artifact_paths.items():
         print(f"  {stage:10s}: {path}")
+    return 0
+
+
+def _cmd_report(args: argparse.Namespace) -> int:
+    """Wire corpus report → finecorpus.pipeline.report.generate_report."""
+    from pathlib import Path
+
+    from finecorpus.pipeline.artifact_store import ArtifactStoreError
+    from finecorpus.pipeline.report import ReportError, ReportFormat, generate_report
+
+    try:
+        result = generate_report(
+            artifacts_root=args.artifacts,
+            run_id=args.run_id,
+        )
+    except ArtifactStoreError as exc:
+        print(f"ERROR: Artifact store — {exc}", file=sys.stderr)
+        return 4
+    except ReportError as exc:
+        print(f"ERROR: Report generation — {exc}", file=sys.stderr)
+        return 3
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+    fmt = ReportFormat(args.format)
+
+    if args.out:
+        out_dir = Path(args.out)
+        written = result.write(out_dir=out_dir, fmt=fmt, run_id=args.run_id)
+        print(f"Reports written to {out_dir}:")
+        for label, path in sorted(written.items()):
+            print(f"  {label:20s}: {path}")
+    else:
+        # Print to stdout; respect format selection
+        if fmt in (ReportFormat.md, ReportFormat.both):
+            print(result.findings_md)
+            print()
+            print(result.exclusions_md)
+        if fmt in (ReportFormat.json, ReportFormat.both):
+            import json
+
+            print(json.dumps(result.findings_json, indent=2, ensure_ascii=False))
+            print()
+            print(json.dumps(result.exclusions_json, indent=2, ensure_ascii=False))
+
     return 0
 
 
@@ -222,6 +269,39 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Path to corpus.yaml configuration file",
     )
 
+    # --- report subcommand (Phase 2: findings + exclusion reports) ---
+    report_parser = sub.add_parser(
+        "report",
+        help="Generate findings and exclusion reports from pipeline artifacts (§6.2, §7.5)",
+    )
+    report_parser.add_argument(
+        "--artifacts",
+        required=True,
+        metavar="DIR",
+        help="Root directory for pipeline artifacts (same as used with 'corpus pipeline run')",
+    )
+    report_parser.add_argument(
+        "--run-id",
+        required=True,
+        dest="run_id",
+        metavar="ID",
+        help="Pipeline run ID to report on",
+    )
+    report_parser.add_argument(
+        "--format",
+        dest="format",
+        choices=["md", "json", "both"],
+        default="both",
+        help="Output format: md (human-readable), json (machine-readable), both (default)",
+    )
+    report_parser.add_argument(
+        "--out",
+        dest="out",
+        metavar="DIR",
+        default=None,
+        help=("Directory to write report files to. If omitted, reports are printed to stdout."),
+    )
+
     return parser
 
 
@@ -240,6 +320,8 @@ def main() -> None:
             sys.exit(1)
     elif args.command == "preflight":
         sys.exit(_cmd_preflight(args))
+    elif args.command == "report":
+        sys.exit(_cmd_report(args))
     else:
         parser.print_help()
         sys.exit(1)
