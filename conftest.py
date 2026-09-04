@@ -13,3 +13,9 @@ def pytest_configure(config: pytest.Config) -> None:
         "(require Ollama at localhost:11434 or OPENAI_API_KEY). "
         "Skipped by default. Run with: pytest -m provider_integration",
     )
+    config.addinivalue_line(
+        "markers",
+        "qdrant_integration: retrieval integration tests against live Qdrant + Postgres. "
+        "Auto-skipped when services are unreachable. "
+        "Run with: pytest -m qdrant_integration",
+    )
