@@ -191,11 +191,11 @@ The Assess stage (`assess.json`) contains per-document quality findings. Look fo
 
 | Failure | Symptom | Recovery |
 |---|---|---|
-| **Embedding provider unavailable** | Build stage pauses or exits with `PROVIDER_UNAVAILABLE`. | Fix the provider (see [provider-outage runbook](provider-outage.md)), then re-run with the same `--run-id` to resume from the last checkpoint. |
+| **Embedding provider unavailable** | Build stage pauses or exits with `PROVIDER_UNAVAILABLE`. | Fix the provider (see `provider-outage runbook`), then re-run with the same `--run-id` to resume from the last checkpoint. |
 | **Qdrant unavailable** | Build stage fails at shadow collection creation or chunk write. | Restore Qdrant (see [troubleshooting](../troubleshooting/README.md#vector_db_unavailable)), then re-run. |
 | **Single document fails to parse** | Assess artifact includes the document with `excluded: true`. | Ingestion continues; the document is recorded in the exclusion report. No recovery needed unless the document must be indexed. |
 | **Whole content class fails** | Build stage exits with `StageError` referencing a class-wide failure. | Review the artifact store for the affected stage. This is treated as a configuration problem — review chunking config and re-run. |
-| **Budget cap hit** | (Phase 4) Ingestion pauses with a budget-cap alert. | See [budget-cap runbook](budget-cap-hit.md). |
+| **Budget cap hit** | (Phase 4) Ingestion pauses with a budget-cap alert. | See `budget-cap runbook`. |
 | **Artifact store write failure** | Exit code 4. Disk full or permissions issue. | Free disk space or fix permissions on `--artifacts` directory, then re-run. |
 
 ---
@@ -221,6 +221,6 @@ A promoted KB shows `"ready": true`. Queries can be served once `ready` is true.
 
 - [Pipeline README](../pipeline/README.md) — stage contract and orchestrator details.
 - [Preflight checks](../configuration/reference.md) — full check description.
-- [Provider-outage runbook](provider-outage.md) — embedding provider down mid-run.
+- `Provider-outage runbook` — embedding provider down mid-run.
 - [Reindex runbook](reindex.md) — re-run ingestion after source changes.
 - [Troubleshooting](../troubleshooting/README.md) — error codes with operator actions.

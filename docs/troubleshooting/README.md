@@ -70,7 +70,7 @@ model is explicitly prohibited).
    provider recovers, resume ingestion — the job is resumable from the last
    checkpoint without data loss or duplication.
 
-See also: [provider-outage runbook](../runbooks/provider-outage.md).
+See also: `provider-outage runbook`.
 
 ---
 
@@ -121,7 +121,7 @@ closed.
 4. If the database was restored from backup, verify the tombstone log is intact
    before resuming ingestion — a database backup that predates deletion events
    can produce a tombstone-replay gap. See
-   [backup runbook](../runbooks/backup.md) for the tombstone log backup
+   `backup runbook` for the tombstone log backup
    discipline.
 
 ---
