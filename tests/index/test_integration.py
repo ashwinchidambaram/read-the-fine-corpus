@@ -290,11 +290,15 @@ class TestAtomicAliasSwap:
     unexpected target during a retarget operation — satisfying the Phase 1
     requirement that the error window is zero (§4.1, §18.3 test 1).
 
-    Scope note: this is a *structural* alias-atomicity check, not a
-    query-stream load test.  The full T-01 load test (concurrent query
-    throughput during a live alias swap under production-scale traffic)
-    ships in the phase test unit.  This proxy is intentionally lightweight
-    so it runs in the standard integration tier without a load harness.
+    Scope note: this is a *structural* alias-atomicity check at the adapter
+    layer only, not a query-stream load test.  The REAL §18.3 test 1 (N=8
+    concurrent query workers sustained across a live alias swap through the
+    full retrieval service stack) lives in:
+
+        tests/phase1/test_t01_alias_swap_under_load.py::TestAliasSwapUnderLoad
+
+    This proxy is retained as a lightweight Qdrant-adapter sanity check that
+    runs in the standard integration tier without a load harness.
     """
 
     def test_alias_never_misses_during_swap(self, qdrant_adapter) -> None:
