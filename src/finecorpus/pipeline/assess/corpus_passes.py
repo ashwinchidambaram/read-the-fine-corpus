@@ -21,7 +21,7 @@ Near-duplicate clustering (§6.1):
   Word 5-gram shingle sets are computed for each document's extracted text.
   Pairwise Jaccard similarity (|A ∩ B| / |A ∪ B|) is computed across all
   document pairs.  Two documents are near-duplicates when their Jaccard
-  similarity exceeds ``near_duplicate_threshold`` (default 0.70).
+  similarity exceeds ``near_duplicate_threshold`` (default 0.50).
 
   Connected components of the near-dup graph form "version families".
   Within each family the primary is the member with the latest
@@ -327,10 +327,12 @@ def compute_version_families(
         family_id = "fam-" + hashlib.sha256(raw.encode()).hexdigest()[:24]
 
         pr_primary = parse_results_by_id.get(primary_id, {})
-        has_modified_at = bool(
-            pr_primary.get("source_modified_at") or pr_primary.get("discovered_at")
-        )
-        primacy_basis = "source_modified_at" if has_modified_at else "content_hash"
+        if pr_primary.get("source_modified_at"):
+            primacy_basis = "source_modified_at"
+        elif pr_primary.get("discovered_at"):
+            primacy_basis = "discovered_at"
+        else:
+            primacy_basis = "content_hash"
 
         families.append(
             {

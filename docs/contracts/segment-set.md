@@ -71,12 +71,18 @@ enum SalienceSignalKind {
     ocr_confidence_floor,      # OCR below the excluded floor
     class_description,         # §6.5 LLM classification against the class description
     boilerplate_detection,     # §6.2 corpus-wide boilerplate machinery
+    superseded_version,        # D-25: segment from a superseded near-dup doc (index_superseded_versions=True)
     ocr_confidence_warn,       # OCR between floor and warning level → supporting + flag
     segment_type_prior,        # taxonomy §4.2 default tier by type
     structural_position,       # heading-hierarchy modifier
     default,                   # no signal fired → supporting
 }
 ```
+
+`superseded_version` is set by `SupersededVersionPass` (the final pass in the Decompose pipeline)
+when `ingestion.dedup.index_superseded_versions=True`.  It wins over all other signals because the
+document-level dedup ruling supersedes any per-segment classification.  Added in segment-set
+schema 1.2.0 (MINOR — backward-compatible addition; consumers declared at min_minor=1 accept it).
 
 The prior four-value enum (`class_description, boilerplate_detection, structural_position,
 override`) could not represent `explicit_user_exclusion`, `unservable_detection`,

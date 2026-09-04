@@ -41,8 +41,15 @@ Both passes require the full extracted text of every document and therefore cann
 
 `source_modified_at` is the file modification timestamp propagated from the inventory into each
 `ParseResult` dict by `AssessStage._produce()`.  If absent (e.g., the connector did not supply a
-modification time), the tie-break (`content_hash` lexicographic order) applies exclusively.  The
-primacy basis is recorded in the version-family dict as `primacy_basis`.
+modification time), `discovered_at` (the corpus-ingestion discovery timestamp) is used next.  If
+neither timestamp is available, the tie-break (`content_hash` lexicographic order) applies
+exclusively.  The primacy basis is recorded in the version-family dict as `primacy_basis`:
+
+| Value | When set |
+|---|---|
+| `"source_modified_at"` | `source_modified_at` is truthy on the primary's ParseResult |
+| `"discovered_at"` | `source_modified_at` is absent; `discovered_at` is truthy |
+| `"content_hash"` | Neither timestamp is present; content-hash ordering used as tie-break |
 
 ### Version-family schema
 
@@ -56,7 +63,14 @@ Each family is a dict with these fields:
 | `superseded_document_ids` | list[str] | All non-primary members (sorted) |
 | `similarity_method` | str | `"word_5gram_jaccard_exact"` |
 | `similarity_scores` | dict[str, float] | Jaccard score of each superseded member vs. the primary |
-| `primacy_basis` | str | `"source_modified_at"` or `"content_hash"` |
+| `primacy_basis` | str | `"source_modified_at"`, `"discovered_at"`, or `"content_hash"` |
+
+**`similarity_scores` and transitivity:** a member's `similarity_score` reflects its
+direct Jaccard similarity to the elected primary.  When a member is included in the
+family via transitivity — that is, A and B are near-duplicates, and B and C are
+near-duplicates, but A and C have no direct edge that exceeds the threshold — C's
+similarity score to the primary A is recorded as `0.0` (no direct pair with A exceeds
+the threshold; only the transitive A → B → C chain justifies membership).
 
 Version families are stored in `ParseResultBatch.version_families` (added in schema 1.1.0).
 
@@ -102,8 +116,11 @@ running any pass:
     contributes no content to the index.
 
 - `dedup_role == "superseded"` **and** `index_superseded_versions == True`:
-  → Decompose proceeds normally (all passes run on the superseded document).  This path is
-  intended for operators who need older versions to be explicitly retrievable.
+  → Decompose proceeds normally (all passes run on the superseded document), followed by the
+  `SupersededVersionPass` (the final pass in the pipeline).  This pass forces every segment
+  to `salience_tier=excluded` with a `superseded_version` winning signal, overriding all
+  other tier assignments (type-prior, boilerplate, etc.).  This path is intended for operators
+  who need older versions to be explicitly retrievable via an `excluded`-tier filter.
 
 - `dedup_role == "primary"` or `"unique"`:
   → Normal decomposition.

@@ -323,13 +323,33 @@ class TestD25Enforcement:
 
         for ss in seg_batch["segment_sets"]:
             if ss["document_id"] in superseded_ids:
-                # With toggle on, superseded docs are decomposed normally —
-                # the pass pipeline runs on them.  They should have segments.
-                # (Tier assignment is the default type-prior tier, same as primary —
-                # Phase 2 doesn't add an "excluded tier" override for the toggle path;
-                # that is noted as a stub per the brief: the payload-update job that
-                # would reclassify to excluded tier is a Phase 5 concern.)
-                # We assert the doc was not left with just a superseded_version exclusion.
+                # With toggle on, the SupersededVersionPass forces salience_tier=excluded
+                # on every segment (D-25, owner ruling 2026-09-03).
+                # The document must have segments (not be empty).
+                assert len(ss["segments"]) > 0, (
+                    f"With toggle on, doc {ss['document_id'][:12]} must have segments"
+                )
+                # Every segment must have salience_tier=excluded.
+                for seg in ss["segments"]:
+                    assert seg["salience_tier"] == "excluded", (
+                        f"Segment {seg.get('segment_id', '?')[:12]} from superseded doc "
+                        f"{ss['document_id'][:12]} must have salience_tier='excluded', "
+                        f"got '{seg['salience_tier']}'"
+                    )
+                    # salience_basis must be superseded_version.
+                    assert seg["salience_basis"] == "superseded_version", (
+                        f"salience_basis must be 'superseded_version', "
+                        f"got '{seg['salience_basis']}'"
+                    )
+                    # Exactly one winning signal, and it must be superseded_version.
+                    winning = [s for s in seg.get("salience_signals", []) if s.get("won")]
+                    assert len(winning) == 1, (
+                        f"Exactly one winning signal expected, got {len(winning)}"
+                    )
+                    assert winning[0]["kind"] == "superseded_version", (
+                        f"Winning signal must be 'superseded_version', got '{winning[0]['kind']}'"
+                    )
+                # No superseded_version exclusion record (that only appears in toggle=False path).
                 exclusion_reasons = {e["reason"] for e in ss.get("exclusions", [])}
                 assert "superseded_version" not in exclusion_reasons, (
                     f"With toggle on, doc {ss['document_id'][:12]} must not have "
@@ -559,12 +579,14 @@ class TestCorpusPassesUnit:
         text: str,
         status: str = "parsed",
         modified_at: str | None = None,
+        discovered_at: str | None = None,
     ) -> dict[str, Any]:
         return {
             "document_id": doc_id,
             "content_hash": f"hash-{doc_id}",
             "parse_status": status,
             "source_modified_at": modified_at,
+            "discovered_at": discovered_at,
             "regions": [{"text": text, "region_id": f"reg-{doc_id}"}],
         }
 
@@ -598,6 +620,50 @@ class TestCorpusPassesUnit:
         assert len(families) == 1
         assert families[0]["primary_document_id"] == "doc-new"
         assert "doc-old" in families[0]["superseded_document_ids"]
+
+    def test_primacy_basis_source_modified_at(self):
+        """primacy_basis must be 'source_modified_at' when that field is truthy."""
+        text = "common text " * 50
+        results = [
+            self._make_parse_result("doc-a", text, modified_at="2024-01-01T00:00:00+00:00"),
+            self._make_parse_result("doc-b", text, modified_at="2026-01-01T00:00:00+00:00"),
+        ]
+        families = compute_version_families(results, near_duplicate_threshold=0.50)
+        assert len(families) == 1
+        assert families[0]["primacy_basis"] == "source_modified_at"
+
+    def test_primacy_basis_discovered_at_only(self):
+        """primacy_basis must be 'discovered_at' when only discovered_at was available."""
+        text = "common text " * 50
+        # No source_modified_at on either doc; use discovered_at for ordering.
+        results = [
+            self._make_parse_result(
+                "doc-earlier", text, modified_at=None, discovered_at="2024-06-01T00:00:00+00:00"
+            ),
+            self._make_parse_result(
+                "doc-later", text, modified_at=None, discovered_at="2026-06-01T00:00:00+00:00"
+            ),
+        ]
+        families = compute_version_families(results, near_duplicate_threshold=0.50)
+        assert len(families) == 1
+        # doc-later has the later discovered_at → it is the primary.
+        assert families[0]["primary_document_id"] == "doc-later"
+        assert families[0]["primacy_basis"] == "discovered_at", (
+            f"Expected 'discovered_at', got '{families[0]['primacy_basis']}'"
+        )
+
+    def test_primacy_basis_content_hash_fallback(self):
+        """primacy_basis must be 'content_hash' when neither timestamp is present."""
+        text = "common text " * 50
+        results = [
+            self._make_parse_result("doc-a", text, modified_at=None, discovered_at=None),
+            self._make_parse_result("doc-b", text, modified_at=None, discovered_at=None),
+        ]
+        families = compute_version_families(results, near_duplicate_threshold=0.50)
+        assert len(families) == 1
+        assert families[0]["primacy_basis"] == "content_hash", (
+            f"Expected 'content_hash', got '{families[0]['primacy_basis']}'"
+        )
 
     def test_compute_boilerplate_blocks_empty_corpus(self):
         """Empty corpus returns empty set."""

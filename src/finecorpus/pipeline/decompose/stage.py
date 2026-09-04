@@ -41,8 +41,9 @@ Phase 2 addition — D-25 enforcement and boilerplate pass:
     ``superseded_version``.  The reason_detail names the primary document_id so the
     exclusion report is informative (D-25, owner ruling 2026-09-03).
   - When ``index_superseded_versions=True``, superseded documents are decomposed
-    normally and their segments are indexed at tier ``excluded`` (the BoilerplatePass
-    or SaliencePass handles this in the configured pipeline).
+    normally and their segments are forced to tier ``excluded`` by the final pass
+    in the pipeline (``SupersededVersionPass``, which wins over all other tier
+    assignments and records a ``superseded_version`` winning signal).
   - The ``boilerplate_blocks`` set from ParseResultBatch is threaded into the pass
     context so BoilerplatePass can retype corpus-wide repeated segments.
 
@@ -81,13 +82,6 @@ from finecorpus.contracts.versions import SUPPORTED_PARSE_RESULT_BATCH
 from finecorpus.pipeline.decompose.passes import PASSES
 from finecorpus.pipeline.decompose.passes.base import DocumentContext
 from finecorpus.pipeline.stage import Stage
-
-# ---------------------------------------------------------------------------
-# D-25 config key (mirroring docs/configuration/reference.md §2.5)
-# ---------------------------------------------------------------------------
-
-_INDEX_SUPERSEDED_ENV_KEY = "FINECORPUS_INGESTION__DEDUP__INDEX_SUPERSEDED_VERSIONS"
-"""Env-var override for ingestion.dedup.index_superseded_versions (§2.5)."""
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -193,7 +187,7 @@ def _make_superseded_segment_set(
     )
 
     return SegmentSet(
-        schema_version="1.1.0",
+        schema_version="1.2.0",
         tenancy=tenancy,
         document_id=document_id,
         content_hash=content_hash,
@@ -299,7 +293,7 @@ def _make_empty_segment_set(
         )
 
     return SegmentSet(
-        schema_version="1.1.0",
+        schema_version="1.2.0",
         tenancy=tenancy,
         document_id=document_id,
         content_hash=content_hash,
@@ -379,7 +373,7 @@ def _run_passes(
     )
 
     return SegmentSet(
-        schema_version="1.1.0",
+        schema_version="1.2.0",
         tenancy=tenancy,
         document_id=document_id,
         content_hash=content_hash,

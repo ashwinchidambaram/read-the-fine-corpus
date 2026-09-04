@@ -114,7 +114,13 @@ boilerplate_blocks fields.  SpecRange stays at min_minor=0 so that any
 consumer built for 1.0.0+ still accepts 1.1.0 (MINOR is backward-compatible).
 """
 SUPPORTED_SEGMENT_SET = SpecRange(major=1, min_minor=1)
-"""Segment set consumer range — bumped to 1.1 with addition of ExclusionReason.too_short."""
+"""Segment set consumer range.
+
+History:
+- 1.1: added ExclusionReason.too_short.
+- 1.2: added SalienceSignalKind.superseded_version (D-25 toggle-on override pass).
+  SpecRange stays at min_minor=1 (MINOR: backward-compatible addition).
+"""
 SUPPORTED_SEGMENT_SET_BATCH = SpecRange(major=1, min_minor=0)
 """Decompose → Plan batch envelope (D-26: promoted to official contract)."""
 SUPPORTED_INGESTION_CONFIG = SpecRange(major=1, min_minor=1)

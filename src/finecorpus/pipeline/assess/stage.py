@@ -29,7 +29,7 @@ Phase 1 scope — native-text PDF prose:
 Phase 2 addition — corpus-level passes:
   - Near-duplicate clustering: word 5-gram Jaccard similarity across all parsed
     documents; version families formed at ``ingestion.dedup.near_duplicate_threshold``
-    (default 0.70).  Results stored in ParseResultBatch.version_families.
+    (default 0.50).  Results stored in ParseResultBatch.version_families.
   - Boilerplate detection: normalised paragraph blocks appearing in more than the
     configured proportion of corpus documents are classified as boilerplate.
     Results stored in ParseResultBatch.boilerplate_blocks for BoilerplatePass.
