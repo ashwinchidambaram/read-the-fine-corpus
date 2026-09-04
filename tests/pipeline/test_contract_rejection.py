@@ -131,15 +131,16 @@ class TestBuildStageContractVersionRejection:
         )
 
     def test_build_accepts_supported_ingestion_config_version(self, tmp_path):
-        """BuildStage accepts schema_version 1.0.0 without raising."""
+        """BuildStage accepts schema_version 1.1.0 without raising."""
         store = _make_store(tmp_path, run_id="test-build-accept")
 
-        good_config = _make_bad_ingestion_config(schema_version="1.0.0")
+        good_config = _make_bad_ingestion_config(schema_version="1.1.0")
         store.save("plan", good_config)
         loaded_config = store.load("plan")
 
         stage = BuildStage()
         result = stage.run(input_data=loaded_config, store=store)
+        # BuildResult schema_version, not ingestion_config
         assert result["schema_version"] == "1.0.0"
         assert result["chunk_count"] == 0
 

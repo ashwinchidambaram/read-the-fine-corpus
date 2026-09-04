@@ -28,8 +28,8 @@ shadow *eligible*.
 
 | Parameter | Default | Spec ref | Description |
 |---|---|---|---|
-| `max_tokens` | 512 | §9.3 naive baseline | Target chunk size. One "token" = one whitespace-delimited word (see Token counting below). |
-| `overlap_tokens` | 50 | §9.3 naive baseline (range 50–100) | Number of tokens shared between consecutive chunks. 50 is the lower bound of the §9.3 range. |
+| `max_tokens` | 512 | §9.3 naive baseline | Target chunk size in tokens (whitespace-word proxy). One "token" = one whitespace-delimited word (see Token counting below). |
+| `overlap_tokens` | 50 | §9.3 naive baseline (range 50–100) | Number of tokens (whitespace-word proxy) shared between consecutive chunks. 50 is the lower bound of the §9.3 range. |
 
 These defaults are the **§9.3 fixed reference configuration** — the Phase 1 naive baseline
 against which all future improvements are measured.
@@ -48,6 +48,15 @@ This is an intentional honest approximation, not a BPE tokenizer:
 This trade-off is accepted for Phase 1. Phase 3 may introduce `tiktoken` or an equivalent
 real tokenizer if the evaluation sweep shows material retrieval impact. `tiktoken` is NOT
 a project dependency and is NOT used here.
+
+> **WARNING — tokenizer changes require a full rebuild.**
+> The tokenizer used (`ChunkingConfig.tokenizer`) is encoded in the `IngestionConfig` and
+> participates in `config_version` (§10.5). Switching to a different tokenizer (e.g.
+> `tiktoken`) **requires** updating `ChunkingConfig.tokenizer` → which changes
+> `config_version` → which forces a full rebuild and invalidates every chunk at every
+> existing `point_id`. Without the `config_version` change, re-indexing would silently
+> corrupt chunk text at existing `point_id`s because point IDs are derived from
+> `config_version` and would collide with stale chunks.
 
 ### Splitting algorithm
 

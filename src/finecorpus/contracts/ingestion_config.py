@@ -265,8 +265,23 @@ class ChunkingConfig(BaseModel):
     """
 
     strategy: ChunkingStrategy = Field(description="Splitter type (§6.4 content matrix).")
-    max_tokens: int = Field(description="Target chunk size.")
-    overlap_tokens: int = Field(description="Overlap between adjacent chunks.")
+    max_tokens: int = Field(description="Target chunk size (tokens, whitespace-word proxy).")
+    overlap_tokens: int = Field(
+        description="Overlap between adjacent chunks (tokens, whitespace-word proxy)."
+    )
+    tokenizer: Literal["whitespace_word"] = Field(
+        default="whitespace_word",
+        description=(
+            "Token-counting method used by the chunker. "
+            "Currently fixed to 'whitespace_word' (len(text.split())), the Phase 1 naive "
+            "baseline (§9.3). Encoded here so that any future tokenizer change forces a "
+            "config_version change → full rebuild (§10.5). "
+            "WARNING: switching tokenizers requires changing this field, which changes "
+            "config_version, which invalidates every existing chunk at existing point_ids. "
+            "Without the config_version change, re-indexing would silently corrupt chunk "
+            "text at existing point_ids."
+        ),
+    )
     respect_headings: bool = Field(description="Structure-aware boundary respect (prose, §6.4).")
     atomic_rows: bool | None = Field(
         default=None,

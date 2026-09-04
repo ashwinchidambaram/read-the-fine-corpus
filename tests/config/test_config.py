@@ -23,6 +23,7 @@ import pytest
 from finecorpus.config import Config, load_config, run_preflight
 from finecorpus.config.models import LogLevel, ObjectStoreBackend, RetrievalStrategy
 from finecorpus.config.preflight import CheckStatus
+from finecorpus.embedding.preflight_check import make_embedding_check
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -460,7 +461,7 @@ class TestSkippedStubs:
 
     def test_embedding_provider_check_is_skipped(self, tmp_path: Path) -> None:
         cfg = self._basic_config(tmp_path)
-        report = run_preflight(cfg)
+        report = run_preflight(cfg, extra_checks=[make_embedding_check()])
         emb = next(r for r in report.results if r.name == "embedding_provider")
         assert emb.status == CheckStatus.SKIPPED
 
@@ -473,7 +474,7 @@ class TestSkippedStubs:
     def test_skipped_checks_appear_in_report(self, tmp_path: Path) -> None:
         """SKIPPED checks must be in the report, not silently omitted."""
         cfg = self._basic_config(tmp_path)
-        report = run_preflight(cfg)
+        report = run_preflight(cfg, extra_checks=[make_embedding_check()])
         skipped_names = {r.name for r in report.results if r.status == CheckStatus.SKIPPED}
         assert "embedding_provider" in skipped_names
         assert "resource_headroom" in skipped_names

@@ -301,6 +301,35 @@ class TestOverlap:
                 f"chunk {i} ends at {c1.char_end}, chunk {i + 1} starts at {c2.char_start}"
             )
 
+    def test_quantitative_overlap_within_tolerance(self):
+        """Measured overlap tokens must fall within [0.8×, 1.2×+2] of overlap_tokens (F-03).
+
+        The chunker uses a character-density estimate rather than an exact token budget,
+        so the realised overlap is an approximation. The tolerance band [0.8×, 1.2×+2]
+        accepts realistic estimation noise while catching large deviations.
+        """
+        overlap_tokens = 10
+        max_tokens = 40
+        text = " ".join(f"word{i}" for i in range(300))
+        chunks = chunk_segment(text, max_tokens=max_tokens, overlap_tokens=overlap_tokens)
+        assert len(chunks) >= 3, "Need at least 3 chunks to measure overlap for multiple pairs"
+
+        lo = 0.8 * overlap_tokens
+        hi = 1.2 * overlap_tokens + 2
+
+        for i in range(len(chunks) - 1):
+            c1 = chunks[i]
+            c2 = chunks[i + 1]
+            # The overlapping text is the portion of c1 that c2 also covers.
+            overlap_text = text[c2.char_start : c1.char_end]
+            measured = _count_tokens(overlap_text)
+            assert lo <= measured <= hi, (
+                f"Overlap between chunk {i} and {i + 1}: measured {measured} tokens, "
+                f"expected [{lo:.1f}, {hi:.1f}] for overlap_tokens={overlap_tokens}. "
+                f"Chunk {i}: [{c1.char_start}, {c1.char_end}), "
+                f"chunk {i + 1}: [{c2.char_start}, {c2.char_end})"
+            )
+
 
 # ---------------------------------------------------------------------------
 # split_text (internal)

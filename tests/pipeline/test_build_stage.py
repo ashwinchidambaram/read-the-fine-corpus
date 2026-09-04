@@ -57,6 +57,7 @@ from finecorpus.embedding.base import ProviderUnavailableError
 from finecorpus.embedding.fake import FakeProvider
 from finecorpus.pipeline.artifact_store import ArtifactStore
 from finecorpus.pipeline.build.stage import BuildResult, BuildStage, _load_checkpoint
+from finecorpus.pipeline.stage import StageError
 
 # ---------------------------------------------------------------------------
 # Fixtures and helpers
@@ -239,7 +240,7 @@ def _make_ingestion_config(
     config_version = hashlib.sha256(_json.dumps(affecting, sort_keys=True).encode()).hexdigest()
 
     return IngestionConfig(
-        schema_version="1.0.0",
+        schema_version="1.1.0",
         tenancy=_make_tenancy(workspace_id=workspace_id, kb_id=kb_id),
         config_version=config_version,
         created_at=datetime.now(tz=UTC),
@@ -640,7 +641,14 @@ class TestResumability:
         return seg_sets, config
 
     def test_kill_and_resume(self, tmp_path):
-        """Simulate a mid-run failure and verify resumability."""
+        """Run BuildStage end-to-end twice: fail-on-doc-4 first pass, fresh second pass.
+
+        Asserts:
+        - First pass raises (ProviderUnavailableError wrapped in StageError).
+        - Second pass (with checkpoint) completes all 5 docs.
+        - BuildResult.chunk_count == adapter.count_points(shadow) (F-02 and F-05).
+        - No duplicate chunk_ids in the shadow collection.
+        """
         adapter = self._make_adapter()
         kb_id = str(uuid.uuid4()).replace("-", "")[:12]
         ws_id = "ws-resume-test"
@@ -652,15 +660,13 @@ class TestResumability:
         store = ArtifactStore(artifacts_root=tmp_path, run_id=run_id)
         _write_artifacts(store, batch, config)
 
-        # --- First pass: provider fails when processing doc index 3 (4th doc) ---
-        original_provider = FakeProvider(dimensions=64)
-
+        # --- First pass: fail-on-doc-4 provider (4th unique embed_batch call fails) ---
         class FailOnFourthDocProvider:
             """Fails on the 4th unique embed_batch call (simulates crash mid-doc-4)."""
 
             def __init__(self):
                 self.calls = 0
-                self._inner = original_provider
+                self._inner = FakeProvider(dimensions=64)
                 self._caps = self._inner.capabilities
 
             @property
@@ -684,98 +690,72 @@ class TestResumability:
             def estimate_cost(self, texts):
                 return self._inner.estimate_cost(texts)
 
-        FailOnFourthDocProvider()
+        failing_provider = FailOnFourthDocProvider()
 
-        # Shadow collection from first (aborted) pass
-        from finecorpus.index.adapter import ModelIdentity
-        from finecorpus.index.lifecycle import create_shadow
-
-        model_id = ModelIdentity(
-            provider="fake",
-            model="fake-embed-v1",
-            dimensions=64,
-            config_version=config.config_version,
+        first_stage = BuildStage(
+            run_started_at=datetime.now(tz=UTC),
+            embedding_provider=failing_provider,
+            index_adapter=adapter,
+            build_id=1,
+            artifacts_root=tmp_path,
+            run_id=run_id,
+            workspace_id=ws_id,
+            kb_id=kb_id,
         )
-        shadow_ctx = create_shadow(adapter, kb_id, ws_id, build_id=1, model_identity=model_id)
-        shadow = shadow_ctx.shadow_collection
 
-        # Manually simulate a partial run: process docs 0-2 (3 docs), write checkpoint
-        run_dir = tmp_path / run_id
-        completed = set()
-        from finecorpus.pipeline.build.stage import _process_segment_set, _save_checkpoint
+        # First pass must raise because of the simulated provider failure
+        with pytest.raises(StageError):
+            first_stage.run(input_data=config.model_dump(mode="json"), store=store)
 
-        for i in range(3):  # docs 0, 1, 2 succeed
-            seg_set_dict = seg_sets[i].model_dump(mode="json")
-            _process_segment_set(
-                segment_set_dict=seg_set_dict,
-                ingestion_config=config,
-                provider=original_provider,
-                shadow_collection=shadow,
-                adapter=adapter,
-                doc_build_id=1,
-            )
-            completed.add(f"doc-resume-{i:02d}")
-            _save_checkpoint(run_dir, completed)
-
-        count_after_partial = adapter.count_points(shadow)
-        assert count_after_partial > 0, "Partial run should have written some chunks"
-
-        # --- Second pass: provider works fine now ---
-        # BuildStage with SAME run_id picks up the checkpoint
-        # We need to re-create the stage but write to the SAME shadow collection.
-        # Since shadow creation is idempotent only for existing = error, we need a
-        # different approach: use build_id=1 so collection_name is the same.
-        # But create_shadow raises if the collection already exists.
-        # Instead, directly call _process_segment_set for remaining docs.
-
+        # --- Second pass: fresh provider, same run_id → checkpoint is picked up ---
         fresh_provider = FakeProvider(dimensions=64)
-        for i in range(3, 5):  # docs 3 and 4
+
+        # build_id=1 same as first pass so the shadow collection name matches
+        second_stage = BuildStage(
+            run_started_at=datetime.now(tz=UTC),
+            embedding_provider=fresh_provider,
+            index_adapter=adapter,
+            build_id=1,
+            artifacts_root=tmp_path,
+            run_id=run_id,
+            workspace_id=ws_id,
+            kb_id=kb_id,
+        )
+
+        result_dict = second_stage.run(input_data=config.model_dump(mode="json"), store=store)
+        result = BuildResult.model_validate(result_dict)
+
+        # F-02: BuildResult.chunk_count must reflect the whole shadow collection
+        shadow = result.shadow_collection
+        assert shadow, "No shadow collection in BuildResult"
+
+        actual_shadow_count = adapter.count_points(shadow)
+        assert result.chunk_count == actual_shadow_count, (
+            f"BuildResult.chunk_count ({result.chunk_count}) != "
+            f"adapter.count_points(shadow) ({actual_shadow_count}). "
+            f"F-02: resumed runs must fold prior chunk counts into total."
+        )
+
+        # All 5 docs must appear in chunks_by_document
+        for i in range(5):
             doc_id = f"doc-resume-{i:02d}"
-            if doc_id in completed:
-                continue
-            seg_set_dict = seg_sets[i].model_dump(mode="json")
-            _process_segment_set(
-                segment_set_dict=seg_set_dict,
-                ingestion_config=config,
-                provider=fresh_provider,
-                shadow_collection=shadow,
-                adapter=adapter,
-                doc_build_id=1,
+            assert doc_id in result.chunks_by_document, (
+                f"{doc_id} missing from BuildResult.chunks_by_document after resume"
             )
-            completed.add(doc_id)
-            _save_checkpoint(run_dir, completed)
 
-        assert completed == {f"doc-resume-{i:02d}" for i in range(5)}, (
-            f"Not all docs completed after resume. completed={completed}"
+        assert result.chunk_count == sum(result.chunks_by_document.values()), (
+            "chunk_count must equal sum of chunks_by_document values"
         )
 
-        # Verify no duplicate points: Qdrant upsert is idempotent by point_id.
-        # Re-running doc 0-2 (deterministic IDs) and then searching should yield
-        # the same count as if we ran it fresh.
-        # Actually, let's verify by counting distinct chunk_ids from the payload.
-        count_final = adapter.count_points(shadow)
-        assert count_final > count_after_partial, (
-            f"After resume, count ({count_final}) should exceed "
-            f"partial count ({count_after_partial})"
-        )
-
-        # Retrieve all points and verify no duplicate chunk_ids
+        # Verify no duplicate chunk_ids in the shadow collection
         from finecorpus.embedding.fake import _sha256_to_vector
 
         probe = _sha256_to_vector("resume-probe", 64)
-        results = adapter.search(shadow, probe, top_k=count_final + 100)
-        chunk_ids = [r.chunk_id for r in results]
+        points = adapter.search(shadow, probe, top_k=actual_shadow_count + 100)
+        chunk_ids = [r.chunk_id for r in points]
         assert len(chunk_ids) == len(set(chunk_ids)), (
-            f"Duplicate chunk_ids found after resume: "
-            f"{len(chunk_ids) - len(set(chunk_ids))} duplicates"
+            f"Duplicate chunk_ids after resume: {len(chunk_ids) - len(set(chunk_ids))} duplicates"
         )
-
-        # Verify all 5 docs have at least one chunk in the search results
-        doc_ids_in_results = {r.payload["provenance"]["source_document_id"] for r in results}
-        for i in range(5):
-            assert f"doc-resume-{i:02d}" in doc_ids_in_results, (
-                f"doc-resume-{i:02d} missing from final search results"
-            )
 
         # Cleanup
         try:
@@ -793,23 +773,40 @@ class TestResumability:
 
 class TestCheckpoint:
     def test_load_empty_if_missing(self, tmp_path):
-        """_load_checkpoint returns empty set if file does not exist."""
-        completed = _load_checkpoint(tmp_path)
+        """_load_checkpoint returns empty set and empty dict if file does not exist."""
+        completed, counts = _load_checkpoint(tmp_path)
         assert completed == set()
+        assert counts == {}
 
     def test_save_and_load_round_trip(self, tmp_path):
         from finecorpus.pipeline.build.stage import _save_checkpoint
 
         docs = {"doc-a", "doc-b", "doc-c"}
-        _save_checkpoint(tmp_path, docs)
-        loaded = _load_checkpoint(tmp_path)
-        assert loaded == docs
+        counts = {"doc-a": 5, "doc-b": 3, "doc-c": 12}
+        _save_checkpoint(tmp_path, docs, counts)
+        loaded_docs, loaded_counts = _load_checkpoint(tmp_path)
+        assert loaded_docs == docs
+        assert loaded_counts == counts
 
     def test_save_is_idempotent(self, tmp_path):
         from finecorpus.pipeline.build.stage import _save_checkpoint
 
         docs = {"doc-x"}
-        _save_checkpoint(tmp_path, docs)
-        _save_checkpoint(tmp_path, docs)
-        loaded = _load_checkpoint(tmp_path)
-        assert loaded == docs
+        counts = {"doc-x": 7}
+        _save_checkpoint(tmp_path, docs, counts)
+        _save_checkpoint(tmp_path, docs, counts)
+        loaded_docs, loaded_counts = _load_checkpoint(tmp_path)
+        assert loaded_docs == docs
+        assert loaded_counts == counts
+
+    def test_prior_counts_folded_on_load(self, tmp_path):
+        """Chunk counts from prior checkpoint are preserved and recoverable."""
+        from finecorpus.pipeline.build.stage import _save_checkpoint
+
+        docs = {"doc-1", "doc-2"}
+        counts = {"doc-1": 10, "doc-2": 0}  # doc-2 had no chunks (excluded)
+        _save_checkpoint(tmp_path, docs, counts)
+        loaded_docs, loaded_counts = _load_checkpoint(tmp_path)
+        assert loaded_docs == docs
+        assert loaded_counts["doc-1"] == 10
+        assert loaded_counts["doc-2"] == 0

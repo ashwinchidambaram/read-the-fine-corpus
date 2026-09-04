@@ -58,9 +58,15 @@ def _cmd_pipeline_run(args: argparse.Namespace) -> int:
 
 
 def _cmd_preflight(args: argparse.Namespace) -> int:
-    """Wire corpus preflight → finecorpus.config.preflight.run_preflight."""
+    """Wire corpus preflight → finecorpus.config.preflight.run_preflight.
+
+    The embedding_provider check is injected from finecorpus.embedding (F-04):
+    finecorpus.config must not import finecorpus.embedding — both sit at the
+    same import-linter layer tier (C-5 layers contract in pyproject.toml).
+    """
     from finecorpus.config.loader import load_config
     from finecorpus.config.preflight import run_preflight
+    from finecorpus.embedding.preflight_check import make_embedding_check
 
     try:
         config = load_config(args.config)
@@ -68,7 +74,7 @@ def _cmd_preflight(args: argparse.Namespace) -> int:
         print(f"ERROR: Could not load config — {exc}", file=sys.stderr)
         return 1
 
-    report = run_preflight(config)
+    report = run_preflight(config, extra_checks=[make_embedding_check()])
     print(str(report))
 
     return 1 if report.has_failures else 0

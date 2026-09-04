@@ -16,9 +16,13 @@ Real implementations
                            available, or a raw socket check otherwise.
 - **qdrant**              — HTTP HEAD / GET on ``storage.qdrant.url/healthz``.
 - **object_store**        — TCP socket check against the object-store endpoint.
-- **embedding_provider**  — real health_check() against configured providers
-                           (wired in Phase 1; SKIPPED when no provider is
-                           configured).
+- **embedding_provider**  — injected from a higher layer via ``run_preflight``'s
+                           ``extra_checks`` parameter.  ``finecorpus.config``
+                           must not import ``finecorpus.embedding`` (F-04: both
+                           sit at the same import-linter layer tier; the check
+                           logic lives in ``finecorpus.embedding.preflight_check``
+                           and is injected by ``finecorpus.cli`` or
+                           ``finecorpus.services``).
 
 SKIPPED stubs
 -------------
@@ -39,6 +43,7 @@ import urllib.parse
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -337,176 +342,16 @@ def _check_object_store(config: Config) -> CheckResult:
 
 
 # ---------------------------------------------------------------------------
-# Embedding provider preflight check (Phase 1 implementation)
+# Embedding provider preflight check — INJECTED FROM HIGHER LAYER (F-04)
 # ---------------------------------------------------------------------------
-
-
-def _check_embedding_provider(config: Config) -> CheckResult:
-    """Embedding provider availability check (§4.6, reference.md §3 check 6).
-
-    Runs ``health_check()`` against each configured embedding provider:
-    - Sends a fixed probe string and confirms the endpoint is reachable.
-    - Confirms the declared model ID is available.
-    - Confirms probe embedding dimensions match the declared ``*.dimensions``.
-    - Reports latency.
-    - In airgap mode (``platform.airgap=True``): skips cloud providers and
-      confirms all providers have ``is_local=True``.
-    - Checks pricing staleness (OQ-P-5).
-
-    SKIPPED (not FAIL) when no provider is configured in the default slot.
-    """
-    import datetime
-    import os
-
-    emb = config.providers.embedding
-    airgap = config.platform.airgap or os.environ.get("RTFC_AIRGAP", "").lower() in {
-        "1",
-        "true",
-        "yes",
-    }
-    pricing_stale_days = config.index_lifecycle.pricing_stale_warn_days
-
-    # If no default provider is configured, SKIP (not an error — first-run prompt
-    # wires this before ingestion begins).
-    if not emb.default:
-        return CheckResult(
-            name="embedding_provider",
-            status=CheckStatus.SKIPPED,
-            message=(
-                "No embedding provider is configured "
-                "(providers.embedding.default is not set). "
-                "Run the first-run prompt or set providers.embedding.default "
-                "to 'openai' or 'ollama' in corpus.yaml."
-            ),
-        )
-
-    results: list[str] = []
-    has_fail = False
-    has_warn = False
-
-    # F-004: check EVERY fully-configured provider, not just the default.
-    # "Fully configured" means the provider section has a non-default / non-empty
-    # model set OR it is the selected default.  We include a provider in the
-    # check list when:
-    #   - it is selected as default, OR
-    #   - its section has a non-empty provider_id (it was explicitly configured).
-    # Each provider gets its own named check line in the report.
-    providers_to_check: list[tuple[str, str]] = []  # (label, which)
-    if (
-        emb.default in {"openai", "cloud"}
-        or (emb.cloud.provider_id and emb.cloud.provider_id != "openai")
-        or emb.default in {"openai", "cloud"}
-    ):
-        # Cloud is the default OR explicitly configured
-        if emb.default in {"openai", "cloud"}:
-            providers_to_check.append(("cloud (openai) [default]", "cloud"))
-        elif emb.cloud.provider_id:
-            providers_to_check.append(("cloud (openai)", "cloud"))
-    if emb.default in {"ollama", "local"} or emb.local.provider_id:
-        if emb.default in {"ollama", "local"}:
-            providers_to_check.append(("local (ollama) [default]", "local"))
-        else:
-            providers_to_check.append(("local (ollama)", "local"))
-
-    # De-duplicate while preserving order (edge case: default matches provider_id)
-    seen: set[str] = set()
-    unique_providers: list[tuple[str, str]] = []
-    for label, which in providers_to_check:
-        if which not in seen:
-            seen.add(which)
-            unique_providers.append((label, which))
-    providers_to_check = unique_providers
-
-    for label, which in providers_to_check:
-        try:
-            import finecorpus.embedding.registry as _registry
-
-            provider = _registry.build_provider_from_config(config, which=which)
-        except Exception as exc:
-            results.append(f"FAIL  {label}: Could not construct provider — {exc}.")
-            has_fail = True
-            continue
-
-        caps = provider.capabilities
-
-        # Air-gap enforcement: cloud providers are blocked
-        if airgap and not caps.is_local:
-            results.append(
-                f"FAIL  {label}: Air-gap mode is enabled (RTFC_AIRGAP) but "
-                f"'{caps.provider_id}' is a cloud provider (is_local=False). "
-                f"Use a local provider in air-gapped deployments."
-            )
-            has_fail = True
-            continue
-
-        # Run health_check()
-        try:
-            hc = provider.health_check()
-        except Exception as exc:
-            results.append(f"FAIL  {label}: health_check() raised {type(exc).__name__}: {exc}.")
-            has_fail = True
-            continue
-
-        if not hc.reachable:
-            results.append(
-                f"FAIL  {label} ({caps.provider_id}/{caps.model_id}): "
-                f"endpoint not reachable. "
-                f"Error: {hc.error or 'none'}. "
-                f"Check that the provider service is running and that the "
-                f"endpoint/API key is configured correctly."
-            )
-            has_fail = True
-            continue
-
-        if not hc.model_available:
-            results.append(
-                f"FAIL  {label} ({caps.provider_id}/{caps.model_id}): "
-                f"model not available at provider. "
-                f"Error: {hc.error or 'none'}."
-            )
-            has_fail = True
-            continue
-
-        if not hc.declared_dimensions_confirmed:
-            results.append(
-                f"FAIL  {label} ({caps.provider_id}/{caps.model_id}): "
-                f"declared dimensions ({caps.vector_dimensions}) do not match "
-                f"probe response. "
-                f"Error: {hc.error or 'none'}. "
-                f"This is a fatal configuration error — the index would be corrupt."
-            )
-            has_fail = True
-            continue
-
-        # Pricing staleness check (cloud only, OQ-P-5)
-        if not caps.is_local and caps.pricing_as_of:
-            try:
-                as_of = datetime.date.fromisoformat(caps.pricing_as_of)
-                age_days = (datetime.date.today() - as_of).days
-                if age_days > pricing_stale_days:
-                    results.append(
-                        f"WARN  {label}: pricing_as_of is {caps.pricing_as_of} "
-                        f"({age_days} days ago). "
-                        f"Run `corpus provider update-pricing {caps.provider_id}` "
-                        f"to refresh cost estimates."
-                    )
-                    has_warn = True
-            except ValueError:
-                pass  # malformed date; not a hard error
-
-        results.append(
-            f"OK    {label} ({caps.provider_id}/{caps.model_id}): "
-            f"reachable; dimensions={caps.vector_dimensions} confirmed; "
-            f"latency={hc.latency_ms:.0f}ms."
-        )
-
-    message = " | ".join(results) if results else "No providers checked."
-
-    if has_fail:
-        return CheckResult(name="embedding_provider", status=CheckStatus.FAIL, message=message)
-    if has_warn:
-        return CheckResult(name="embedding_provider", status=CheckStatus.WARN, message=message)
-    return CheckResult(name="embedding_provider", status=CheckStatus.OK, message=message)
+# finecorpus.config must NOT import finecorpus.embedding; both sit at the same
+# import-linter layer tier (C-5 layers contract in pyproject.toml).  The
+# embedding-provider check therefore lives in finecorpus.embedding and is
+# injected into run_preflight() via the extra_checks parameter.
+#
+# Callers (finecorpus.cli, finecorpus.services) pass
+# finecorpus.embedding.preflight_check.make_embedding_check() to wire it in.
+# ---------------------------------------------------------------------------
 
 
 def _check_resource_headroom(config: Config) -> CheckResult:
@@ -533,12 +378,13 @@ def _check_resource_headroom(config: Config) -> CheckResult:
 
 # Ordered list of (name, callable).  The name is informational; the
 # callable receives the Config and returns a CheckResult.
+# The embedding_provider check is intentionally absent here — it lives in
+# finecorpus.embedding and is injected via run_preflight(extra_checks=...) (F-04).
 _CHECKS: list[tuple[str, Callable[[Config], CheckResult]]] = [
     ("config_parse", _check_config_parse),
     ("postgres", _check_postgres),
     ("qdrant", _check_qdrant),
     ("object_store", _check_object_store),
-    ("embedding_provider", _check_embedding_provider),
     ("resource_headroom", _check_resource_headroom),
 ]
 
@@ -548,7 +394,10 @@ _CHECKS: list[tuple[str, Callable[[Config], CheckResult]]] = [
 # ---------------------------------------------------------------------------
 
 
-def run_preflight(config: Config) -> PreflightReport:
+def run_preflight(
+    config: Config,
+    extra_checks: list[Callable[[Config], Any]] | None = None,
+) -> PreflightReport:
     """Execute all registered preflight checks against *config*.
 
     Returns a :class:`PreflightReport` whose :attr:`~PreflightReport.passed`
@@ -557,10 +406,21 @@ def run_preflight(config: Config) -> PreflightReport:
     ``SKIPPED`` checks are always included in the report — they are never
     silently omitted.
 
+    The ``embedding_provider`` check is NOT in the built-in list — it lives in
+    ``finecorpus.embedding`` (same import-linter layer as config; F-04).  Wire
+    it in via ``extra_checks`` from a higher-layer caller::
+
+        from finecorpus.embedding.preflight_check import make_embedding_check
+        report = run_preflight(config, extra_checks=[make_embedding_check()])
+
     Parameters
     ----------
     config:
         A fully validated :class:`~finecorpus.config.models.Config` instance.
+    extra_checks:
+        Optional list of additional check callables injected by higher-layer
+        callers (e.g. ``finecorpus.cli``, ``finecorpus.services``).  Each
+        callable must accept a ``Config`` and return a ``CheckResult``.
 
     Returns
     -------
@@ -569,5 +429,8 @@ def run_preflight(config: Config) -> PreflightReport:
     report = PreflightReport()
     for _name, check_fn in _CHECKS:
         result = check_fn(config)
+        report.results.append(result)
+    for extra_fn in extra_checks or []:
+        result = extra_fn(config)
         report.results.append(result)
     return report

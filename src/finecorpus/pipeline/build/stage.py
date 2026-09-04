@@ -109,9 +109,12 @@ from finecorpus.embedding.base import (
 from finecorpus.index.adapter import (
     IndexAdapter,
     ModelIdentity,
+    alias_name,
     build_point_payload,
+    collection_name,
 )
 from finecorpus.index.lifecycle import (
+    BuildContext,
     BuildState,
     create_shadow,
     validate_shadow,
@@ -186,27 +189,45 @@ def _checkpoint_path(run_dir: pathlib.Path) -> pathlib.Path:
     return run_dir / "build_checkpoint.json"
 
 
-def _load_checkpoint(run_dir: pathlib.Path) -> set[str]:
-    """Load the set of completed document_ids from the checkpoint file.
+def _load_checkpoint(run_dir: pathlib.Path) -> tuple[set[str], dict[str, int]]:
+    """Load completed document_ids and per-document chunk counts from the checkpoint file.
 
-    Returns an empty set if the checkpoint does not exist.
+    Returns:
+        (completed_doc_ids, chunk_counts_by_doc) — both empty if the checkpoint does not exist.
+        chunk_counts_by_doc maps document_id -> chunk count for previously completed docs.
     """
     path = _checkpoint_path(run_dir)
     if not path.exists():
-        return set()
+        return set(), {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return set(data.get("documents_completed", []))
+        completed = set(data.get("documents_completed", []))
+        counts: dict[str, int] = data.get("chunk_counts_by_document", {})
+        return completed, counts
     except Exception as exc:
         logger.warning("build checkpoint read failed (%s); starting fresh", exc)
-        return set()
+        return set(), {}
 
 
-def _save_checkpoint(run_dir: pathlib.Path, completed: set[str]) -> None:
-    """Persist the set of completed document_ids."""
+def _save_checkpoint(
+    run_dir: pathlib.Path, completed: set[str], chunk_counts: dict[str, int]
+) -> None:
+    """Persist completed document_ids and per-document chunk counts.
+
+    Args:
+        run_dir: Directory for the checkpoint file.
+        completed: Set of completed document_ids.
+        chunk_counts: Per-document chunk counts for all completed documents.
+    """
     path = _checkpoint_path(run_dir)
     path.write_text(
-        json.dumps({"documents_completed": sorted(completed)}, indent=2),
+        json.dumps(
+            {
+                "documents_completed": sorted(completed),
+                "chunk_counts_by_document": {k: chunk_counts[k] for k in sorted(chunk_counts)},
+            },
+            indent=2,
+        ),
         encoding="utf-8",
     )
 
@@ -580,14 +601,33 @@ class BuildStage(Stage):
             config_version=config_version,
         )
 
-        # Create shadow collection
-        shadow_ctx = create_shadow(
-            adapter=self._adapter,
-            kb_id=self._kb_id,
-            workspace_id=self._workspace_id,
-            build_id=self._build_id,
-            model_identity=model_identity,
-        )
+        # Create shadow collection — or reattach to an existing one (resume case).
+        # On a resumed run the shadow from the aborted pass already exists; calling
+        # create_shadow again would raise.  We detect the existing collection and
+        # reconstruct the BuildContext without re-creating the Qdrant collection.
+        expected_shadow = collection_name(self._kb_id, self._build_id)
+        if self._adapter.collection_exists(expected_shadow):
+            logger.info(
+                "build: shadow collection '%s' already exists — resuming into it",
+                expected_shadow,
+            )
+            shadow_ctx = BuildContext(
+                kb_id=self._kb_id,
+                workspace_id=self._workspace_id,
+                build_id=self._build_id,
+                shadow_collection=expected_shadow,
+                alias=alias_name(self._kb_id),
+                model_identity=model_identity,
+                state=BuildState.INGESTING,
+            )
+        else:
+            shadow_ctx = create_shadow(
+                adapter=self._adapter,
+                kb_id=self._kb_id,
+                workspace_id=self._workspace_id,
+                build_id=self._build_id,
+                model_identity=model_identity,
+            )
         shadow_collection = shadow_ctx.shadow_collection
         shadow_ctx.state = BuildState.INGESTING
 
@@ -601,7 +641,10 @@ class BuildStage(Stage):
         run_dir = (
             self._artifacts_root / self._run_id if self._artifacts_root and self._run_id else None
         )
-        completed_docs: set[str] = _load_checkpoint(run_dir) if run_dir else set()
+        if run_dir:
+            completed_docs, prior_chunk_counts = _load_checkpoint(run_dir)
+        else:
+            completed_docs, prior_chunk_counts = set(), {}
 
         # Validate SegmentSetBatch schema
         segment_batch = SegmentSetBatch.model_validate(segment_batch_dict)
@@ -612,6 +655,13 @@ class BuildStage(Stage):
         total_input_tokens = 0
         total_embed_calls = 0
 
+        # Fold prior (checkpoint) chunk counts into totals so BuildResult reflects the
+        # whole shadow collection, not just the newly-processed documents (F-02).
+        for prior_doc_id, prior_count in prior_chunk_counts.items():
+            if prior_count > 0:
+                chunks_by_document[prior_doc_id] = prior_count
+                total_chunks += prior_count
+
         # Wrap provider to count tokens/calls
         counting_provider = _CountingProvider(self._provider)
 
@@ -620,9 +670,8 @@ class BuildStage(Stage):
 
             if doc_id in completed_docs:
                 logger.info("build: skipping already-completed document %s", doc_id)
-                # Re-count from Qdrant would be expensive; load from checkpoint instead.
-                # Since chunk IDs are deterministic, we can safely skip.
-                # The count is not recorded here — it's already in the shadow collection.
+                # Chunk counts for this doc are already folded in from prior_chunk_counts above.
+                # Chunk IDs are deterministic so skipping avoids redundant embedding API calls.
                 continue
 
             logger.info("build: processing document %s", doc_id)
@@ -645,7 +694,7 @@ class BuildStage(Stage):
 
             completed_docs.add(doc_id)
             if run_dir:
-                _save_checkpoint(run_dir, completed_docs)
+                _save_checkpoint(run_dir, completed_docs, chunks_by_document)
 
         total_input_tokens = counting_provider.total_input_tokens
         total_embed_calls = counting_provider.total_embed_calls

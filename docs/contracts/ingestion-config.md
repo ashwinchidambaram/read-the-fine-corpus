@@ -64,8 +64,9 @@ treatment (§6.4). Complete — no field is optional-with-implicit-build-default
 | Field | Type | Required | Semantics |
 |---|---|---|---|
 | `strategy` | `enum{recursive_char, structure_aware, table_atomic, code_syntax, semantic}` | yes | Splitter type (§6.4 content matrix). |
-| `max_tokens` | `int` | yes | Target chunk size. |
-| `overlap_tokens` | `int` | yes | Overlap between adjacent chunks. |
+| `max_tokens` | `int` | yes | Target chunk size in tokens (whitespace-word proxy). |
+| `overlap_tokens` | `int` | yes | Overlap between adjacent chunks in tokens (whitespace-word proxy). |
+| `tokenizer` | `enum{"whitespace_word"}` (default `"whitespace_word"`) | yes | Token-counting method. Currently fixed to `"whitespace_word"` (`len(text.split())`), the §9.3 Phase 1 naive baseline. Encoded so any future tokenizer change forces a `config_version` change → full rebuild (§10.5). **WARNING**: switching tokenizers requires changing this field → changing `config_version` → full rebuild. Without it, re-indexing would silently corrupt chunk text at existing `point_id`s. |
 | `respect_headings` | `bool` | yes | Structure-aware boundary respect (prose, §6.4). |
 | `atomic_rows` | `bool` | no | Tables: never split rows from headers (§6.4). |
 | `repeat_headers_on_split` | `bool` | no | Tables too large to keep atomic: repeat headers into each fragment (§6.4). |
