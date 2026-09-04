@@ -52,17 +52,24 @@ checks on every consuming stage. D-26 (CLOSED) promoted these from pipeline-inte
 
 Source: `src/finecorpus/contracts/parse_result_batch.py`. Wraps a list of `ParseResult` objects.
 
+**Current schema version: `1.1.0`** (Phase 2 MINOR bump — added `version_families` and
+`boilerplate_blocks`; backward-compatible with all Phase 1 consumers that declared
+`SpecRange(major=1, min_minor=0)`).
+
 | Field | Type | Required | Semantics |
 |---|---|---|---|
-| `schema_version` | `str` (semver) | yes | Must be `"1.0.0"`. Checked by `DecomposeStage` against `SUPPORTED_PARSE_RESULT_BATCH`. |
+| `schema_version` | `str` (semver) | yes | `"1.1.0"` as of Phase 2. Checked by `DecomposeStage` against `SUPPORTED_PARSE_RESULT_BATCH`. |
 | `run_id` | `str` | yes | Identifies the pipeline run that produced this batch. |
 | `produced_at` | `datetime` (UTC, ISO 8601) | yes | When AssessStage produced this batch. |
 | `results` | `list[ParseResult]` | yes | One entry per inventory item. Nothing dropped: len(results) == len(inventory.items). |
 | `skeleton` | `bool \| None` | no | `True` = Phase 0 pass-through (no real parsing). `None` in real Phase 1+ runs. |
+| `version_families` | `list[dict]` | no (default `[]`) | **Phase 2.** Near-duplicate version families detected across the corpus. Each dict has fields `family_id`, `member_document_ids`, `primary_document_id`, `superseded_document_ids`, `similarity_method`, `similarity_scores`, `primacy_basis`. See `docs/pipeline/dedup-boilerplate.md §1`. |
+| `boilerplate_blocks` | `list[str]` | no (default `[]`) | **Phase 2.** Sorted list of normalised text blocks (lower-case, whitespace-collapsed) that appear in more than the configured proportion of corpus documents. Passed to `BoilerplatePass` in Decompose to reclassify matching segments. See `docs/pipeline/dedup-boilerplate.md §3`. |
 
 Invariants:
 - `len(results)` equals the inventory item count. Every inventory item produces exactly one `ParseResult` regardless of parse outcome (`parsed`, `partial`, `failed`, `excluded_pre_parse`).
 - Version checked by `DecomposeStage` via `SUPPORTED_PARSE_RESULT_BATCH = SpecRange(major=1, min_minor=0)`.
+- `version_families` and `boilerplate_blocks` are empty lists when the corpus has fewer than 2 parseable documents (no cross-document comparison possible).
 
 ### §12b — SegmentSetBatch (`Decompose → Plan`)
 
@@ -85,7 +92,7 @@ Invariants:
 | Stage boundary | Artifact model | Official §12 contract? |
 |---|---|---|
 | Collect → Assess | `Inventory` | Yes — `schema_version: 1.0.0`, all fields validated |
-| Assess → Decompose | `ParseResultBatch` | Yes (Phase 1, D-26) — `schema_version: 1.0.0`, version-checked by DecomposeStage |
+| Assess → Decompose | `ParseResultBatch` | Yes (Phase 2, D-26) — `schema_version: 1.1.0` (MINOR bump adds `version_families`, `boilerplate_blocks`), version-checked by DecomposeStage |
 | Decompose → Plan | `SegmentSetBatch` | Yes (Phase 1, D-26) — `schema_version: 1.0.0`, version-checked by PlanStage |
 | Plan → Build | `IngestionConfig` | Yes — `schema_version: 1.0.0`, all fields validated |
 | Build → (Serve) | `BuildResult` | No — pipeline-internal envelope; 0 chunks in Phase 0 skeleton |
