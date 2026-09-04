@@ -94,8 +94,12 @@ from finecorpus.contracts.ingestion_config import IngestionConfig
 from finecorpus.contracts.segment_set import Segment, SegmentSet
 from finecorpus.contracts.segment_set_batch import SegmentSetBatch
 from finecorpus.contracts.shared.blocks import (
+    AppliedBy,
     SalienceTier,
+    SegmentType,
     SourceLocation,
+    TransformationRecord,
+    TransformationTier,
     TrustLevel,
 )
 from finecorpus.contracts.versions import SUPPORTED_INGESTION_CONFIG
@@ -255,24 +259,58 @@ def _segment_source_location(seg: Segment) -> dict[str, Any]:
     }
 
 
+def _build_table_to_markdown_record() -> dict[str, Any]:
+    """Build the D-11 TransformationRecord dict for table_to_markdown (Tier 1).
+
+    Emitted for segments whose segment_type=table — i.e. segments produced from
+    regions whose detected_class_hint=table in the parse result.  The table text
+    was serialised to pipe-delimited Markdown in the parser (html.py /
+    spreadsheet.py) before it reached the segmentation pass; this record makes
+    that Tier-1 structural-normalisation op visible in the chunk provenance per
+    D-11 and §8.
+    """
+    rec = TransformationRecord(
+        tier=TransformationTier.tier_1,
+        operation="table_to_markdown",
+        applied_by=AppliedBy.deterministic,
+        model_ref=None,
+        changed_text=True,
+        note=(
+            "Table serialised to pipe-delimited Markdown in parser "
+            "(html.py / spreadsheet.py) before segmentation."
+        ),
+    )
+    return rec.model_dump(mode="json")
+
+
 def _build_provenance(
     segment_set: SegmentSet,
     seg: Segment,
 ) -> dict[str, Any]:
     """Assemble the full §8 provenance dict for a chunk from this segment.
 
-    transformations is an empty list in Phase 1 (no Tier 1/2 ops applied;
-    Tier 2 augmentation arrives in Phase 3).
+    For segments produced from table regions (segment_type=table), a Tier-1
+    table_to_markdown TransformationRecord is included per D-11 and §8.
+    For all other segments, transformations is empty in Phase 1 (no Tier 1/2
+    ops applied; Tier 2 augmentation arrives in Phase 3).
 
     confidence = ocr_confidence if present, else 1.0 (native text).
     """
     confidence = seg.ocr_confidence if seg.ocr_confidence is not None else 1.0
+    # D-11: emit table_to_markdown TransformationRecord for table segments.
+    # The conversion happened in the parser (assess stage); only segments with
+    # segment_type=table were actually produced by that conversion path.
+    if seg.segment_type == SegmentType.table:
+        transformations = [_build_table_to_markdown_record()]
+    else:
+        transformations = []
+
     return {
         "source_document_id": segment_set.document_id,
         "source_document_version": segment_set.content_hash,
         "source_location": _segment_source_location(seg),
         "structural_path": list(seg.structural_path),
-        "transformations": [],  # empty in Phase 1
+        "transformations": transformations,
         "confidence": confidence,
         "ocr_confidence": seg.ocr_confidence,
         "segment_type": seg.segment_type.value,

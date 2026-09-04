@@ -356,28 +356,41 @@ class TestUnservableFiles:
 
     @pytest.mark.parametrize("fixture_name", HTML_FIXTURES)
     def test_html_parse_status(self, tmp_path, fixture_name):
-        """HTML files must be excluded in Phase 1."""
+        """HTML files are parsed in Phase 2 (real parser, not exclusion placeholder)."""
         src_dir = tmp_path / "src"
         src_dir.mkdir()
         shutil.copy2(FIXTURE_CORPUS / fixture_name, src_dir / fixture_name)
 
         _, parse_batch, _ = _run_pipeline_over_corpus(tmp_path, source_dir=src_dir)
         pr = parse_batch["results"][0]
-        assert pr["parse_status"] == "excluded_pre_parse", (
-            f"{fixture_name}: expected excluded_pre_parse, got {pr['parse_status']!r}"
+        # Phase 2: HTML is parsed (parsed), not excluded (excluded_pre_parse)
+        assert pr["parse_status"] == "parsed", (
+            f"{fixture_name}: expected parsed (Phase 2 HTML parser), got {pr['parse_status']!r}"
+        )
+        assert pr["document_kind"] == "html", (
+            f"{fixture_name}: expected document_kind=html, got {pr['document_kind']!r}"
         )
 
     @pytest.mark.parametrize("fixture_name", SPREADSHEET_FIXTURES)
     def test_spreadsheet_parse_status(self, tmp_path, fixture_name):
-        """Spreadsheets must be excluded in Phase 1."""
+        """Spreadsheets are triaged in Phase 2: report→parsed, database/model→excluded."""
         src_dir = tmp_path / "src"
         src_dir.mkdir()
         shutil.copy2(FIXTURE_CORPUS / fixture_name, src_dir / fixture_name)
 
         _, parse_batch, _ = _run_pipeline_over_corpus(tmp_path, source_dir=src_dir)
         pr = parse_batch["results"][0]
-        assert pr["parse_status"] == "excluded_pre_parse", (
-            f"{fixture_name}: expected excluded_pre_parse, got {pr['parse_status']!r}"
+        # Phase 2: spreadsheets are triaged; status depends on kind
+        assert pr["parse_status"] in ("parsed", "excluded_pre_parse"), (
+            f"{fixture_name}: expected parsed or excluded_pre_parse, got {pr['parse_status']!r}"
+        )
+        assert pr["document_kind"] == "spreadsheet", (
+            f"{fixture_name}: expected document_kind=spreadsheet, got {pr['document_kind']!r}"
+        )
+        # Triage finding must always be present (§6.4 visibility)
+        finding_codes = {f["code"] for f in pr.get("findings", [])}
+        assert "spreadsheet_triage" in finding_codes, (
+            f"{fixture_name}: expected spreadsheet_triage finding, got: {finding_codes}"
         )
 
     def test_encrypted_pdf_parse_status(self, tmp_path):
@@ -432,9 +445,6 @@ class TestUnservableFiles:
             "audio_stub.wav",
             "video_stub.mp4",
             "cad_binary.dwg",
-            "confluence_export.html",
-            "nested_tables.html",
-            "database_spreadsheet.xlsx",
         ],
     )
     def test_excluded_file_produces_empty_segment_set_with_exclusion(self, tmp_path, fixture_name):
@@ -451,6 +461,44 @@ class TestUnservableFiles:
         )
         assert ss.get("exclusions"), (
             f"{fixture_name}: expected at least one ExclusionRecord, got none"
+        )
+
+    @pytest.mark.parametrize(
+        "fixture_name",
+        [
+            "database_spreadsheet.xlsx",
+        ],
+    )
+    def test_spreadsheet_excluded_produces_empty_segment_set(self, tmp_path, fixture_name):
+        """Database/model spreadsheets must produce empty SegmentSet with exclusion records.
+
+        Strengthened per F-05: exclusions must be non-empty and reason_detail must
+        mention the triage classification so the operator knows why content was excluded.
+        """
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        shutil.copy2(FIXTURE_CORPUS / fixture_name, src_dir / fixture_name)
+
+        _, _, seg_batch = _run_pipeline_over_corpus(tmp_path, source_dir=src_dir)
+        ss = seg_batch["segment_sets"][0]
+
+        assert ss.get("segments") == [], (
+            f"{fixture_name}: expected empty segments (excluded), got {ss.get('segments')}"
+        )
+
+        exclusions = ss.get("exclusions", [])
+        assert exclusions != [], (
+            f"{fixture_name}: expected non-empty exclusions for excluded spreadsheet, got none"
+        )
+
+        # reason_detail must mention the triage classification (DATABASE or MODEL)
+        all_details = " ".join(e.get("reason_detail", "") for e in exclusions)
+        mentions_triage = (
+            "DATABASE" in all_details or "MODEL" in all_details or "triaged" in all_details.lower()
+        )
+        assert mentions_triage, (
+            f"{fixture_name}: exclusion reason_detail must mention triage classification. "
+            f"Got: {all_details[:300]!r}"
         )
 
 

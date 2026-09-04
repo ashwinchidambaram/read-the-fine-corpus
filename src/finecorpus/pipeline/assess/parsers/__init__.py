@@ -11,24 +11,29 @@ Ordering rule
 
 Phase 2 registry order
 ----------------------
-``pdf_scanned_parser`` is placed **before** ``native_pdf_parser`` so that it
-can intercept image-only PDFs before the native parser marks them failed.
+``html_format_parser`` and ``spreadsheet_format_parser`` are real
+implementations (they replace the Phase 1 placeholders that emitted
+``excluded_pre_parse``).  ``pdf_scanned_parser`` is placed **before**
+``native_pdf_parser`` so that it can intercept image-only PDFs before the
+native parser marks them failed.
 
 Claim logic:
 - ``pdf_scanned_parser.can_parse`` opens the PDF and checks whether pypdf can
   extract any text.  If zero text on all pages AND no decompression errors, it
   returns True (image-only PDF → OCR path).  Otherwise False (falls through to
   ``native_pdf_parser``).
-- ``native_pdf_parser.can_parse`` claims all remaining ``.pdf`` files (same as
-  Phase 1) — the scanned parser already filtered out image-only ones.
+- ``native_pdf_parser.can_parse`` claims all remaining ``.pdf`` files — the
+  scanned parser already filtered out image-only ones.  Mixed PDFs (native
+  text + embedded scanned pages) are handled inside the native parser
+  (per-page OCR, ``document_kind=mixed_pdf``).
 
 This design keeps the claim logic explicit and co-located with each parser,
 avoids sentinel values on the ParseResult contract, and pays only a cheap
 pypdf-open cost for the native fast path.
 
-Phase 2+ extension
+Phase 3+ extension
 ------------------
-To register a new parser (e.g. ``html``, ``spreadsheet``):
+To register a new parser:
 
 1.  Create ``src/finecorpus/pipeline/assess/parsers/<name>.py`` and implement
     the ``FormatParser`` protocol (see ``base.py``).
@@ -38,35 +43,35 @@ To register a new parser (e.g. ``html``, ``spreadsheet``):
 """
 
 from finecorpus.pipeline.assess.parsers.base import FormatParser, ParserContext
+from finecorpus.pipeline.assess.parsers.html import html_format_parser
 from finecorpus.pipeline.assess.parsers.pdf_native import native_pdf_parser
 from finecorpus.pipeline.assess.parsers.pdf_scanned import pdf_scanned_parser
+from finecorpus.pipeline.assess.parsers.spreadsheet import spreadsheet_format_parser
 from finecorpus.pipeline.assess.parsers.unsupported import (
     audio_parser,
     cad_parser,
     fallback_parser,
-    html_parser,
-    spreadsheet_parser,
     video_parser,
 )
 
 #: Ordered parser registry.  AssessStage routes each item to the first match.
 #:
 #: Registry order (Phase 2):
-#:   1. audio_parser       → .wav, .mp3, etc.      → excluded_pre_parse
-#:   2. video_parser       → .mp4, .mov, etc.       → excluded_pre_parse
-#:   3. cad_parser         → .dwg, .dxf, etc.       → excluded_pre_parse
-#:   4. html_parser        → .html, .htm            → excluded_pre_parse (Phase 2 replaces)
-#:   5. spreadsheet_parser → .xlsx, .csv, etc.      → excluded_pre_parse (Phase 2 replaces)
-#:   6. pdf_scanned_parser → .pdf (image-only)      → parsed via OCR
-#:   7. native_pdf_parser  → .pdf (native text)     → parsed / partial / failed
-#:   8. fallback_parser    → everything else        → excluded_pre_parse
+#:   1. audio_parser              → .wav, .mp3, etc.   → excluded_pre_parse
+#:   2. video_parser              → .mp4, .mov, etc.   → excluded_pre_parse
+#:   3. cad_parser                → .dwg, .dxf, etc.   → excluded_pre_parse
+#:   4. html_format_parser        → .html, .htm        → parsed (real, Phase 2)
+#:   5. spreadsheet_format_parser → .xlsx/.xlsm/.csv   → parsed or triage-excluded
+#:   6. pdf_scanned_parser        → .pdf (image-only)  → parsed via OCR
+#:   7. native_pdf_parser         → .pdf (native/mixed)→ parsed / partial / failed
+#:   8. fallback_parser           → everything else    → excluded_pre_parse
 REGISTRY: list[FormatParser] = [
     audio_parser,
     video_parser,
     cad_parser,
-    html_parser,
-    spreadsheet_parser,
-    pdf_scanned_parser,  # ← Phase 2: image-only PDFs (checked before native)
+    html_format_parser,  # Phase 2: real HTML parser
+    spreadsheet_format_parser,  # Phase 2: real spreadsheet parser with triage
+    pdf_scanned_parser,  # Phase 2: image-only PDFs (checked before native)
     native_pdf_parser,
     fallback_parser,
 ]
@@ -75,5 +80,7 @@ __all__ = [
     "REGISTRY",
     "FormatParser",
     "ParserContext",
+    "html_format_parser",
     "pdf_scanned_parser",
+    "spreadsheet_format_parser",
 ]
