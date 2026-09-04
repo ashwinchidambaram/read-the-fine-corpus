@@ -66,6 +66,11 @@ class DocumentContext:
         ocr_sub_decompose_confidence_floor: OCR confidence above which
             sub-decomposition of a scanned_region into typed sub-segments is
             attempted (assessment.ocr_sub_decompose_confidence_floor; default 0.85, OQ-4).
+        boilerplate_blocks: Normalised paragraph strings detected as corpus-wide
+            boilerplate by corpus_passes (Phase 2, §6.2).  Empty set = no
+            boilerplate detection (Phase 1 behaviour).  BoilerplatePass uses
+            this to retype matching segments.  Added in Phase 2 (MINOR bump of
+            DocumentContext — no API break; default is empty set).
     """
 
     document_id: str
@@ -77,6 +82,11 @@ class DocumentContext:
     ocr_confidence_exclude_floor: float = 0.60
     ocr_confidence_warn_level: float = 0.80
     ocr_sub_decompose_confidence_floor: float = 0.85
+    boilerplate_blocks: set[str] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.boilerplate_blocks is None:
+            self.boilerplate_blocks = set()
 
 
 @dataclass

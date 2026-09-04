@@ -107,7 +107,12 @@ class SpecRange:
 SUPPORTED_INVENTORY = SpecRange(major=1, min_minor=0)
 SUPPORTED_PARSE_RESULT = SpecRange(major=1, min_minor=0)
 SUPPORTED_PARSE_RESULT_BATCH = SpecRange(major=1, min_minor=0)
-"""Assess → Decompose batch envelope (D-26: promoted to official contract)."""
+"""Assess → Decompose batch envelope (D-26: promoted to official contract).
+
+Phase 2: schema_version bumped to 1.1.0 to add version_families and
+boilerplate_blocks fields.  SpecRange stays at min_minor=0 so that any
+consumer built for 1.0.0+ still accepts 1.1.0 (MINOR is backward-compatible).
+"""
 SUPPORTED_SEGMENT_SET = SpecRange(major=1, min_minor=1)
 """Segment set consumer range — bumped to 1.1 with addition of ExclusionReason.too_short."""
 SUPPORTED_SEGMENT_SET_BATCH = SpecRange(major=1, min_minor=0)
