@@ -154,3 +154,74 @@ and forces recomputation. A Phase 2 change that adds new segment types or signal
 - `document_order` is dense and gapless (0, 1, 2, … N-1).
 - Every segment has `segment_type`, `salience_tier`, `salience_signals`, `structural_path`, and `source_location`.
 - `reassembly_digest` proves round-trip fidelity (property test).
+
+---
+
+## Extension points
+
+The Decompose stage uses an **ordered pass pipeline** declared in
+`src/finecorpus/pipeline/decompose/passes/__init__.py`.
+
+### How to add a new pass (Phase 2+)
+
+1. Create `src/finecorpus/pipeline/decompose/passes/<name>.py` and implement the
+   `SegmentPass` protocol (defined in `passes/base.py`):
+   - `run(doc_ctx, segments, exclusions) -> PassResult` — receives the current segment
+     list and accumulated exclusions from previous passes; returns an updated `PassResult`.
+   - Must be **pure and deterministic** — same inputs must produce same outputs.
+     No I/O, no mutation of arguments.
+
+2. Import the module-level singleton into `passes/__init__.py` and append it to
+   `PASSES` (or insert at the correct position).
+
+### Pass ordering
+
+`PASSES` is an **ordered list**. The stage runs passes sequentially; each pass
+receives the segment list produced by the previous pass.
+
+Ordering rules:
+- `segmentation_pass` must be **first** — it produces the initial segment list.
+- `salience_pass` must follow segmentation — it has access to all structural context.
+- Future passes (boilerplate, language, injection scoring) append **after** salience.
+
+Current pass order (Phase 1):
+
+```
+segmentation_pass  → paragraph/heading splitting, exclusion recording,
+                     cross-reference detection, segment_type_prior salience
+salience_pass      → Phase 1: no-op (pass-through); Phase 2+ extension point
+                     for class-description / LLM-scored salience signals
+```
+
+Phase 2 example — adding a language-tagging pass:
+
+```python
+# passes/__init__.py
+PASSES = [
+    segmentation_pass,
+    salience_pass,
+    language_pass,  # ← new: sets segment.language from langdetect / fastText
+]
+```
+
+### `PassResult` fields
+
+Each `run()` call returns a `PassResult` (defined in `passes/base.py`):
+
+| Field | Type | Purpose |
+|---|---|---|
+| `segments` | `list[Segment]` | Replaces the segment list for the next pass |
+| `exclusions` | `list[ExclusionRecord]` | New exclusions produced by this pass (accumulated) |
+| `cross_references` | `list[CrossReference]` | New cross-references produced (accumulated; most passes leave this empty) |
+
+### `DocumentContext` fields
+
+Each pass receives a `DocumentContext` (defined in `passes/base.py`):
+
+| Field | Type | Purpose |
+|---|---|---|
+| `document_id` | `str` | Stable document identifier |
+| `content_hash` | `str` | SHA-256 content fingerprint |
+| `tenancy` | `TenancyBlock` | Workspace / KB / permission block |
+| `parse_result` | `dict` | Full parse result (regions, findings, parse_status, etc.) |
+| `decomposed_at` | `datetime` | Run timestamp from the orchestrator |

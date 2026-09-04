@@ -106,3 +106,60 @@ Each `PageResult` carries:
 - `quality` is present for `parsed` and `partial` results; `None` for `failed` and `excluded_pre_parse`.
 - `confidence` is `1.0` for all successfully-extracted pages in Phase 1 (OCR confidence is Phase 2).
 - Non-PDF files and unservable PDFs produce `excluded_pre_parse` results, not empty successes.
+
+---
+
+## Extension points
+
+The Assess stage uses a **parser registry** declared in
+`src/finecorpus/pipeline/assess/parsers/__init__.py`.
+
+### How to add a new parser (Phase 2+)
+
+1. Create `src/finecorpus/pipeline/assess/parsers/<name>.py` and implement the
+   `FormatParser` protocol (defined in `parsers/base.py`):
+   - `can_parse(item) -> bool` — returns `True` if this parser claims the inventory item.
+   - `parse(item, tenancy, parsed_at, ctx) -> ParseResult` — performs extraction.
+     Must never raise; all errors are encoded as `parse_status` / `findings`.
+
+2. Import the module-level singleton into `parsers/__init__.py` and insert it
+   into `REGISTRY` at the appropriate position.
+
+### Registry ordering
+
+`REGISTRY` is an **ordered list**. For each inventory item, the stage calls
+`can_parse` on parsers in order and routes to the **first match**.
+
+Ordering rules:
+- More-specific parsers (e.g. `ocr_pdf` for image-only PDFs) go **before** less-specific
+  ones (e.g. `native_pdf` which claims all `.pdf` files).
+- `FallbackUnsupportedParser` always returns `True` from `can_parse` and **must be last**.
+
+Current registry order (Phase 1):
+
+```
+audio_parser          → .wav, .mp3, etc. → excluded_pre_parse
+video_parser          → .mp4, .mov, etc. → excluded_pre_parse
+cad_parser            → .dwg, .dxf, etc. → excluded_pre_parse
+html_parser           → .html, .htm       → excluded_pre_parse (Phase 2 replaces)
+spreadsheet_parser    → .xlsx, .csv, etc. → excluded_pre_parse (Phase 2 replaces)
+native_pdf_parser     → .pdf              → parsed / partial / failed
+fallback_parser       → everything else   → excluded_pre_parse
+```
+
+Phase 2 example — inserting an OCR parser:
+
+```python
+# parsers/__init__.py
+REGISTRY = [
+    audio_parser,
+    video_parser,
+    cad_parser,
+    html_parser,
+    spreadsheet_parser,
+    ocr_pdf_parser,  # ← new: inserted before native_pdf so it can detect
+    #   image-only PDFs that native_pdf would mark failed
+    native_pdf_parser,
+    fallback_parser,  # always last
+]
+```
