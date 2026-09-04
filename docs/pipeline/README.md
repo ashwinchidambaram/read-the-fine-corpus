@@ -1,6 +1,6 @@
 # Pipeline
 
-Status: **implemented** (Phase 0 — Collect stage real; Assess/Decompose/Plan/Build skeletons).
+Status: **Phase 1 in progress** (Collect real; Assess/Decompose real for native-text PDF; Plan/Build skeletons).
 Governing spec: §5, §6, §12, §18.2.
 
 The pipeline is a five-stage linear chain. Each stage consumes the previous stage's artifact,
@@ -49,13 +49,12 @@ Each concrete stage declares:
 Stages that override `run()` directly (Collect does, because it has no input contract) must
 reproduce steps 3 and 4.
 
-### Version-check opt-out
+### Version-check coverage (Phase 1)
 
-Stages that consume a pipeline-internal batch envelope (`ParseResultBatch`, `SegmentSetBatch`)
-set `consumed_version_range = None`. They still receive a well-formed dict from `ArtifactStore`
-— the store's `load()` requires `schema_version` to be present and the JSON to be valid — but
-version compatibility checking is skipped. This is documented as an open Phase 1 decision
-(see [D-26](../process/decision-ledger.md)).
+All five stage boundaries are now version-checked. `ParseResultBatch` and `SegmentSetBatch` were
+promoted to official §12 contracts in Phase 1 (D-26 CLOSED 2026-09-03). `DecomposeStage` checks
+against `SUPPORTED_PARSE_RESULT_BATCH` and `PlanStage` checks against `SUPPORTED_SEGMENT_SET_BATCH`.
+`BuildResult` remains pipeline-internal (Phase 0 skeleton). See [D-26 in the decision ledger](../process/decision-ledger.md).
 
 ---
 
@@ -121,24 +120,27 @@ immediately — the orchestrator does not catch or swallow stage errors.
 
 ---
 
-## Phase 0 stage status
+## Phase 1 stage status
 
 | Stage | Status | Output contract | Notes |
 |---|---|---|---|
 | **Collect** | Real implementation | `Inventory` (§12, schema v1.0.0) | Walks `source_dir` recursively; hashes every file; builds a full `Inventory`. Exact-duplicate detection implemented. See [collect.md](collect.md). |
-| **Assess** | Skeleton | `ParseResultBatch` (pipeline-internal envelope) | Emits one `ParseResult` per inventory item, all with `parse_status=excluded_pre_parse`. `skeleton=true` field on the envelope. Phase 1 replaces with real parsing. |
-| **Decompose** | Skeleton | `SegmentSetBatch` (pipeline-internal envelope) | Emits one `SegmentSet` per parse result, all with empty `segments[]`. `reassembly_digest` is `sha256("")`. `skeleton=true` on envelope. Phase 1+ replaces with real decomposition. |
+| **Assess** | Real — native-text PDF | `ParseResultBatch` (§12, schema v1.0.0) | Per-document `ParseResult` with per-page extraction via pypdf. Quality score heuristic. Honest exclusion for non-PDF, encrypted, image-only, and malformed PDFs. See [assess.md](assess.md). |
+| **Decompose** | Real — prose segmentation | `SegmentSetBatch` (§12, schema v1.0.0) | Paragraph segmentation, heading detection, segment types, structural path breadcrumbs, salience via type priors. Frozen-artifact semantics (content-addressed cache). See [decompose.md](decompose.md). |
 | **Plan** | Skeleton | `IngestionConfig` (§12, schema v1.0.0) | Emits a minimal but contract-valid `IngestionConfig`: `default_rule` only (recursive_char chunking, dense retrieval), no per-class rules. All provenance labelled `heuristic`. `config_version` derived deterministically from build-affecting fields (§10.5). Phase 1+ replaces with real planning. |
 | **Build** | Skeleton | `BuildResult` (pipeline-internal envelope) | Emits 0 chunks with an explanatory report. `skeleton=true` on envelope. Phase 1+ replaces with real chunking, embedding, and shadow-collection writing. |
 
 The `skeleton: true` field on pipeline-internal envelopes is a machine-readable honesty marker.
 Downstream tooling can check this field rather than guessing whether a run produced real output.
+Phase 1 real implementations set `skeleton=None`.
 
 ---
 
 ## Related pages
 
 - [collect.md](collect.md) — Collect stage: document_id derivation, duplicate detection, field inventory
-- [Contracts](../contracts/) — the six inter-stage data contracts, including `Inventory`
+- [assess.md](assess.md) — Assess stage: pypdf extraction, quality score heuristic, honest failure modes
+- [decompose.md](decompose.md) — Decompose stage: paragraph segmentation, heading detection, frozen artifacts
+- [Contracts](../contracts/) — the seven inter-stage data contracts
 - [Architecture overview](../architecture/overview.md) — pipeline decomposition in the full system
-- [Decision ledger D-26](../process/decision-ledger.md) — open decision on batch envelope contracts
+- [Decision ledger D-26](../process/decision-ledger.md) — CLOSED: batch envelope contracts promoted to official §12 contracts

@@ -1,13 +1,11 @@
-"""Stage 3 — Decompose (Phase 0 skeleton).
+"""Stage 3 — Decompose (Phase 1: real prose segmentation for native-text PDFs).
 
-Pass-through skeleton: consumes ParseResultBatch, emits a SegmentSetBatch.
+Consumes ParseResultBatch (official versioned contract per D-26), emits SegmentSetBatch.
 
-Each document gets a SegmentSet with:
-  - Empty segments list (no decomposition attempted in Phase 0).
-  - A valid ReassemblyRecord with empty covered_region_ids.
-  - Empty exclusions and cross_references.
-
-Phase 1+ will replace this with real decomposition.
+Phase 1 scope:
+- Parsed/partial PDFs: paragraph segmentation, heading detection, segment typing.
+- Excluded/failed documents: empty SegmentSet with ExclusionRecord.
+- Frozen-artifact semantics: (document_id, content_hash, config_version) keyed cache.
 """
 
 from finecorpus.pipeline.decompose.stage import DecomposeStage
