@@ -18,11 +18,11 @@ import yaml
 
 from finecorpus.contracts.ingestion_config import IngestionConfig
 from finecorpus.contracts.inventory import Inventory
+from finecorpus.contracts.parse_result_batch import ParseResultBatch
+from finecorpus.contracts.segment_set_batch import SegmentSetBatch
 from finecorpus.pipeline import run_pipeline
 from finecorpus.pipeline.artifact_store import ArtifactStore
-from finecorpus.pipeline.assess.stage import ParseResultBatch
 from finecorpus.pipeline.build.stage import BuildResult
-from finecorpus.pipeline.decompose.stage import SegmentSetBatch
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -93,13 +93,19 @@ class TestAllArtifactsExistAndValidate:
         store: ArtifactStore = pipeline_run["store"]
         batch = store.load_with_model_validation("assess", ParseResultBatch)
         assert batch.schema_version == "1.0.0"
-        assert batch.skeleton is True
+        # Phase 1: real implementation — skeleton is None (not a skeleton pass-through)
+        assert batch.skeleton is not True, (
+            "Assess stage should be a real implementation in Phase 1 (skeleton=None)"
+        )
 
     def test_decompose_loads_as_segment_set_batch(self, pipeline_run):
         store: ArtifactStore = pipeline_run["store"]
         batch = store.load_with_model_validation("decompose", SegmentSetBatch)
         assert batch.schema_version == "1.0.0"
-        assert batch.skeleton is True
+        # Phase 1: real implementation — skeleton is None (not a skeleton pass-through)
+        assert batch.skeleton is not True, (
+            "Decompose stage should be a real implementation in Phase 1 (skeleton=None)"
+        )
 
     def test_plan_loads_as_ingestion_config(self, pipeline_run):
         store: ArtifactStore = pipeline_run["store"]

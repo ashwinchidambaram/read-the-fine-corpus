@@ -1,4 +1,4 @@
-"""Stage 4 — Plan (Phase 0 pass-through skeleton).
+"""Stage 4 — Plan (Phase 0 skeleton / Phase 1 unchanged).
 
 Produces a minimal but contract-valid IngestionConfig:
   - default_rule covers all segment classes.
@@ -9,7 +9,10 @@ Produces a minimal but contract-valid IngestionConfig:
 The config_version is derived deterministically from a sha256 of the
 build-affecting config fields (as required by §10.5).
 
-Phase 1+ replaces _produce with real planning.
+D-26 resolution: now version-checks the consumed SegmentSetBatch via
+SUPPORTED_SEGMENT_SET_BATCH (previously opted out with consumed_version_range=None).
+
+Phase 2+ replaces _produce with real per-class planning.
 """
 
 from __future__ import annotations
@@ -43,6 +46,7 @@ from finecorpus.contracts.shared.blocks import (
     SegmentType,
     TenancyBlock,
 )
+from finecorpus.contracts.versions import SUPPORTED_SEGMENT_SET_BATCH
 from finecorpus.pipeline.stage import Stage
 
 _INGESTION_CONFIG_SCHEMA_VERSION = "1.0.0"
@@ -111,9 +115,12 @@ def _derive_config_version(default_rule: ClassRule, embedding: EmbeddingConfig) 
 
 
 class PlanStage(Stage):
-    """Stage 4 — Plan (skeleton).
+    """Stage 4 — Plan (skeleton; D-26: now version-checks SegmentSetBatch).
 
     Consumes SegmentSetBatch, emits IngestionConfig.
+
+    D-26 resolution: consumed_version_range is now SUPPORTED_SEGMENT_SET_BATCH
+    instead of None — every stage boundary is now version-checked.
 
     Args:
         run_started_at: Single run timestamp threaded from the orchestrator.
@@ -123,9 +130,7 @@ class PlanStage(Stage):
 
     name = "plan"
     consumed_contract = "segment_set_batch"
-    consumed_version_range = (
-        None  # no version check: envelope contract not in the §12 table (see decision D-26)
-    )
+    consumed_version_range = SUPPORTED_SEGMENT_SET_BATCH  # D-26: version-checked now
     produced_contract = "ingestion_config"
     output_model = IngestionConfig
 

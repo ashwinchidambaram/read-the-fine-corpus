@@ -1,16 +1,12 @@
-"""Stage 2 — Assess (Phase 0 skeleton).
+"""Stage 2 — Assess (Phase 1: real native-text PDF parsing via pypdf).
 
-Pass-through skeleton: consumes Inventory, emits a minimal but contract-VALID
-ParseResult for each document in the inventory.
+Consumes Inventory, emits ParseResultBatch (official versioned contract per D-26).
 
-Each ParseResult is marked with:
-  parse_status=excluded_pre_parse — the honest "not yet parsed" value from ParseStatus.
-  (alternative: 'failed' — but excluded_pre_parse is more honest for a skeleton stage
-   that has not attempted parsing at all)
+Phase 1 scope: native-text PDFs only. All other file types are honestly excluded
+(parse_status=excluded_pre_parse) with a finding explaining why.
 
-Every inventory item gets an entry — nothing silently dropped (§6 rule 6).
-
-Phase 1 will replace this with real parsing.
+Real parsing: per-page text extraction, quality scoring, encoding issue detection,
+encrypted/malformed/image-only detection.
 """
 
 from finecorpus.pipeline.assess.stage import AssessStage
