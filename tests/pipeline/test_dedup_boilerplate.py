@@ -709,3 +709,222 @@ class TestCorpusPassesUnit:
         assert roles["doc-b"] == "primary"
         assert roles["doc-a"] == "superseded"
         assert roles["doc-c"] == "unique"
+
+
+# ---------------------------------------------------------------------------
+# D-32 absolute-floor boilerplate branch unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestD32AbsoluteFloor:
+    """Unit tests for the D-32 absolute-floor boilerplate detection branch.
+
+    Branch (b) fires when:
+      total corpus occurrences >= abs_floor_count (default 3)  AND
+      unique-doc fraction     >= abs_floor_fraction (default 0.05)
+
+    Branch (a) — fraction > threshold — is unchanged and must not regress.
+    """
+
+    def _make_pr(self, doc_id: str, text: str) -> dict[str, Any]:
+        return {
+            "document_id": doc_id,
+            "parse_status": "parsed",
+            "regions": [{"text": text, "region_id": f"reg-{doc_id}"}],
+        }
+
+    def _corpus(
+        self,
+        n_uniq: int,
+        shared_block: str,
+        filler_prefix: str = "unique text",
+    ) -> list[dict[str, Any]]:
+        """Create n_uniq docs each containing shared_block plus unique filler."""
+        return [
+            self._make_pr(
+                f"doc-{i}",
+                f"{shared_block}\n\n{filler_prefix} for document {i} only additional padding here",
+            )
+            for i in range(n_uniq)
+        ]
+
+    def _filler_doc(self, doc_id: str, i: int) -> dict[str, Any]:
+        """Create a filler document with text long enough to pass _MIN_TEXT_CHARS (50)."""
+        # Ensure text is >= 50 chars so it's counted as an eligible document
+        text = f"completely unrelated content for filler document number {i} — unique and distinct"
+        return self._make_pr(doc_id, text)
+
+    # ------------------------------------------------------------------
+    # Branch (b) FIRES
+    # ------------------------------------------------------------------
+
+    def test_branch_b_fires_at_3_of_13_prevalence(self):
+        """Branch (b): 3/13 unique docs (fraction 0.23 < 0.30) with total count 3 fires.
+
+        This is the canonical real-world case: ACME legal preamble in 3 of 13 eligible
+        docs at full golden-corpus scale (fraction = 0.23 < 0.30, count = 3 >= 3,
+        fraction = 0.23 >= 0.05).
+        """
+        shared = "confidential property of acme corp all rights reserved no reproduction"
+        # 3 docs share the block; 10 other docs have unique content (all >= 50 chars)
+        results = self._corpus(3, shared) + [self._filler_doc(f"other-{i}", i) for i in range(10)]
+        assert len(results) == 13
+
+        blocks = compute_boilerplate_blocks(
+            results,
+            corpus_proportion=0.30,
+            small_corpus_proportion=0.50,
+            small_corpus_doc_count=10,
+            abs_floor_count=3,
+            abs_floor_fraction=0.05,
+        )
+        import re
+
+        norm_shared = re.sub(r"\s+", " ", shared.lower()).strip()
+        assert norm_shared in blocks, (
+            f"Branch (b) must fire at 3/13 prevalence (count=3 >= 3, fraction=0.23 >= 0.05); "
+            f"blocks detected: {len(blocks)}"
+        )
+
+    def test_branch_b_fires_for_within_doc_repetition(self):
+        """Branch (b): block repeating multiple times within ONE document fires at total count >= 3.
+
+        Simulates the confluence_export.html case: nav chrome appears twice in a single
+        HTML document (2 pages), giving total_count=2 in 1 of 15 docs.  With floor
+        count=2 and fraction check, it would fire.  With floor count=3 it requires
+        the block to appear >= 3 times total (e.g. 3 occurrences in 1 doc or
+        1-2 occurrences in multiple docs summing to 3+).
+
+        This test uses total_count=4 (4 occurrences in one doc) to verify the
+        within-doc path definitely fires.
+        """
+        # A document with the nav chrome repeated 4 times (like confluence HTML pages)
+        nav_block = "acme engineering wiki space home all pages blog calendar"
+        # Build a region with 4 repetitions of the nav block separated by different content
+        repeated_text = (
+            f"{nav_block}\n\npage 1 content here\n\n"
+            f"{nav_block}\n\npage 2 content here\n\n"
+            f"{nav_block}\n\npage 3 content here\n\n"
+            f"{nav_block}\n\npage 4 content here"
+        )
+        # 1 doc with 4 repetitions, 14 other docs with unique content (all >= 50 chars)
+        results = [self._make_pr("doc-nav", repeated_text)] + [
+            self._filler_doc(f"other-{i}", i) for i in range(14)
+        ]
+        assert len(results) == 15
+
+        blocks = compute_boilerplate_blocks(
+            results,
+            corpus_proportion=0.30,
+            small_corpus_proportion=0.50,
+            small_corpus_doc_count=10,
+            abs_floor_count=3,
+            abs_floor_fraction=0.05,
+        )
+        import re
+
+        norm_nav = re.sub(r"\s+", " ", nav_block.lower()).strip()
+        assert norm_nav in blocks, (
+            f"Branch (b) must fire for 4 within-doc occurrences (total=4 >= 3, "
+            f"fraction=1/15=0.067 >= 0.05); blocks detected: {sorted(blocks)[:3]}"
+        )
+
+    # ------------------------------------------------------------------
+    # Branch (b) does NOT fire
+    # ------------------------------------------------------------------
+
+    def test_branch_b_does_not_fire_below_fraction_floor(self):
+        """Branch (b) must NOT fire when unique-doc fraction < 0.05 (3 of 100 docs).
+
+        Simulates the negative case: 3 total occurrences in a 100-document corpus
+        → unique_docs/n_docs = 3/100 = 0.03 < 0.05 → does NOT fire.
+        """
+        shared = "template footer text with legal disclaimer and version information"
+        # 3 docs share the block; 97 other docs have unique content (all >= 50 chars)
+        results = self._corpus(3, shared, filler_prefix="different document content") + [
+            self._filler_doc(f"other-{i}", i) for i in range(97)
+        ]
+        assert len(results) == 100
+
+        blocks = compute_boilerplate_blocks(
+            results,
+            corpus_proportion=0.30,
+            small_corpus_proportion=0.50,
+            small_corpus_doc_count=10,
+            abs_floor_count=3,
+            abs_floor_fraction=0.05,
+        )
+        import re
+
+        norm_shared = re.sub(r"\s+", " ", shared.lower()).strip()
+        assert norm_shared not in blocks, (
+            "Branch (b) must NOT fire at 3/100 prevalence (fraction=0.03 < 0.05); "
+            "block was erroneously added to boilerplate set"
+        )
+
+    def test_branch_b_does_not_fire_below_count_floor(self):
+        """Branch (b) must NOT fire when total count < abs_floor_count (default 3).
+
+        2 total occurrences (1 each in 2 of 15 docs): count=2 < 3 → does NOT fire
+        when fraction would otherwise pass (2/15 = 0.13 > 0.05).
+        """
+        shared = "confidential notice this document is proprietary information only"
+        # 2 docs share the block; 13 other docs unique (all >= 50 chars)
+        results = self._corpus(2, shared) + [self._filler_doc(f"other-{i}", i) for i in range(13)]
+        assert len(results) == 15
+
+        blocks = compute_boilerplate_blocks(
+            results,
+            corpus_proportion=0.30,
+            small_corpus_proportion=0.50,
+            small_corpus_doc_count=10,
+            abs_floor_count=3,
+            abs_floor_fraction=0.05,
+        )
+        import re
+
+        norm_shared = re.sub(r"\s+", " ", shared.lower()).strip()
+        # fraction = 2/15 = 0.13 < 0.30 → branch (a) does not fire
+        # total = 2 < 3 → branch (b) does not fire
+        assert norm_shared not in blocks, (
+            "Branch (b) must NOT fire at count=2 < 3 (abs_floor_count); "
+            "block was erroneously added to boilerplate set"
+        )
+
+    # ------------------------------------------------------------------
+    # Branch (a) unchanged for small subsets
+    # ------------------------------------------------------------------
+
+    def test_branch_a_unchanged_for_small_subset(self):
+        """Branch (a): 3-doc subset at fraction=1.0 still fires (unchanged path).
+
+        The existing 3-doc boilerplate test relies on fraction=1.0 which exceeds
+        the small-corpus threshold (0.50).  Verify D-32 does not regress this.
+        """
+        shared = "confidential property of acme corporation legal notice"
+        unique_a = "unique specifications for product model alpha version one"
+        unique_b = "unique specifications for product model beta revision two"
+        unique_c = "unique specifications for product model gamma release three"
+        results = [
+            self._make_pr("doc-a", f"{shared}\n\n{unique_a}"),
+            self._make_pr("doc-b", f"{shared}\n\n{unique_b}"),
+            self._make_pr("doc-c", f"{shared}\n\n{unique_c}"),
+        ]
+
+        # 3-doc corpus → small-corpus (< 10) → threshold 0.50
+        # fraction = 3/3 = 1.0 > 0.50 → branch (a) fires
+        blocks = compute_boilerplate_blocks(
+            results,
+            corpus_proportion=0.30,
+            small_corpus_proportion=0.50,
+            small_corpus_doc_count=10,
+            abs_floor_count=3,
+            abs_floor_fraction=0.05,
+        )
+        import re
+
+        norm_shared = re.sub(r"\s+", " ", shared.lower()).strip()
+        assert norm_shared in blocks, (
+            f"Branch (a) at fraction=1.0 must still fire (3-doc small corpus); "
+            f"blocks detected: {blocks}"
+        )

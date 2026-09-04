@@ -338,6 +338,35 @@ def _build_document_entry(
         for f in pr.get("findings", [])
     ]
 
+    # Synthesise table_structure_retained finding when the segment set contains
+    # table-structured segments.  The finding is emitted when:
+    #   (a) quality.table_structure_retained is "full" or "partial" (HTML/spreadsheet
+    #       parsers that detect table structure natively), OR
+    #   (b) the segment set contains at least one "table" or "revision_history" segment
+    #       (PDF parsers extract tables as structured text but cannot mark the quality
+    #       field directly; the Decompose stage classifies them correctly by segment type).
+    _quality_tsr = quality.get("table_structure_retained")
+    _has_table_quality = _quality_tsr in ("full", "partial")
+    _has_table_segments = any(
+        seg.get("segment_type") in ("table", "revision_history") for seg in ss.get("segments", [])
+    )
+    _tsr_codes = {f.get("code") for f in pr.get("findings", [])}
+    if (_has_table_quality or _has_table_segments) and "table_structure_retained" not in _tsr_codes:
+        findings_list.append(
+            {
+                "code": "table_structure_retained",
+                "severity": "info",
+                "message": (
+                    "Table structure detected and retained: "
+                    + (
+                        f"quality={_quality_tsr}"
+                        if _has_table_quality
+                        else "table or revision_history segments present"
+                    )
+                ),
+            }
+        )
+
     return {
         "document_id": doc_id,
         "source_path": source_path,
