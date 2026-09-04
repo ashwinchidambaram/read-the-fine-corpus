@@ -81,6 +81,7 @@ from finecorpus.contracts.shared.blocks import (
 from finecorpus.contracts.versions import SUPPORTED_PARSE_RESULT_BATCH
 from finecorpus.pipeline.decompose.passes import PASSES
 from finecorpus.pipeline.decompose.passes.base import DocumentContext
+from finecorpus.pipeline.decompose.passes.xref_resolve import xref_resolve_pass
 from finecorpus.pipeline.stage import Stage
 
 # ---------------------------------------------------------------------------
@@ -365,6 +366,12 @@ def _run_passes(
         exclusions = result.exclusions
         # Accumulate cross_references produced by any pass (typically segmentation only)
         cross_references.extend(result.cross_references)
+
+    # Phase 2: resolve intra-document cross-references now that the final segment
+    # list is available.  xref_resolve_pass.run() is a no-op pass-through in the
+    # pipeline above; resolution requires the full typed segment list and is
+    # therefore called here, after all passes complete.
+    cross_references = xref_resolve_pass.resolve_cross_references(cross_references, segments)
 
     # Determine covered region IDs (regions that contributed segments)
     covered_region_ids: list[str] = []
