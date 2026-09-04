@@ -1,7 +1,8 @@
 # Assess Stage
 
-Status: **Phase 2 real implementation** (native-text PDF + scanned/image-only PDF; HTML/spreadsheet → Phase 3).
-Governing spec: §6.2, §12, §18.2. Output contract: `ParseResultBatch` (§12a, schema v1.0.0).
+Status: **Phase 2 real implementation** (native-text PDF, scanned/image-only PDF via OCR,
+mixed PDF, HTML, and spreadsheets with triage).
+Governing spec: §6.2, §6.4, §12, §18.2. Output contract: `ParseResultBatch` (§12a).
 
 The Assess stage produces one `ParseResult` per inventory item. It never drops an item: every
 document gets a result with an explicit `parse_status` — `parsed`, `partial`, `failed`, or
@@ -11,19 +12,21 @@ document gets a result with an explicit `parse_status` — `parsed`, `partial`, 
 
 ## Phase 2 scope
 
-Phase 2 adds scanned PDF support (OCR via tesseract) on top of the Phase 1 native-text parser.
-
-| Extension / classification | Outcome |
-|---|---|
-| `.pdf` (native text) | `parsed` or `partial` — real per-page extraction via pypdf |
-| `.pdf` (image-only, 0 text chars on all pages) | `parsed` via OCR — pytesseract; per-page confidence retained |
-| `.pdf` (encrypted) | `failed` with `password_protected` finding |
-| `.pdf` (malformed, decompression errors) | `partial` — successful pages parsed, failed pages recorded |
-| `.html`, `.htm` | `excluded_pre_parse` — Phase 3 |
-| `.xlsx`, `.xls`, `.csv`, `.ods` | `excluded_pre_parse` — Phase 3 |
-| `.wav`, `.mp3`, `.mp4`, `.mov`, `.avi` | `excluded_pre_parse` (unservable content) |
-| `.dwg`, `.dxf`, `.stl` | `excluded_pre_parse` (unservable content) |
-| Everything else | `excluded_pre_parse` (unrecognized extension) |
+| Extension / classification | Outcome | Parser |
+|---|---|---|
+| `.pdf` (native text) | `parsed` or `partial` — real per-page extraction via pypdf | `pdf_native` |
+| `.pdf` (encrypted) | `failed` with `password_protected` finding | `pdf_native` |
+| `.pdf` (image-only, 0 text chars on all pages) | `parsed` via OCR — pytesseract; per-page confidence retained | `pdf_scanned` |
+| `.pdf` (mixed: native text + embedded scanned pages) | `parsed` with `document_kind=mixed_pdf` — low-text pages with images are OCR'd in place | `pdf_native` |
+| `.pdf` (malformed, decompression errors) | `partial` — successful pages parsed, failed pages recorded | `pdf_native` |
+| `.html`, `.htm` | `parsed` — structure extraction (headings, prose, code, tables, lists) | `html` |
+| `.xlsx`, `.xls`, `.ods` (report kind) | `parsed` — triage then sheet/region extraction | `spreadsheet` |
+| `.xlsx`, `.xls`, `.ods` (database kind) | `excluded_pre_parse` — not vectorizable (§6.4) | `spreadsheet` |
+| `.xlsx`, `.xls`, `.ods` (model kind) | `excluded_pre_parse` — stale snapshot risk (§6.4) | `spreadsheet` |
+| `.csv` | `excluded_pre_parse` — `csv_not_supported` (openpyxl cannot parse CSV) | `spreadsheet` |
+| `.wav`, `.mp3`, `.mp4`, `.mov`, `.avi` | `excluded_pre_parse` (unservable content) | `audio/video` |
+| `.dwg`, `.dxf`, `.stl` | `excluded_pre_parse` (unservable content) | `cad` |
+| Everything else | `excluded_pre_parse` (unrecognized extension) | `fallback` |
 
 ---
 
@@ -249,17 +252,137 @@ Ordering rules:
 Current registry order (Phase 2):
 
 ```
-audio_parser          → .wav, .mp3, etc.   → excluded_pre_parse
-video_parser          → .mp4, .mov, etc.   → excluded_pre_parse
-cad_parser            → .dwg, .dxf, etc.   → excluded_pre_parse
-html_parser           → .html, .htm        → excluded_pre_parse (Phase 3 replaces)
-spreadsheet_parser    → .xlsx, .csv, etc.  → excluded_pre_parse (Phase 3 replaces)
-pdf_scanned_parser    → .pdf (image-only)  → parsed via OCR      ← Phase 2 addition
-native_pdf_parser     → .pdf (native text) → parsed / partial / failed
-fallback_parser       → everything else    → excluded_pre_parse
+audio_parser              → .wav, .mp3, etc.   → excluded_pre_parse
+video_parser              → .mp4, .mov, etc.   → excluded_pre_parse
+cad_parser                → .dwg, .dxf, etc.   → excluded_pre_parse
+html_format_parser        → .html, .htm        → parsed
+spreadsheet_format_parser → .xlsx / .csv       → parsed (report) / excluded_pre_parse (database/model/csv)
+pdf_scanned_parser        → .pdf (image-only)  → parsed via OCR
+native_pdf_parser         → .pdf (native/mixed)→ parsed / partial / failed
+fallback_parser           → everything else    → excluded_pre_parse
 ```
 
 `pdf_scanned_parser` is placed before `native_pdf_parser`. Its `can_parse` checks whether
 pypdf extracts any text from the PDF:
 - Zero text on all pages, no decompression errors → `True` (OCR path)
 - Any text extractable, or any error → `False` (native or fallback path)
+
+Mixed PDFs (native text plus embedded scanned pages) fall through to
+`native_pdf_parser`, which detects low-text pages carrying images and OCRs them
+in place (`document_kind=mixed_pdf`).
+
+---
+
+## HTML parser (`parsers/html.py`)
+
+The HTML parser handles `.html` and `.htm` files using the Python stdlib `html.parser`
+module — no external dependency. It converts document structure into typed regions.
+
+### Extraction rules
+
+| Source element | Output region kind | Notes |
+|---|---|---|
+| `h1`–`h6` | `prose` | Heading text; `detected_class_hint="heading"` |
+| `p`, `div`, `section`, `article` | `prose` | Body prose; `detected_class_hint="paragraph"` |
+| `pre`, `code` | `code` | Verbatim text |
+| `ul`, `ol` (+ `li` items) | `list` | Markdown-serialized (`- item`) |
+| `table` | `table` | Markdown-serialized; no blank lines (decompose-safe) |
+| `a[href]` | finding (`link_record`) | See §6.1 web-link policy |
+
+### Source location format
+
+Regions carry `LocatorKind.dom_path` locations encoding a simplified XPath-like
+path through the document tree, e.g. `body/div[1]/table[2]`.
+
+### Web-link policy (§6.1)
+
+Links found in HTML are **references**, not content. The parser:
+
+1. Records each `<a href="...">` as a `ParseResult.finding` with code `link_record`.
+2. Does **not** fetch the linked URL.
+3. Flags the finding as `OQ-HTML-1` — a reconciliation note for Phase 3 to move
+   these records into `Inventory.links`.
+
+The default fetch policy is **ignore**. Links are inventoried so they can be acted on
+by downstream stages, but they do not gate the parse result.
+
+### Nested tables (OQ-9)
+
+When an inner `<table>` appears inside an outer table cell, the parser:
+
+1. Extracts the inner table as a **separate `table` region** with `is_nested=True`.
+2. Renders the outer cell that contained the inner table as an empty string (`""`).
+3. Emits a `nested_table_detected` finding for traceability.
+
+This matches OQ-9's requirement that nested tables be addressable as independent
+table regions rather than embedded inside the outer table's serialized text.
+
+### Decompose compatibility
+
+Phase 1 segmentation splits region text on blank lines. The Markdown table
+serialization used by this parser guarantees **no blank lines** within a table
+region's text. The `detected_class_hint` field is carried through so Phase 3
+taxonomy can promote the segment to the proper type.
+
+---
+
+## Spreadsheet parser (`parsers/spreadsheet.py`)
+
+The spreadsheet parser handles `.xlsx` files using `openpyxl`. It applies a
+**triage-first** strategy: classify the workbook kind before deciding whether to
+ingest it.
+
+### Triage
+
+Every spreadsheet is classified into one of three kinds:
+
+| Kind | Signal | Default action |
+|---|---|---|
+| `model` | formula ratio ≥ 0.30 across all non-empty cells | `excluded_pre_parse` |
+| `database` | single sheet, no charts, uniform column structure, ≥ 50 data rows | `excluded_pre_parse` |
+| `report` | multiple sheets OR chart presence OR ≥ 2 prose text blocks | `parsed` |
+
+Triage is always performed first, and the scores are always recorded as a
+`spreadsheet_triage` finding in `ParseResult.findings` — even for excluded results.
+This means the classification rationale is visible and auditable.
+
+**Critical implementation note:** Triage must load the workbook with
+`data_only=False` so that formula strings (`=SUM(A1:A10)`) are visible in cell
+values. Loading with `data_only=True` (the openpyxl default) returns cached
+computed values, making formula detection impossible.
+
+### Triage scores per fixture
+
+| Fixture | Kind | Dominant signal | Formula ratio | Sheet count |
+|---|---|---|---|---|
+| `report_spreadsheet.xlsx` | `report` | chart presence + 3 sheets | ≈ 0.00 | 3 |
+| `database_spreadsheet.xlsx` | `database` | 501 uniform data rows | 0.00 | 1 |
+| `model_spreadsheet.xlsx` | `model` | formula ratio = 0.77 | 0.77 | 1 |
+
+### Override
+
+Triage classification can be overridden at the Plan stage via
+`IngestionConfig.spreadsheet_triage[].source = "user_override"`. When a
+`user_override` entry matches the item's source path, the override kind is used
+instead of the computed kind, and the triage finding records both the computed
+kind and the override kind.
+
+### Report parsing
+
+When triage classifies a workbook as `report`, the parser extracts content
+sheet by sheet:
+
+- **Prose blocks** — contiguous cells that look like paragraph text → `prose` region.
+- **Table blocks** — contiguous rectangular data with an inferred header row → `table`
+  region, Markdown-serialized.
+- **Chart objects** — chart titles extracted from the chart's `title` property →
+  `figure` region with `detected_class_hint="chart"`.
+
+Each sheet becomes a logical section; regions carry `LocatorKind.cell_range`
+locations in A1 notation, e.g. `Sheet1!B2:D5`.
+
+### Decompose compatibility
+
+As with the HTML parser, table regions are Markdown-serialized with no blank lines,
+making them safe to pass through Phase 1 segmentation. The `detected_class_hint`
+field marks them for Phase 3 taxonomy promotion.

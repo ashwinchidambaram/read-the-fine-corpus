@@ -1,17 +1,14 @@
-"""Honest-exclusion parsers for file types not supported in Phase 1.
+"""Honest-exclusion parsers for file types not handled by any other parser.
 
 Each class handles one extension family and returns
 ``parse_status=excluded_pre_parse`` with an informative finding.
-Behaviour is identical to the original monolithic stage.py exclusion
-branches — same statuses, same finding codes, same finding message strings.
 
-Extension points (Phase 2)
---------------------------
-When Phase 2 adds HTML or spreadsheet parsing, *remove the corresponding
-``can_parse`` extension set from the relevant unsupported parser* (or delete
-it entirely) and insert the real parser earlier in the registry.  The
-unsupported parsers serve as honest placeholders until the real implementation
-lands.
+Phase 2 changes
+---------------
+The ``HTMLParser`` and ``SpreadsheetParser`` placeholder classes that existed
+in Phase 1 have been removed.  Phase 2 provides real implementations in
+``html.py`` and ``spreadsheet.py`` respectively.  Those parsers are now
+registered before ``FallbackUnsupportedParser`` in ``REGISTRY``.
 
 The ``FallbackUnsupportedParser`` always returns True from ``can_parse`` and
 must therefore remain the **last** entry in the registry.
@@ -47,11 +44,11 @@ _PARSER_REF = ParserRef(
 )
 
 # Extension sets (mirrors the constants in the original stage.py)
+# Note: .html/.htm and .xlsx/.xls/.ods are now handled by real Phase 2 parsers
+# in html.py and spreadsheet.py respectively; they are no longer listed here.
 _AUDIO_EXTENSIONS = frozenset({".wav", ".mp3", ".aac", ".flac", ".ogg", ".m4a"})
 _VIDEO_EXTENSIONS = frozenset({".mp4", ".mov", ".avi", ".mkv", ".webm"})
 _CAD_EXTENSIONS = frozenset({".dwg", ".dxf", ".step", ".stp", ".iges", ".igs"})
-_HTML_EXTENSIONS = frozenset({".html", ".htm"})
-_SPREADSHEET_EXTENSIONS = frozenset({".xlsx", ".xls", ".csv", ".ods"})
 
 
 def _make_excluded(
@@ -181,68 +178,6 @@ class CADParser:
         )
 
 
-class HTMLParser:
-    """Honest exclusion for HTML files (.html, .htm) — Phase 1 scope only.
-
-    Phase 2 replaces this with a real HTML parser.  When that happens,
-    remove this class from the registry (or remove it entirely from this module).
-    """
-
-    def can_parse(self, item: dict[str, Any]) -> bool:
-        return Path(item.get("source_path", "")).suffix.lower() in _HTML_EXTENSIONS
-
-    def parse(
-        self,
-        item: dict[str, Any],
-        tenancy: TenancyBlock,
-        parsed_at: datetime,
-        ctx: ParserContext,
-    ) -> ParseResult:
-        return _make_excluded(
-            document_id=item["document_id"],
-            content_hash=item["content_hash"],
-            tenancy=tenancy,
-            parsed_at=parsed_at,
-            document_kind=DocumentKind.html,
-            finding_code="excluded_content_type_html",
-            finding_msg=(
-                "HTML file excluded in Phase 1 (native-text PDF scope only). "
-                "Phase 2 adds HTML parsing support."
-            ),
-        )
-
-
-class SpreadsheetParser:
-    """Honest exclusion for spreadsheets (.xlsx, .xls, .csv, .ods) — Phase 1 scope only.
-
-    Phase 2 replaces this with a real spreadsheet parser.  When that happens,
-    remove this class from the registry (or remove it entirely from this module).
-    """
-
-    def can_parse(self, item: dict[str, Any]) -> bool:
-        return Path(item.get("source_path", "")).suffix.lower() in _SPREADSHEET_EXTENSIONS
-
-    def parse(
-        self,
-        item: dict[str, Any],
-        tenancy: TenancyBlock,
-        parsed_at: datetime,
-        ctx: ParserContext,
-    ) -> ParseResult:
-        return _make_excluded(
-            document_id=item["document_id"],
-            content_hash=item["content_hash"],
-            tenancy=tenancy,
-            parsed_at=parsed_at,
-            document_kind=DocumentKind.spreadsheet,
-            finding_code="excluded_content_type_spreadsheet",
-            finding_msg=(
-                "Spreadsheet excluded in Phase 1 (native-text PDF scope only). "
-                "Phase 2 adds spreadsheet triage and parsing support."
-            ),
-        )
-
-
 class FallbackUnsupportedParser:
     """Catch-all exclusion for any file type not claimed by an earlier parser.
 
@@ -275,9 +210,8 @@ class FallbackUnsupportedParser:
 
 
 # Module-level singletons
+# Note: html_parser and spreadsheet_parser are now in html.py / spreadsheet.py
 audio_parser = AudioParser()
 video_parser = VideoParser()
 cad_parser = CADParser()
-html_parser = HTMLParser()
-spreadsheet_parser = SpreadsheetParser()
 fallback_parser = FallbackUnsupportedParser()
