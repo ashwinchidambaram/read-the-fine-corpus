@@ -923,3 +923,88 @@ class TestGoldenCorpusIntegration:
             assert s1["language"] == s2["language"], (
                 f"Language mismatch at order {s1['document_order']}"
             )
+
+
+class TestTableRegionSegmentationFix:
+    """Integration tests for F-01: table regions must not be split by the heading heuristic.
+
+    Regression guard for the fix in SegmentationPass that skips ``_is_heading()``
+    when the source region carries ``detected_class_hint == "table"``.  Before the
+    fix, a table region whose first Markdown line is <= 60 chars (e.g. a pipe-header
+    like ``| Part No. | Qty Limit |``) was erroneously typed as a ``heading``
+    segment with the remainder typed as ``prose``.
+    """
+
+    def test_nested_tables_html_no_heading_from_table_region(self, tmp_path: Path) -> None:
+        """nested_tables.html: no segment sourced from a table region is typed heading or prose.
+
+        Every segment whose source_region_ids includes a table-hinted region must
+        have segment_type == 'table'.  heading and prose must not appear as artefacts
+        of the short-first-line heuristic misfiring on Markdown pipe-headers.
+        """
+        from datetime import UTC
+        from datetime import datetime as _dt
+
+        from finecorpus.contracts.parse_result import RegionClassHint
+        from finecorpus.pipeline.assess.parsers.base import ParserContext
+        from finecorpus.pipeline.assess.parsers.html import HTMLFormatParser
+
+        data = _run_pipeline_on_fixture("nested_tables.html", tmp_path)
+        seg_sets = data.get("segment_sets", [])
+        assert seg_sets, "No segment sets produced for nested_tables.html"
+        ss = seg_sets[0]
+
+        # Parse nested_tables.html directly to enumerate table-hinted region ids.
+        fixture_path = GOLDEN_CORPUS / "nested_tables.html"
+        item = {
+            "document_id": "doc-nested-check",
+            "content_hash": "deadbeef" * 8,
+            "source_path": str(fixture_path),
+        }
+        pr = HTMLFormatParser().parse(item, _TENANCY, _dt.now(UTC), ParserContext())
+
+        table_region_ids = {
+            r.region_id for r in pr.regions if r.detected_class_hint == RegionClassHint.table
+        }
+        assert table_region_ids, "No table regions found in nested_tables.html — fixture problem"
+
+        # For every segment in the decompose output, check that any segment
+        # sourced exclusively from a table-hinted region is typed as 'table'.
+        bad_segments = []
+        for seg in ss.get("segments", []):
+            src_ids = set(seg.get("source_region_ids", []))
+            if src_ids and src_ids.issubset(table_region_ids):
+                if seg["segment_type"] != "table":
+                    bad_segments.append(
+                        (seg["segment_type"], seg.get("text", "")[:60], seg["segment_id"])
+                    )
+
+        assert not bad_segments, (
+            f"Segments sourced from table regions must have segment_type='table', "
+            f"but found: {bad_segments}"
+        )
+
+    def test_nested_tables_html_table_segments_present(self, tmp_path: Path) -> None:
+        """nested_tables.html produces at least one table-typed segment."""
+        data = _run_pipeline_on_fixture("nested_tables.html", tmp_path)
+        ss = data["segment_sets"][0]
+        table_segs = [s for s in ss["segments"] if s["segment_type"] == "table"]
+        assert table_segs, (
+            f"Expected table segments in nested_tables.html; "
+            f"got types: {sorted({s['segment_type'] for s in ss['segments']})}"
+        )
+
+    def test_confluence_html_genuine_headings_still_typed_heading(self, tmp_path: Path) -> None:
+        """confluence_export.html: non-regression — genuine headings still type as heading.
+
+        The fix to skip _is_heading() for table regions must not affect non-table regions.
+        Headings in confluence_export.html (which are not from table regions) must still
+        be typed as heading.
+        """
+        data = _run_pipeline_on_fixture("confluence_export.html", tmp_path)
+        ss = data["segment_sets"][0]
+        heading_segs = [s for s in ss["segments"] if s["segment_type"] == "heading"]
+        assert heading_segs, (
+            "confluence_export.html must still produce heading segments after the fix; "
+            "found none — the heading heuristic may have been broken for non-table regions."
+        )

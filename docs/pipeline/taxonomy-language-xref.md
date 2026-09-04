@@ -181,8 +181,16 @@ Extracts a section/appendix/chapter label from the surface text using:
 ```
 (?:section|sect|appendix|chapter|§)\s*([A-Z0-9]+(?:\.[0-9]+)*)
 ```
-Searches all segments for one whose text or structural path component starts
-with the extracted label.
+Searches **all segments** (not only heading-typed ones) for one whose text or
+structural path component starts with the extracted label.
+
+> **Design note:** scanning all segments rather than only headings is
+> intentional and safe.  Section labels (e.g. "4.2", "A") are highly specific
+> token sequences; the probability of a non-heading segment accidentally
+> starting with the same label is negligible in practice.  Restricting the
+> search to headings would miss targets in corpora where heading detection
+> under-fires (e.g. ALL-CAPS headings in scanned PDFs that arrive as
+> `scanned_region` rather than `heading`).
 
 - Exactly 1 match → `resolution=resolved`, `target_segment_id` set.
 - Multiple matches → `resolution=unresolved`, `target_note` lists candidate IDs.

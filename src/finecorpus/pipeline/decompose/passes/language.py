@@ -43,9 +43,11 @@ False-positive rate for well-formed prose is very low.
 - No heavyweight runtime dependency; no network call.
 
 Open question OQ-6 (equations/formulas as ``code``): segments typed ``code``
-with mathematical content may not be in any human language.  This pass assigns
-``"und"`` to short code segments and ``"en"`` to longer English-commented code
-blocks where English stopwords are detected.  This is a heuristic; see
+with mathematical content may not be in any human language.  This pass uses
+the same two-stage algorithm for code segments as for all others — there is no
+code-segment-specific branch.  In practice: text below the 4-word floor returns
+``"und"``; code containing English stopword-keywords (``for``, ``in``, ``if``,
+etc.) may return ``"en"`` — a known ambiguity tracked as OQ-6.  See
 segment-taxonomy.md OQ-6.
 
 Phase 3+ notes
@@ -529,6 +531,17 @@ def _stopword_vote(tokens: list[str]) -> str | None:
     Requires at least ``_STOPWORD_RATIO_FLOOR`` of tokens to be stopwords in
     the winning language, and at least ``_MIN_WORDS_FOR_STOPWORD_VOTE`` total
     tokens.  Tie-breaks by absolute count.
+
+    Intentional asymmetry in the ratio denominator
+    -----------------------------------------------
+    Hits are counted via *unique* stopword matches (``len(token_set & stopwords)``
+    where ``token_set = set(tokens)``), but the ratio denominator is *total*
+    token count (``len(tokens)``).  This deliberately deflates the ratio on
+    repetitive text — e.g. a paragraph that repeats "the" 20 times contributes
+    only 1 unique hit but 20 to the denominator.  The effect is conservative:
+    repetitive or formulaic text must contain a broader *variety* of stopwords
+    to exceed the floor, reducing false-positive language assignments on boilerplate
+    or structured data that happens to repeat a single common word.
     """
     if len(tokens) < _MIN_WORDS_FOR_STOPWORD_VOTE:
         return None
@@ -538,6 +551,8 @@ def _stopword_vote(tokens: list[str]) -> str | None:
     best_count = 0
 
     for code, stopwords in _STOPWORDS.items():
+        # Unique stopword hits (set intersection) — see docstring for the
+        # intentional asymmetry with the total-token-count denominator below.
         hits = len(token_set & stopwords)
         if hits > best_count:
             best_count = hits

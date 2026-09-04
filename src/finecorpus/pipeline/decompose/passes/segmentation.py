@@ -426,7 +426,20 @@ class SegmentationPass:
                 first_line = lines[0].strip() if lines else ""
                 is_single_line_para = len(lines) == 1
 
-                if first_line and _is_heading(first_line, is_first_in_paragraph=True):
+                # Table regions must NEVER be split into heading + prose: the
+                # short-first-line heading heuristic fires on Markdown table
+                # headers (e.g. "| Part No. | Qty Limit |" = 24 chars) and
+                # produces a spurious heading segment followed by a prose
+                # remainder.  TaxonomyPass cannot correct this because heading
+                # is immutable and table is not in _HINT_TO_TYPE (correct
+                # design).  Fix here at the source: when the region carries a
+                # table hint, skip heading detection entirely and fall through
+                # to the else branch which types every paragraph as table.
+                if (
+                    not _region_is_table
+                    and first_line
+                    and _is_heading(first_line, is_first_in_paragraph=True)
+                ):
                     heading_text = first_line
 
                     if _REVISION_HISTORY_RE.match(heading_text.strip()):
