@@ -218,6 +218,29 @@ class FakeAdapter:
     def delete_alias(self, alias: str) -> None:
         self.aliases.pop(alias, None)
 
+    @staticmethod
+    def _matches_filter(payload: dict[str, Any], payload_filter: dict[str, Any]) -> bool:
+        """Return True if the point payload satisfies all exact-match filter conditions.
+
+        The filter dict uses dotted key paths (e.g. "tenancy.kb_id") mapped to
+        expected string values.  A missing key or a value mismatch causes the
+        point to be excluded from results — matching real Qdrant must-clause
+        semantics used by the retrieval service.
+
+        This enforces tenancy isolation in the FakeAdapter so tests that seed
+        multi-tenant data cannot receive cross-tenant results (§18.3 test 2).
+        """
+        for dotted_key, expected in payload_filter.items():
+            parts = dotted_key.split(".")
+            node: Any = payload
+            for part in parts:
+                if not isinstance(node, dict):
+                    return False
+                node = node.get(part)
+            if node != expected:
+                return False
+        return True
+
     def search(
         self,
         alias: str,
@@ -239,15 +262,20 @@ class FakeAdapter:
 
         points = self.collections.get(coll, {}).get("points", [])
         results: list[SearchResult] = []
-        for pt in points[:top_k]:
+        for pt in points:
+            pt_payload = pt.get("payload", {})
+            if payload_filter and not self._matches_filter(pt_payload, payload_filter):
+                continue
             results.append(
                 SearchResult(
                     point_id=str(pt.get("id", "")),
-                    chunk_id=pt.get("payload", {}).get("chunk_id", "chk_fake"),
+                    chunk_id=pt_payload.get("chunk_id", "chk_fake"),
                     score=float(pt.get("score", 1.0)),
-                    payload=pt.get("payload", {}),
+                    payload=pt_payload,
                 )
             )
+            if len(results) >= top_k:
+                break
         return results
 
     def count_points(self, collection: str) -> int:

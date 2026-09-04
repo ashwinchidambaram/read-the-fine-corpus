@@ -1,6 +1,10 @@
 """Integration tests for retrieval service against live Qdrant + Postgres.
 
-Marker: ``qdrant_integration`` — auto-skipped when Qdrant / Postgres are unreachable.
+Marker: ``qdrant_integration`` — a **composite** mark (named + skipif) provided by
+:func:`conftest.qdrant_integration_mark`.  Tests decorated with it are:
+
+- Selected by ``pytest -m qdrant_integration`` (named mark).
+- Auto-skipped when Qdrant or Postgres are unreachable (skipif).
 
 What these tests cover:
 1. Seed a tiny collection via adapter + lifecycle, query through the real
@@ -13,7 +17,7 @@ What these tests cover:
 
 Infrastructure:
 - FakeProvider: deterministic vectors; no OpenAI key required.
-- QdrantAdapter + QdrantAdapter from index.qdrant.backend.
+- QdrantAdapter from index.qdrant.backend.
 - AliasRepository over a real Postgres connection.
 - control.metadata.create_tables() for schema bootstrap.
 
@@ -31,49 +35,13 @@ from typing import Any
 
 import pytest
 
+from conftest import qdrant_integration_mark
+
 QDRANT_URL = "http://localhost:6333"
 # Override via RTFC_POSTGRES_DSN env var for CI or non-default passwords.
 POSTGRES_DSN = _os.environ.get(
     "RTFC_POSTGRES_DSN",
     "postgresql+psycopg://finecorpus:finecorpus@localhost:5432/finecorpus",
-)
-
-
-# ---------------------------------------------------------------------------
-# Reachability checks (same pattern as tests/index/test_integration.py)
-# ---------------------------------------------------------------------------
-
-
-def _qdrant_reachable() -> bool:
-    try:
-        from qdrant_client import QdrantClient
-
-        c = QdrantClient(url=QDRANT_URL, timeout=2)
-        c.get_collections()
-        return True
-    except Exception:
-        return False
-
-
-def _postgres_reachable() -> bool:
-    try:
-        from sqlalchemy import create_engine, text
-
-        dsn = _os.environ.get(
-            "RTFC_POSTGRES_DSN",
-            "postgresql+psycopg://finecorpus:finecorpus@localhost:5432/finecorpus",
-        )
-        eng = create_engine(dsn, connect_args={"connect_timeout": 2})
-        with eng.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        return True
-    except Exception:
-        return False
-
-
-qdrant_integration = pytest.mark.skipif(
-    not (_qdrant_reachable() and _postgres_reachable()),
-    reason="Qdrant or Postgres not reachable at localhost — skipping integration tests",
 )
 
 # ---------------------------------------------------------------------------
@@ -210,7 +178,7 @@ def seeded_kb(kb_id: str, engine: Any, qdrant_adapter: Any, fake_provider: Any) 
 # ---------------------------------------------------------------------------
 
 
-@qdrant_integration
+@qdrant_integration_mark
 class TestRoundTrip:
     def test_happy_path_matches(
         self,

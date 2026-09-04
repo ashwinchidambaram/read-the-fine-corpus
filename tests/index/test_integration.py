@@ -1,6 +1,8 @@
 """Integration tests for the Qdrant adapter + lifecycle (§18.3 tests 1, 6).
 
-Marker: ``qdrant_integration`` — auto-skipped when Qdrant is unreachable.
+Marker: ``qdrant_integration`` — a **composite** mark (named + skipif) from
+:func:`conftest.qdrant_integration_mark`.  Tests are auto-skipped when Qdrant
+or Postgres are unreachable, and are selectable via ``-m qdrant_integration``.
 Also exercises Postgres via the control-plane metadata module.
 
 What these tests cover:
@@ -23,6 +25,7 @@ import uuid
 import pytest
 from sqlalchemy.orm import Session
 
+from conftest import qdrant_integration_mark
 from finecorpus.contracts.chunk_id import derive_point_id
 from finecorpus.control.metadata import (
     AliasRepository,
@@ -76,20 +79,19 @@ def _postgres_reachable() -> bool:
         return False
 
 
-qdrant_integration = pytest.mark.skipif(
-    not _qdrant_reachable(),
-    reason="Qdrant not reachable at localhost:6333 (start with: docker compose up -d qdrant)",
-)
+# The qdrant_integration_mark from conftest is a composite mark:
+#   - pytest.mark.qdrant_integration  (named, so -m qdrant_integration selects it)
+#   - pytest.mark.skipif(...)         (auto-skips when services are down)
+#
+# All three original local marks (qdrant_integration, postgres_integration,
+# both_integration) required either one or both services.  All tests in this
+# module require both Qdrant *and* Postgres, so all are replaced by the single
+# composite qdrant_integration_mark which gates on both services.
 
-postgres_integration = pytest.mark.skipif(
-    not _postgres_reachable(),
-    reason="Postgres not reachable (start with: docker compose up -d postgres)",
-)
-
-both_integration = pytest.mark.skipif(
-    not (_qdrant_reachable() and _postgres_reachable()),
-    reason="Qdrant or Postgres not reachable (start with: docker compose up -d qdrant postgres)",
-)
+# Kept as module-level aliases so existing @decorator sites work without change.
+qdrant_integration = qdrant_integration_mark
+postgres_integration = qdrant_integration_mark
+both_integration = qdrant_integration_mark
 
 
 @pytest.fixture(scope="module")

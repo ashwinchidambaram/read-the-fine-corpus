@@ -35,6 +35,7 @@ from .helpers import (
     FakeAliasRepository,
     make_alias_record,
     make_chunk_payload,
+    make_provenance_payload,
 )
 
 # ---------------------------------------------------------------------------
@@ -115,6 +116,7 @@ def _run_query(
     adapter: FakeAdapter,
     alias_record: FakeAliasRecord | None,
     cache: QueryEmbeddingCache,
+    kb_id: str = KB_ID,
     query_text: str = "What is the policy?",
     top_k: int = 10,
     score_threshold: float | None = None,
@@ -130,7 +132,7 @@ def _run_query(
         return_value=fake_repo,
     ):
         return query(
-            kb_id=KB_ID,
+            kb_id=kb_id,
             query_text=query_text,
             provider=provider,
             adapter=adapter,
@@ -775,3 +777,251 @@ class TestTopKBounds:
             top_k=1,
         )
         assert len(result.results) <= 1  # type: ignore[union-attr]
+
+
+# ---------------------------------------------------------------------------
+# F-01: PAYLOAD_CORRUPT — provenance-less payload yields error, not fabrication
+# ---------------------------------------------------------------------------
+
+
+class TestPayloadCorrupt:
+    def test_missing_provenance_yields_payload_corrupt_error(
+        self,
+        provider: FakeProvider,
+        alias_record: FakeAliasRecord,
+        fresh_cache: QueryEmbeddingCache,
+    ) -> None:
+        """A payload with no provenance block must return PAYLOAD_CORRUPT, not a fabricated result.
+
+        F-01: _provenance_from_payload MUST NEVER fabricate source_document_id /
+        source_document_version.  A point without them is corrupt and must surface
+        as result_status=error with code PAYLOAD_CORRUPT.
+        """
+        # Seed a point whose payload has NO provenance block at all
+        adapter = FakeAdapter()
+        adapter.seed_collection(
+            alias=ALIAS,
+            coll=COLL,
+            points=[
+                {
+                    "id": "chk_corrupt",
+                    "score": 0.9,
+                    "payload": {
+                        "chunk_id": "chk_corrupt",
+                        "text": "some text",
+                        "tenancy": {"kb_id": KB_ID, "workspace_id": "ws-test"},
+                        # No "provenance" key at all
+                    },
+                }
+            ],
+        )
+
+        result = _run_query(
+            provider=provider,
+            adapter=adapter,
+            alias_record=alias_record,
+            cache=fresh_cache,
+        )
+
+        assert result.result_status == ResultStatus.error  # type: ignore[union-attr]
+        assert result.error is not None  # type: ignore[union-attr]
+        assert result.error.code == ErrorCode.PAYLOAD_CORRUPT  # type: ignore[union-attr]
+        assert result.error.retriable is False  # type: ignore[union-attr]
+        # Results must be empty — no fabricated provenance served
+        assert result.results == []  # type: ignore[union-attr]
+
+    def test_missing_source_document_id_yields_payload_corrupt(
+        self,
+        provider: FakeProvider,
+        alias_record: FakeAliasRecord,
+        fresh_cache: QueryEmbeddingCache,
+    ) -> None:
+        """A payload whose provenance is missing source_document_id → PAYLOAD_CORRUPT."""
+        bad_prov = make_provenance_payload()
+        bad_prov.pop("source_document_id")  # remove the mandatory field
+
+        adapter = FakeAdapter()
+        adapter.seed_collection(
+            alias=ALIAS,
+            coll=COLL,
+            points=[
+                {
+                    "id": "chk_no_doc_id",
+                    "score": 0.9,
+                    "payload": {
+                        "chunk_id": "chk_no_doc_id",
+                        "text": "text",
+                        "tenancy": {"kb_id": KB_ID, "workspace_id": "ws-test"},
+                        "provenance": bad_prov,
+                    },
+                }
+            ],
+        )
+
+        result = _run_query(
+            provider=provider,
+            adapter=adapter,
+            alias_record=alias_record,
+            cache=fresh_cache,
+        )
+
+        assert result.result_status == ResultStatus.error  # type: ignore[union-attr]
+        assert result.error.code == ErrorCode.PAYLOAD_CORRUPT  # type: ignore[union-attr]
+
+    def test_missing_source_document_version_yields_payload_corrupt(
+        self,
+        provider: FakeProvider,
+        alias_record: FakeAliasRecord,
+        fresh_cache: QueryEmbeddingCache,
+    ) -> None:
+        """A payload whose provenance is missing source_document_version → PAYLOAD_CORRUPT."""
+        bad_prov = make_provenance_payload()
+        bad_prov.pop("source_document_version")  # remove the mandatory field
+
+        adapter = FakeAdapter()
+        adapter.seed_collection(
+            alias=ALIAS,
+            coll=COLL,
+            points=[
+                {
+                    "id": "chk_no_doc_ver",
+                    "score": 0.9,
+                    "payload": {
+                        "chunk_id": "chk_no_doc_ver",
+                        "text": "text",
+                        "tenancy": {"kb_id": KB_ID, "workspace_id": "ws-test"},
+                        "provenance": bad_prov,
+                    },
+                }
+            ],
+        )
+
+        result = _run_query(
+            provider=provider,
+            adapter=adapter,
+            alias_record=alias_record,
+            cache=fresh_cache,
+        )
+
+        assert result.result_status == ResultStatus.error  # type: ignore[union-attr]
+        assert result.error.code == ErrorCode.PAYLOAD_CORRUPT  # type: ignore[union-attr]
+
+
+# ---------------------------------------------------------------------------
+# F-02: Tenancy isolation — FakeAdapter enforces payload_filter
+# (§18.3 test 2 unit-level seed)
+# ---------------------------------------------------------------------------
+
+KB_A = "kb-tenant-a"
+KB_B = "kb-tenant-b"
+ALIAS_A = alias_name(KB_A)
+ALIAS_B = alias_name(KB_B)
+SHARED_ALIAS = ALIAS_A  # both KBs share the same search alias for the test
+SHARED_COLL = f"rtfc_{KB_A.replace('-', '').lower()}_00000001"
+
+
+class TestTenancyIsolation:
+    """§18.3 test 2 — adversarial multi-tenant seed: KB-A query must NEVER return KB-B results."""
+
+    def _build_multi_tenant_adapter(self) -> FakeAdapter:
+        """Seed a single collection with points from two different tenants."""
+        adapter = FakeAdapter()
+        points = [
+            make_chunk_payload(chunk_id="chk_a_001", text="KB-A chunk 1.", kb_id=KB_A, score=0.9),
+            make_chunk_payload(chunk_id="chk_a_002", text="KB-A chunk 2.", kb_id=KB_A, score=0.85),
+            make_chunk_payload(chunk_id="chk_b_001", text="KB-B chunk 1.", kb_id=KB_B, score=0.95),
+            make_chunk_payload(chunk_id="chk_b_002", text="KB-B chunk 2.", kb_id=KB_B, score=0.92),
+        ]
+        adapter.seed_collection(alias=ALIAS_A, coll=SHARED_COLL, points=points)
+        return adapter
+
+    def test_kb_a_query_returns_zero_kb_b_results(
+        self,
+        provider: FakeProvider,
+        fresh_cache: QueryEmbeddingCache,
+    ) -> None:
+        """Query scoped to KB-A must return ZERO results whose tenancy.kb_id is KB-B."""
+        alias_record = make_alias_record(KB_A, model_id=MODEL_ID, dimensions=DIMENSIONS)
+        adapter = self._build_multi_tenant_adapter()
+
+        result = _run_query(
+            provider=provider,
+            adapter=adapter,
+            alias_record=alias_record,
+            cache=fresh_cache,
+            kb_id=KB_A,
+        )
+
+        assert result.result_status == ResultStatus.matches  # type: ignore[union-attr]
+        for r in result.results:  # type: ignore[union-attr]
+            assert r.chunk_id.startswith("chk_a_"), (
+                f"KB-B chunk '{r.chunk_id}' leaked into KB-A query results — "
+                "tenancy isolation breach!"
+            )
+
+    def test_kb_a_query_returns_only_kb_a_chunks(
+        self,
+        provider: FakeProvider,
+        fresh_cache: QueryEmbeddingCache,
+    ) -> None:
+        """Query scoped to KB-A must contain exactly the KB-A chunks (not KB-B's)."""
+        alias_record = make_alias_record(KB_A, model_id=MODEL_ID, dimensions=DIMENSIONS)
+        adapter = self._build_multi_tenant_adapter()
+
+        result = _run_query(
+            provider=provider,
+            adapter=adapter,
+            alias_record=alias_record,
+            cache=fresh_cache,
+            kb_id=KB_A,
+        )
+
+        chunk_ids = {r.chunk_id for r in result.results}  # type: ignore[union-attr]
+        assert "chk_b_001" not in chunk_ids
+        assert "chk_b_002" not in chunk_ids
+        assert "chk_a_001" in chunk_ids or "chk_a_002" in chunk_ids
+
+
+# ---------------------------------------------------------------------------
+# F-07: Cache emptiness assertion at start of mismatch test
+# ---------------------------------------------------------------------------
+
+
+class TestMismatchCacheGuarantee:
+    """Extends TestModelMismatch.test_mismatch_provider_never_called with cache emptiness."""
+
+    def test_mismatch_provider_never_called_with_empty_cache(
+        self,
+        adapter_with_chunks: FakeAdapter,
+    ) -> None:
+        """On mismatch the provider's embed_batch must never be called.
+
+        F-07: Assert the cache is empty at the start so the test cannot pass via a
+        stale cache hit (the 'never called' assertion would be vacuously true
+        if the cache already held the vector).
+        """
+        # Start with a freshly created (empty) cache — assert emptiness explicitly
+        fresh_cache = QueryEmbeddingCache(ttl_seconds=3600, max_entries=128, enabled=True)
+        assert fresh_cache.size == 0, "Cache must be empty at the start of this test"
+
+        provider = FakeProvider(dimensions=DIMENSIONS, model_id=MODEL_ID)
+        alias_record = make_alias_record(KB_ID, model_id="other-model", dimensions=128)
+
+        embed_calls: list[bool] = []
+        original_embed = provider.embed_batch
+
+        def counting_embed(texts: list, model_id: str) -> object:
+            embed_calls.append(True)
+            return original_embed(texts, model_id)
+
+        provider.embed_batch = counting_embed  # type: ignore[method-assign]
+
+        _run_query(
+            provider=provider,
+            adapter=adapter_with_chunks,
+            alias_record=alias_record,
+            cache=fresh_cache,
+        )
+        assert len(embed_calls) == 0, "embed_batch must NOT be called on model mismatch"
+        # Cache must still be empty — no vector was stored (no embed happened)
+        assert fresh_cache.size == 0, "Cache must remain empty after a mismatch (no embed ran)"

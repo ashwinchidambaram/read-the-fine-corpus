@@ -451,6 +451,8 @@ class TestKBStatus:
         assert "ready" in body
         assert "embedding_model" in body
         assert "embedding_dimensions" in body
+        # C-3 hygiene: collection_name is NOT exposed in the public status response
+        assert "collection_name" not in body
 
     def test_status_ready_when_promoted(
         self,

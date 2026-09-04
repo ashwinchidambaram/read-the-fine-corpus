@@ -80,7 +80,7 @@ from finecorpus.index.adapter import (
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = "1.0.0"
+_SCHEMA_VERSION = "1.1.0"
 _TOP_K_MAX = 100
 _TOP_K_DEFAULT = 10
 
@@ -143,26 +143,54 @@ def _tenancy_applied_filter(scope: TenancyScope) -> AppliedFilter:
 # ---------------------------------------------------------------------------
 
 
-def _provenance_from_payload(payload: dict[str, Any]) -> Provenance:
+class _PayloadCorruptError(Exception):
+    """Raised by _provenance_from_payload when a point payload is corrupt.
+
+    A corrupt point is one that is missing the mandatory provenance identity
+    fields (source_document_id or source_document_version).  Rather than
+    fabricating these values the service fails closed with PAYLOAD_CORRUPT.
+    """
+
+    def __init__(self, chunk_id: str, missing: str) -> None:
+        self.chunk_id = chunk_id
+        self.missing = missing
+        super().__init__(f"Point '{chunk_id}' has corrupt payload: missing provenance.{missing}")
+
+
+def _provenance_from_payload(payload: dict[str, Any], chunk_id: str) -> Provenance:
     """Reconstruct a Provenance model from a Qdrant point payload.
 
     The payload stores the full §8 provenance block as a plain dict (written
     by ``build_point_payload`` at ingest time). This function reconstructs it
     so the RetrievalResult carries the contract type.
 
-    If the payload is missing or malformed (e.g. from test data), a minimal
-    valid Provenance is constructed rather than raising, so that a bad payload
-    doesn't convert a ``matches`` result into an ``error``.
+    A payload that is missing the mandatory identity fields (source_document_id
+    or source_document_version) is **corrupt** — these values MUST NOT be
+    fabricated.  The function raises _PayloadCorruptError instead, and the
+    caller maps that to result_status=error / PAYLOAD_CORRUPT.
 
     Args:
         payload: Full Qdrant point payload dict.
+        chunk_id: The point/chunk identifier used for logging.
 
     Returns:
         Provenance instance.
+
+    Raises:
+        _PayloadCorruptError: If source_document_id or source_document_version
+            are absent or empty in the provenance block.
     """
     prov = payload.get("provenance", {})
     if not isinstance(prov, dict):
         prov = {}
+
+    # Mandatory identity fields — NEVER fabricate (F-01).
+    source_document_id = prov.get("source_document_id")
+    if not source_document_id:
+        raise _PayloadCorruptError(chunk_id=chunk_id, missing="source_document_id")
+    source_document_version = prov.get("source_document_version")
+    if not source_document_version:
+        raise _PayloadCorruptError(chunk_id=chunk_id, missing="source_document_version")
 
     # SourceLocation
     loc_data = prov.get("source_location", {})
@@ -265,8 +293,8 @@ def _provenance_from_payload(payload: dict[str, Any]) -> Provenance:
             pass
 
     return Provenance(
-        source_document_id=prov.get("source_document_id") or "unknown",
-        source_document_version=prov.get("source_document_version") or "unknown",
+        source_document_id=source_document_id,
+        source_document_version=source_document_version,
         source_location=source_location,
         structural_path=prov.get("structural_path", []),
         transformations=transformations,
@@ -392,7 +420,7 @@ def query(
         return _error_response(
             query_text,
             filters_applied,
-            ErrorCode.VECTOR_DB_UNAVAILABLE,
+            ErrorCode.CONTROL_PLANE_UNAVAILABLE,
             "Control-plane database unavailable.",
             retriable=True,
         )
@@ -552,7 +580,24 @@ def query(
     for sr in kept:
         payload = sr.payload or {}
         text = payload.get("text", "")
-        provenance = _provenance_from_payload(payload)
+        try:
+            provenance = _provenance_from_payload(payload, chunk_id=sr.chunk_id)
+        except _PayloadCorruptError as exc:
+            logger.error(
+                "PAYLOAD_CORRUPT: point '%s' (chunk_id='%s') missing provenance.%s — "
+                "skipping result and returning error",
+                sr.point_id,
+                sr.chunk_id,
+                exc.missing,
+            )
+            return _error_response(
+                query_text,
+                effective_filters,
+                ErrorCode.PAYLOAD_CORRUPT,
+                f"A retrieved point has a corrupt payload: missing provenance.{exc.missing}. "
+                f"Re-ingest the affected document to repair.",
+                retriable=False,
+            )
 
         retrieval_results.append(
             RetrievalResult(

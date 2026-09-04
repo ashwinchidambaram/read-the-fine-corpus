@@ -195,15 +195,16 @@ class QueryRequest(BaseModel):
 
 
 class KBStatusResponse(BaseModel):
-    """GET /v1/kb/{kb_id}/status response body."""
+    """GET /v1/kb/{kb_id}/status response body.
+
+    C-3 hygiene: collection_name is an internal implementation detail and is
+    NOT exposed in the public status response.  Consumers should use alias +
+    ready + model identity to determine queryability.
+    """
 
     kb_id: str = Field(description="The knowledge-base ID.")
     alias: str = Field(
         description="The stable alias name used for all queries (e.g. 'rtfc_{kb_id}')."
-    )
-    collection_name: str | None = Field(
-        default=None,
-        description="Current live collection name. Null if no promotion has occurred yet.",
     )
     embedding_provider: str | None = Field(
         default=None,
@@ -249,6 +250,8 @@ _ERROR_CODE_TO_HTTP: dict[ErrorCode, int] = {
     ErrorCode.KB_NOT_READY: 404,
     ErrorCode.PERMISSION_DENIED: 403,
     ErrorCode.INVALID_QUERY: 422,
+    ErrorCode.CONTROL_PLANE_UNAVAILABLE: 503,
+    ErrorCode.PAYLOAD_CORRUPT: 500,
 }
 
 
@@ -319,7 +322,6 @@ def kb_status(
     return KBStatusResponse(
         kb_id=status.kb_id,
         alias=status.alias,
-        collection_name=status.collection_name,
         embedding_provider=status.embedding_provider,
         embedding_model=status.embedding_model,
         embedding_dimensions=status.embedding_dimensions,

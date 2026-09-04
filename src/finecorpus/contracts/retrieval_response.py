@@ -60,6 +60,8 @@ class ErrorCode(StrEnum):
     EMBEDDING_MODEL_MISMATCH and VECTOR_DB_UNAVAILABLE are the two §15 fail-closed
     paths most likely to be mishandled as "empty result"; they MUST surface as
     result_status=error, never as no_matches.
+
+    Schema version: 1.1 (CONTROL_PLANE_UNAVAILABLE and PAYLOAD_CORRUPT added).
     """
 
     EMBEDDING_MODEL_MISMATCH = "EMBEDDING_MODEL_MISMATCH"
@@ -74,6 +76,11 @@ class ErrorCode(StrEnum):
     """Authenticated principal has no access to the requested scope."""
     INVALID_QUERY = "INVALID_QUERY"
     """Malformed request."""
+    CONTROL_PLANE_UNAVAILABLE = "CONTROL_PLANE_UNAVAILABLE"
+    """Control-plane database (Postgres) unreachable at query time — fail closed, retriable."""
+    PAYLOAD_CORRUPT = "PAYLOAD_CORRUPT"
+    """A Qdrant point payload is missing required provenance fields (source_document_id /
+    source_document_version).  The point is corrupt and cannot be served safely."""
 
 
 # ---------------------------------------------------------------------------
