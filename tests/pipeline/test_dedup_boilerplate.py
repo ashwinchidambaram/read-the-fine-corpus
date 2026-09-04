@@ -16,6 +16,7 @@ Test coverage:
 
 from __future__ import annotations
 
+import os
 import pathlib
 import shutil
 from datetime import UTC, datetime
@@ -53,8 +54,13 @@ def _run_pipeline_over_subset(
     src_dir = tmp_path / "corpus"
     src_dir.mkdir()
 
-    for name in fixture_names:
-        shutil.copy2(FIXTURE_CORPUS / name, src_dir / name)
+    for i, name in enumerate(fixture_names):
+        dest = src_dir / name
+        shutil.copy2(FIXTURE_CORPUS / name, dest)
+        # Pin mtimes in list order: primacy election reads source_modified_at from
+        # st_mtime, and git checkout does not preserve fixture mtimes on CI.
+        mtime_ns = int(datetime(2026, 8, 1 + i, tzinfo=UTC).timestamp() * 1_000_000_000)
+        os.utime(dest, ns=(mtime_ns, mtime_ns))
 
     # We need to pass index_superseded_versions through the orchestrator.
     # The DecomposeStage constructor accepts it directly; for the full pipeline we
