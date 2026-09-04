@@ -221,19 +221,30 @@ class TestMandatoryCategoryCompleteness:
     def test_unservable_set_covers_required_types(
         self, fixture_entries: list[dict[str, Any]]
     ) -> None:
-        """Unservable set must include encrypted PDF, audio, video, image-only, and CAD."""
+        """Unservable set must include encrypted PDF, audio, video, and CAD.
+
+        Phase 2 note: image-only PDFs are now handled via OCR (pdf_scanned_parser)
+        and are no longer unservable — image_only.pdf has expected_triage_class=scanned_pdf
+        and is processed successfully.  The required unservable set no longer includes
+        image_only_pdf; the scanned_pdf triage class is verified separately.
+        """
         unservable = [e for e in fixture_entries if "unservable" in e.get("role", "").lower()]
         classes = {e.get("expected_triage_class", "") for e in unservable}
         required_classes = {
             "encrypted_pdf",
             "audio",
             "video",
-            "image_only_pdf",
             "cad_binary",
         }
         missing = required_classes - classes
         assert not missing, (
             f"Unservable set is missing triage classes: {missing}. Present: {classes}"
+        )
+        # Phase 2: scanned_pdf must now be present in the overall corpus (via OCR)
+        all_classes = {e.get("expected_triage_class", "") for e in fixture_entries}
+        assert "scanned_pdf" in all_classes, (
+            "Phase 2: scanned_pdf triage class must be present in the corpus "
+            "(image-only PDFs are now OCR-parsed, not unservable)"
         )
 
     def test_spreadsheet_three_kinds_present(self, fixture_entries: list[dict[str, Any]]) -> None:

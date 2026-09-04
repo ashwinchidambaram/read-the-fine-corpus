@@ -1,14 +1,22 @@
-"""Segmentation pass for the Decompose stage (Phase 1).
+"""Segmentation pass for the Decompose stage (Phase 1 + Phase 2 scanned).
 
 Produces the initial segment list from raw region text in the parse result.
 
-Behaviour (identical to the original monolithic stage.py decomposition logic):
+Behaviour:
   - Iterates regions in document order.
   - Empty/failed regions → ExclusionRecord (parse_failed or empty_region).
-  - Non-empty regions → paragraph splitting on blank lines.
+  - Non-empty regions:
+      * Native-text regions → paragraph splitting on blank lines (Phase 1).
+      * Scanned regions (ocr_confidence present):
+          - confidence >= ocr_sub_decompose_confidence_floor (default 0.85):
+            paragraph segmentation applied; each sub-segment carries
+            ocr_confidence from the source region (OQ-4).
+          - confidence < ocr_sub_decompose_confidence_floor:
+            one scanned_region segment per page (OQ-4 default).
   - Too-short paragraphs (< _MIN_SEGMENT_CHARS chars) → ExclusionRecord (too_short).
   - Heading detection via line-level heuristics (Phase 1 — see decompose.md).
-  - Segment types: heading, front_matter, revision_history, prose, unknown.
+  - Segment types: heading, front_matter, revision_history, prose, unknown,
+    scanned_region (for below-threshold OCR pages).
   - Cross-reference detection (surface-text match; unresolved in Phase 1).
   - Structural path breadcrumb maintained across headings.
   - document_order: dense, gapless, 0-based.
@@ -16,15 +24,13 @@ Behaviour (identical to the original monolithic stage.py decomposition logic):
 HEADING DETECTION LIMITS — see docs/pipeline/decompose.md for the full
 honest assessment.
 
-This pass does NOT assign salience — that is handled by ``SaliencePass``.
-Segments emitted here have ``salience_tier`` and ``salience_signals`` left
-as stubs; ``SaliencePass`` fills them in.
-
-Actually, for simplicity and to keep behavior 100% identical, this pass sets
-both segment type AND salience in one step (matching original stage.py) since
-salience is derived directly from segment type with no ML.  The SaliencePass
-then becomes a no-op for Phase 1 but is present in the pipeline as the
-designated extension point.
+Salience assignment
+-------------------
+This pass sets ``salience_tier`` and ``salience_signals`` inline (matching the
+original stage.py behaviour).  ``SaliencePass`` then applies OCR-specific
+overrides: it reads ``ocr_confidence`` on scanned_region segments and adjusts
+the tier per the configured thresholds (floor → excluded, warn → supporting +
+flag).  The winning signal on the segment is updated accordingly.
 """
 
 from __future__ import annotations
@@ -315,6 +321,52 @@ class SegmentationPass:
             if first_page_num is None:
                 first_page_num = page_num
 
+            # ------------------------------------------------------------------
+            # Scanned-region handling (Phase 2 OCR path)
+            # ------------------------------------------------------------------
+            region_ocr_confidence: float | None = region.get("ocr_confidence")
+            is_scanned_region = region_ocr_confidence is not None
+
+            if is_scanned_region:
+                sub_decompose_floor = doc_ctx.ocr_sub_decompose_confidence_floor
+                if region_ocr_confidence < sub_decompose_floor:  # type: ignore[operator]
+                    # Below sub-decompose threshold → one scanned_region segment per page (OQ-4)
+                    seg_loc = SourceLocation(
+                        locator_kind=LocatorKind.page,
+                        page_start=page_num,
+                        page_end=page_num,
+                    )
+                    path_key = tuple(structural_path)
+                    seg_path = _build_segment_path(structural_path, path_ordinals[path_key])
+                    path_ordinals[path_key] += 1
+                    prior_signal = _type_prior_signal(SegmentType.scanned_region)
+                    new_segments.append(
+                        Segment(
+                            segment_id=_segment_id(document_id, doc_order),
+                            document_order=doc_order,
+                            segment_type=SegmentType.scanned_region,
+                            salience_tier=_TYPE_TO_TIER[SegmentType.scanned_region],
+                            structural_path=list(structural_path),
+                            segment_path=seg_path,
+                            location=seg_loc,
+                            source_region_ids=[region_id],
+                            language="und",
+                            ocr_confidence=region_ocr_confidence,
+                            injection_suspicion=0.0,
+                            invisible_content_flags=[],
+                            sensitivity_flags=[],
+                            salience_signals=[prior_signal],
+                            salience_basis=SalienceSignalKind.segment_type_prior,
+                            text=text.strip(),
+                        )
+                    )
+                    doc_order += 1
+                    if not first_page_done and page_num == first_page_num:
+                        first_page_done = True
+                    continue
+                # else: confidence >= sub_decompose_floor → fall through to paragraph
+                # segmentation below, with ocr_confidence propagated to each segment.
+
             paragraphs = _split_into_paragraphs(text)
 
             for para_idx, para_text in enumerate(paragraphs):
@@ -360,7 +412,7 @@ class SegmentationPass:
                             location=seg_loc,
                             source_region_ids=[region_id],
                             language="und",
-                            ocr_confidence=None,
+                            ocr_confidence=region_ocr_confidence,  # propagated from OCR region
                             injection_suspicion=0.0,
                             invisible_content_flags=[],
                             sensitivity_flags=[],
@@ -393,7 +445,7 @@ class SegmentationPass:
                                 location=seg_loc,
                                 source_region_ids=[region_id],
                                 language="und",
-                                ocr_confidence=None,
+                                ocr_confidence=region_ocr_confidence,  # propagated from OCR region
                                 injection_suspicion=0.0,
                                 invisible_content_flags=[],
                                 sensitivity_flags=[],
@@ -477,7 +529,7 @@ class SegmentationPass:
                             location=seg_loc,
                             source_region_ids=[region_id],
                             language="und",
-                            ocr_confidence=None,
+                            ocr_confidence=region_ocr_confidence,  # propagated from OCR region
                             injection_suspicion=0.0,
                             invisible_content_flags=[],
                             sensitivity_flags=[],

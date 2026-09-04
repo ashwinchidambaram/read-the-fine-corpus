@@ -1,17 +1,24 @@
-"""Native-text PDF parser (Phase 1).
+"""Native-text PDF parser (Phase 2).
 
-Handles .pdf files using pypdf text extraction.
+Handles .pdf files using pypdf text extraction.  Image-only PDFs are claimed
+by ``ScannedPDFParser`` (placed before this parser in the registry) and never
+reach this parser.  Mixed PDFs — where most pages have native text but one or
+more pages consist of an embedded raster image with little or no text — are
+handled here: scanned pages are OCR'd using the shared helper from
+``pdf_scanned``, the document is classified ``document_kind=mixed_pdf``, and a
+``mixed_pdf`` finding is emitted.
 
-Behaviour (identical to the original monolithic stage.py logic):
+Behaviour:
   - Encrypted before open  → parse_status=failed, finding=password_protected
   - Encrypted after open   → parse_status=failed, finding=password_protected
   - Unreadable             → parse_status=unreadable, finding=parse_error
   - Zero pages             → parse_status=failed, finding=empty_document
-  - Image-only (0 chars)   → parse_status=failed, finding=unservable_image_only,
-                             document_kind=scanned_pdf
   - All pages failed       → parse_status=failed, finding=parse_error
   - Some pages failed      → parse_status=partial, per-page findings
-  - Clean extraction       → parse_status=parsed
+  - Mixed (native + scanned pages) → parse_status=parsed/partial,
+                             document_kind=mixed_pdf, finding=mixed_pdf,
+                             scanned pages OCR'd with per-region ocr_confidence
+  - Clean native extraction → parse_status=parsed, document_kind=native_pdf
 
 Quality scoring constants are read from ``ParserContext`` (executor-defined;
 documented in docs/pipeline/assess.md).
@@ -53,7 +60,21 @@ from finecorpus.contracts.shared.blocks import (
     TenancyBlock,
 )
 from finecorpus.pipeline.assess.parsers.base import ParserContext
+
+# Shared OCR helpers — imported from pdf_scanned to avoid duplication.
+# These are kept in the parsers package (not a public API).
+from finecorpus.pipeline.assess.parsers.pdf_scanned import (
+    _extract_page_image,
+    _ocr_page_confidence,
+    _tesseract_available,
+)
 from finecorpus.pipeline.assess.security import detect_invisible_content
+
+# ---------------------------------------------------------------------------
+# Logger
+# ---------------------------------------------------------------------------
+
+_LOG = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -256,9 +277,11 @@ def _make_failed(
 class NativePDFParser:
     """Native-text PDF parser using pypdf.
 
-    Satisfies the ``FormatParser`` protocol.  Claims all ``.pdf`` files.
-    Future OCR parser should be inserted **before** this one in the registry
-    to handle image-only PDFs (it can detect them and take over).
+    Satisfies the ``FormatParser`` protocol.  Claims all ``.pdf`` files not
+    already claimed by ``ScannedPDFParser`` (image-only PDFs are intercepted
+    before reaching this parser).  Mixed PDFs — pages with embedded images
+    and insufficient native text — are detected per-page and those pages are
+    OCR'd via the shared helper from ``pdf_scanned``.
     """
 
     def can_parse(self, item: dict[str, Any]) -> bool:
@@ -337,6 +360,9 @@ class NativePDFParser:
                 finding_severity=FindingSeverity.warning,
             )
 
+        # Determine tesseract availability once up front (cheap shutil.which call).
+        tesseract_ok = _tesseract_available()
+
         # Per-page extraction
         pages: list[PageResult] = []
         regions: list[RegionResult] = []
@@ -345,6 +371,8 @@ class NativePDFParser:
         page_char_counts: list[int] = []
         page_failures: list[int] = []
         any_success = False
+        # Mixed-PDF tracking: pages that were detected as scanned and OCR'd.
+        mixed_page_nums: list[int] = []
 
         for page_idx, page in enumerate(reader.pages):
             page_num = page_idx + 1
@@ -409,10 +437,69 @@ class NativePDFParser:
                 )
                 continue
 
-            char_count = len(text)
-            page_char_counts.append(char_count)
+            char_count = len(text.strip())
 
-            if char_count > 0:
+            # ------------------------------------------------------------------
+            # Mixed-PDF detection: page has an embedded image AND the native
+            # text is below threshold (i.e. the page content is primarily the
+            # raster image, not native text).  Such pages are OCR'd when
+            # tesseract is available.
+            # ------------------------------------------------------------------
+            pil_image = _extract_page_image(page)
+            is_scanned_page = pil_image is not None and char_count < ctx.min_chars_per_page
+
+            if is_scanned_page and tesseract_ok:
+                # OCR the embedded image; combine with any native caption text.
+                try:
+                    ocr_text, ocr_confidence = _ocr_page_confidence(pil_image)
+                except Exception as exc:  # noqa: BLE001
+                    _LOG.warning("Page %d OCR failed in mixed-PDF: %s", page_num, exc)
+                    ocr_text, ocr_confidence = "", 0.0
+
+                # Combined text: native caption (if any) + OCR body.
+                combined_parts = [p for p in (text.strip(), ocr_text.strip()) if p]
+                combined_text = "\n".join(combined_parts)
+                combined_chars = len(combined_text)
+
+                page_char_counts.append(combined_chars)
+                if combined_chars > 0:
+                    any_success = True
+
+                mixed_page_nums.append(page_num)
+                extraction_ratio = (
+                    min(1.0, combined_chars / ctx.min_chars_per_page) if combined_chars > 0 else 0.0
+                )
+                pages.append(
+                    PageResult(
+                        page_number=page_num,
+                        is_scanned=True,
+                        ocr_confidence=ocr_confidence,
+                        extraction_ratio=round(extraction_ratio, 4),
+                        invisible_content=[],
+                    )
+                )
+                extract_status = ExtractStatus.ok if combined_chars > 0 else ExtractStatus.empty
+                regions.append(
+                    RegionResult(
+                        region_id=region_id,
+                        location=page_loc,
+                        text=combined_text if combined_chars > 0 else None,
+                        extract_status=extract_status,
+                        ocr_confidence=ocr_confidence,
+                        language=None,
+                        detected_class_hint=RegionClassHint.other,
+                        encoding_issue=False,
+                    )
+                )
+                continue
+
+            # ------------------------------------------------------------------
+            # Normal native-text page path.
+            # ------------------------------------------------------------------
+            full_char_count = len(text)
+            page_char_counts.append(full_char_count)
+
+            if full_char_count > 0:
                 any_success = True
 
             page_encoding_issues = _detect_encoding_issues(text, page_num)
@@ -420,7 +507,7 @@ class NativePDFParser:
             has_encoding_issue = len(page_encoding_issues) > 0
 
             extraction_ratio = (
-                min(1.0, char_count / ctx.min_chars_per_page) if char_count > 0 else 0.0
+                min(1.0, full_char_count / ctx.min_chars_per_page) if full_char_count > 0 else 0.0
             )
             pages.append(
                 PageResult(
@@ -432,21 +519,25 @@ class NativePDFParser:
                 )
             )
 
-            extract_status = ExtractStatus.ok if char_count > 0 else ExtractStatus.empty
+            extract_status = ExtractStatus.ok if full_char_count > 0 else ExtractStatus.empty
             regions.append(
                 RegionResult(
                     region_id=region_id,
                     location=page_loc,
-                    text=text if char_count > 0 else None,
+                    text=text if full_char_count > 0 else None,
                     extract_status=extract_status,
                     ocr_confidence=None,
                     language=None,
-                    detected_class_hint=RegionClassHint.prose if char_count > 0 else None,
+                    detected_class_hint=RegionClassHint.prose if full_char_count > 0 else None,
                     encoding_issue=has_encoding_issue,
                 )
             )
 
         total_extracted_chars = sum(page_char_counts)
+        # Note: image_only path is no longer reachable here — image-only PDFs are
+        # claimed by ScannedPDFParser before reaching NativePDFParser.  The check
+        # is kept as a defensive fallback for edge cases (e.g. tesseract absent on
+        # a mixed PDF where all non-scanned pages also have zero text).
         image_only = total_pages > 0 and total_extracted_chars == 0 and not page_failures
 
         if image_only:
@@ -474,8 +565,7 @@ class NativePDFParser:
                         location=None,
                         message=(
                             "All pages yielded zero text. This appears to be an image-only PDF "
-                            "(scanned or rasterized). OCR is required to extract content — "
-                            "Phase 2 will add OCR support."
+                            "(scanned or rasterized). Run OCR via ScannedPDFParser."
                         ),
                     )
                 ],
@@ -509,11 +599,45 @@ class NativePDFParser:
                 ],
             )
 
+        # Determine document_kind: mixed_pdf when at least one page was OCR'd.
+        has_mixed_pages = bool(mixed_page_nums)
         parse_status = ParseStatus.partial if page_failures else ParseStatus.parsed
-        document_kind = DocumentKind.native_pdf
+        document_kind = DocumentKind.mixed_pdf if has_mixed_pages else DocumentKind.native_pdf
         quality = _compute_quality(page_char_counts, total_pages, ctx)
 
+        # For mixed PDFs, populate mean_ocr_confidence from OCR'd pages so
+        # downstream consumers can inspect the OCR quality distribution.
+        if has_mixed_pages:
+            ocr_page_confs = [
+                p.ocr_confidence for p in pages if p.is_scanned and p.ocr_confidence is not None
+            ]
+            if ocr_page_confs:
+                mean_ocr = round(sum(ocr_page_confs) / len(ocr_page_confs), 6)
+                quality = QualityScore(
+                    overall=quality.overall,
+                    text_extraction_ratio=quality.text_extraction_ratio,
+                    table_structure_retained=quality.table_structure_retained,
+                    is_near_empty=quality.is_near_empty,
+                    mean_ocr_confidence=mean_ocr,
+                )
+
         findings: list[Finding] = []
+
+        if has_mixed_pages:
+            findings.append(
+                Finding(
+                    code="mixed_pdf",
+                    severity=FindingSeverity.info,
+                    location=None,
+                    message=(
+                        f"Document contains {len(mixed_page_nums)} scanned page(s) "
+                        f"embedded in a native-text PDF "
+                        f"(page(s): {', '.join(str(p) for p in mixed_page_nums)}). "
+                        "Those pages were OCR'd; per-region ocr_confidence is set."
+                    ),
+                )
+            )
+
         if page_failures:
             for pf in page_failures:
                 findings.append(
