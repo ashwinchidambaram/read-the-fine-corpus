@@ -426,7 +426,6 @@ class ScannedPDFParser:
         regions: list[RegionResult] = []
         page_confidences: list[float] = []
         page_texts: list[str] = []
-        low_confidence_pages: list[int] = []
         any_text = False
 
         for page_idx, pdf_page in enumerate(reader.pages):
@@ -509,13 +508,6 @@ class ScannedPDFParser:
                 )
             )
 
-            # Track low-confidence pages for findings (threshold from config)
-            # We use a conservative check here so findings are always reported;
-            # the salience pass uses the authoritative configured thresholds.
-            _DEFAULT_WARN_LEVEL = 0.80
-            if confidence < _DEFAULT_WARN_LEVEL:
-                low_confidence_pages.append(page_num)
-
         # ------------------------------------------------------------------
         # 4. Build quality score
         # ------------------------------------------------------------------
@@ -543,8 +535,9 @@ class ScannedPDFParser:
         if page_confidences:
             min_conf_page = page_confidences.index(min(page_confidences)) + 1
             min_conf_val = min(page_confidences)
-            _DEFAULT_FLOOR = 0.60
-            if min_conf_val < _DEFAULT_FLOOR:
+            floor = ctx.ocr_confidence_exclude_floor
+            warn = ctx.ocr_confidence_warn_level
+            if min_conf_val < floor:
                 findings.append(
                     Finding(
                         code="low_ocr_confidence",
@@ -556,12 +549,12 @@ class ScannedPDFParser:
                         ),
                         message=(
                             f"Page {min_conf_page} has OCR confidence {min_conf_val:.2f} "
-                            f"(below exclude floor 0.60). Text from this page is unreliable "
+                            f"(below exclude floor {floor:.2f}). Text from this page is unreliable "
                             "and will be assigned 'excluded' salience tier."
                         ),
                     )
                 )
-            elif min_conf_val < 0.80:
+            elif min_conf_val < warn:
                 findings.append(
                     Finding(
                         code="low_ocr_confidence",
@@ -573,7 +566,7 @@ class ScannedPDFParser:
                         ),
                         message=(
                             f"Page {min_conf_page} has OCR confidence {min_conf_val:.2f} "
-                            f"(below warn level 0.80). Text from this page is down-weighted "
+                            f"(below warn level {warn:.2f}). Text from this page is down-weighted "
                             "to 'supporting' salience tier and flagged."
                         ),
                     )

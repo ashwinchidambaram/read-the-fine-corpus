@@ -38,7 +38,6 @@ FIXTURE_CORPUS = pathlib.Path(__file__).parent.parent / "fixtures" / "golden" / 
 
 NATIVE_PDF_FIXTURES = [
     "clean_native.pdf",
-    "bloated_manual.pdf",
     "boilerplate_a.pdf",
     "boilerplate_b.pdf",
     "form_filled.pdf",
@@ -46,7 +45,15 @@ NATIVE_PDF_FIXTURES = [
     "policy_v2.pdf",
     "policy_v3.pdf",
 ]
-"""Fixtures that pypdf can extract text from (native-text PDFs)."""
+"""Fixtures that pypdf can extract text from (pure native-text PDFs, no embedded rasters)."""
+
+MIXED_PDF_FIXTURES = [
+    "bloated_manual.pdf",
+]
+"""Fixtures that are mixed PDFs (native-text pages + embedded scanned/rasterized pages).
+Phase 2: these are classified as document_kind=mixed_pdf, not native_pdf.
+The scanned pages are OCR'd so their segments may exceed pypdf-only extraction counts.
+"""
 
 UNSERVABLE_FIXTURES = [
     "audio_stub.wav",
