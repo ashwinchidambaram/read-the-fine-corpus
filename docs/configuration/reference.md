@@ -140,6 +140,16 @@ These govern the Assess (Stage 2) and Decompose (Stage 3) stages. They are platf
 
 > **Note on the ingestion config:** per-class settings (chunking strategy, transformation tiers, embedding override, salience filters) live in the **ingestion config** — a KB-level artifact produced by the Plan stage, not in `corpus.yaml`. The ingestion config is described in `docs/contracts/ingestion-config.md`. Do not duplicate per-class values here; reference the ingestion config contract instead. The settings above are platform-level assessment defaults that apply before a KB's ingestion config exists.
 
+> **Note on `artifacts_root`:** the root directory for pipeline stage artifacts is **not** a
+> `corpus.yaml` key. It is a direct parameter to `run_pipeline()` and to the `corpus pipeline
+> run` CLI via the `--artifacts DIR` flag. Rationale: pipeline artifacts are ephemeral local
+> files tied to a specific run (written under `<artifacts_root>/<run_id>/`), not a persistent
+> storage backend configured alongside databases and object stores. Exposing it through the
+> config would conflate two different concerns — long-lived infrastructure configuration and
+> per-invocation working-directory selection. In production, `ingest-worker` will supply an
+> appropriate artifacts root (local temp directory or a mounted job scratch volume) at job
+> dispatch time, not from `corpus.yaml`.
+
 ### 2.6 Index lifecycle and retention
 
 | Key path | Type | Default | Spec § | Source |

@@ -55,7 +55,15 @@ src/finecorpus/
   contracts/        # §12: pydantic v2 models — the six contracts + shared blocks
                     #   (tenancy block, provenance block, source location, versioning)
   pipeline/
-    collect/  assess/  decompose/  plan/  build/     # one package per stage
+    stage.py          # Stage base class: contract version check, output validation,
+                      #   ArtifactStore persistence, JSON round-trip re-load
+    artifact_store.py # ArtifactStore: <artifacts_root>/<run_id>/<stage>.json
+    orchestrator.py   # run_pipeline(): chains Collect→Assess→Decompose→Plan→Build
+    collect/          # Stage 1 — real implementation (Phase 0)
+    assess/           # Stage 2 — Phase 0 skeleton (ParseResultBatch envelope)
+    decompose/        # Stage 3 — Phase 0 skeleton (SegmentSetBatch envelope)
+    plan/             # Stage 4 — Phase 0 skeleton (IngestionConfig, real contract)
+    build/            # Stage 5 — Phase 0 skeleton (BuildResult envelope, 0 chunks)
   embedding/        # provider interface; openai/, ollama/ reference impls
   llm/              # internal LLM ops (§7.3): classify, describe, questions, rewrite
   index/            # vector-backend adapter interface; qdrant/ impl;
@@ -67,7 +75,9 @@ src/finecorpus/
   jobs/             # job model, checkpointing, queue claim/heartbeat
   audit/            # append-only audit records
   observability/    # structured logs, OTel traces, Prometheus metrics
-  cli/              # `corpus` — consumer of the public API only
+  cli/              # `corpus` CLI — thin consumer of the public library API only (C-5)
+                    #   corpus pipeline run   — run_pipeline() over a source directory
+                    #   corpus preflight      — run_preflight() over a config file
   services/         # thin FastAPI/worker entrypoints wiring the library
 ```
 
