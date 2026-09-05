@@ -16,7 +16,7 @@ from datetime import datetime
 from enum import Enum, StrEnum
 from typing import Annotated, Any
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # ---------------------------------------------------------------------------
 # Enums — TenancyBlock
@@ -79,7 +79,10 @@ class TenancyBlock(BaseModel):
     Invariants:
     - permission_mode=source_mirrored requires permission_source=connector.
     - permission_fidelity=unavailable MUST NOT reach an index without acknowledgement (§14.3).
+    - extra="forbid": unknown keys rejected on parse (M-071 secret-free by construction).
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     workspace_id: str = Field(
         description="Owning workspace ULID (§2.1). Stable for the life of the workspace."

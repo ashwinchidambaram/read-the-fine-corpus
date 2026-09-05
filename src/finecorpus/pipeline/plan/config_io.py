@@ -53,7 +53,9 @@ class ConfigImportError(Exception):
 # ---------------------------------------------------------------------------
 
 _DENYLIST_PATTERNS: list[re.Pattern[str]] = [
-    re.compile(r"sk-[A-Za-z0-9]{10,}", re.ASCII),  # OpenAI-style secret keys
+    # OpenAI-style secret keys: legacy sk-<48 alnum> AND sk-proj-...-... multi-segment.
+    # Pattern: sk- followed by one or more hyphen-separated alnum segments, last ≥10 chars.
+    re.compile(r"sk-(?:[A-Za-z0-9]+-)*[A-Za-z0-9]{10,}", re.ASCII),
     re.compile(r"AKIA[0-9A-Z]{16}", re.ASCII),  # AWS access key ID prefix
     re.compile(r"-----BEGIN\s+\w", re.ASCII),  # PEM private key / cert
     re.compile(r"Bearer\s+[A-Za-z0-9+/=._-]{8,}", re.ASCII),  # Authorization Bearer

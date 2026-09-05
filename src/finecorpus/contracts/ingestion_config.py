@@ -552,6 +552,8 @@ class ClassDescription(BaseModel):
     Therefore class_descriptions are folded into the config_version hash.
 
     Added in schema_version 1.2.0 (M-005, M-026).
+
+    Invariant: class_id must equal segment_class.value. Enforced by _validate_class_id_match.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -571,6 +573,24 @@ class ClassDescription(BaseModel):
             "and produced vectors, so it rotates config_version and triggers a full rebuild."
         )
     )
+
+    @model_validator(mode="after")
+    def _validate_class_id_match(self) -> ClassDescription:
+        """class_id must equal segment_class.value (consistency invariant).
+
+        A mismatch would cause the config_version hash to collide with a correctly-formed
+        config (class_id is included in the hash alongside segment_class), making the hash
+        ambiguous and the Tier-2 class_context source untraceable.
+        """
+        if self.class_id != self.segment_class.value:
+            raise ValueError(
+                f"class_id {self.class_id!r} does not match "
+                f"segment_class {self.segment_class.value!r}. "
+                "class_id must equal segment_class.value — they identify the same class. "
+                "A mismatch would corrupt the config_version hash and make Tier-2 "
+                "class_context untraceable to the correct segment class."
+            )
+        return self
 
 
 # ---------------------------------------------------------------------------
@@ -693,6 +713,28 @@ class IngestionConfig(BaseModel):
                 "Tier 3 is per-class opt-in only — enabling it on the default_rule would "
                 "make it a global default, which is structurally forbidden. "
                 "Use class_rules to opt individual classes into Tier 3."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_no_duplicate_class_descriptions(self) -> IngestionConfig:
+        """class_descriptions must not contain duplicate class_id values.
+
+        Duplicate class_ids make the Tier-2 class_context source ambiguous — the Build
+        stage cannot determine which description to use for a given segment class.
+        """
+        seen: set[str] = set()
+        duplicates: list[str] = []
+        for cd in self.class_descriptions:
+            if cd.class_id in seen:
+                duplicates.append(cd.class_id)
+            seen.add(cd.class_id)
+        if duplicates:
+            raise ValueError(
+                "class_descriptions contains duplicate class_id values: "
+                f"{sorted(set(duplicates))}. "
+                "Each class_id must appear at most once — duplicates make the Tier-2 "
+                "class_context source ambiguous."
             )
         return self
 

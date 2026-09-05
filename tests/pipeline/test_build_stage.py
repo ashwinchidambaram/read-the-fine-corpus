@@ -22,6 +22,7 @@ import pytest
 from finecorpus.contracts.ingestion_config import (
     ChunkingConfig,
     ChunkingStrategy,
+    ClassDescription,
     ClassRule,
     EmbeddingConfig,
     IngestionConfig,
@@ -53,6 +54,7 @@ from finecorpus.contracts.shared.blocks import (
     SourceLocation,
     TenancyBlock,
 )
+from finecorpus.contracts.versions import INGESTION_CONFIG_SCHEMA_VERSION
 from finecorpus.embedding.base import ProviderUnavailableError
 from finecorpus.embedding.fake import FakeProvider
 from finecorpus.pipeline.artifact_store import ArtifactStore
@@ -240,7 +242,7 @@ def _make_ingestion_config(
     config_version = hashlib.sha256(_json.dumps(affecting, sort_keys=True).encode()).hexdigest()
 
     return IngestionConfig(
-        schema_version="1.1.0",
+        schema_version=INGESTION_CONFIG_SCHEMA_VERSION,
         tenancy=_make_tenancy(workspace_id=workspace_id, kb_id=kb_id),
         config_version=config_version,
         created_at=datetime.now(tz=UTC),
@@ -306,6 +308,41 @@ class TestBuildStageSkeleton:
         assert result.skeleton is True
         assert result.chunk_count == 0
         assert result.chunks == []
+
+    def test_schema_version_is_current(self, tmp_path):
+        """_make_ingestion_config stamps INGESTION_CONFIG_SCHEMA_VERSION (Ruling 5)."""
+        config = _make_ingestion_config()
+        assert config.schema_version == INGESTION_CONFIG_SCHEMA_VERSION
+
+    def test_build_accepts_120_config_with_class_descriptions(self, tmp_path):
+        """Build stage accepts a 1.2.0 config with populated class_descriptions (Ruling 5)."""
+        store = ArtifactStore(artifacts_root=tmp_path, run_id="test-120-class-desc")
+        # Build a config with populated class_descriptions (1.2.0 shape).
+        base_config = _make_ingestion_config()
+        config = base_config.model_copy(
+            update={
+                "class_descriptions": [
+                    ClassDescription(
+                        segment_class=SegmentType.prose,
+                        class_id="prose",
+                        description="Narrative prose content for retrieval augmentation.",
+                    ),
+                    ClassDescription(
+                        segment_class=SegmentType.table,
+                        class_id="table",
+                        description="Tabular data — rows and columns with structured values.",
+                    ),
+                ]
+            }
+        )
+        assert config.schema_version == INGESTION_CONFIG_SCHEMA_VERSION
+        assert len(config.class_descriptions) == 2
+        stage = BuildStage(run_started_at=datetime.now(tz=UTC))
+        result_dict = stage.run(input_data=config.model_dump(mode="json"), store=store)
+        result = BuildResult.model_validate(result_dict)
+        # Skeleton fallback (no provider) — config accepted, no error thrown.
+        assert result.skeleton is True
+        assert result.chunk_count == 0
 
 
 # ---------------------------------------------------------------------------

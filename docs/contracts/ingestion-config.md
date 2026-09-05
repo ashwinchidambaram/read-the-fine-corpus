@@ -156,7 +156,11 @@ Carries "why this value" for each recommendation (§6.4, §1.4 principle 2).
 
 ## Model constraints (1.2.0)
 
-All submodels use `model_config = ConfigDict(extra="forbid")`: unknown keys are rejected on parse (M-071 secret-free by construction — hand-edited files with secret-bearing extra keys are rejected at import time). See `import_config()` in `pipeline.plan.config_io`.
+All submodels — including the shared embedded models `TenancyBlock` (contracts/shared/blocks.py)
+and `LanguageShare` (contracts/parse_result.py) — use
+`model_config = ConfigDict(extra="forbid")`: unknown keys are rejected on parse (M-071
+secret-free by construction — hand-edited files with secret-bearing extra keys are rejected at
+import time). See `import_config()` in `pipeline.plan.config_io`.
 
 ## `config_io` module (1.2.0)
 
@@ -223,9 +227,11 @@ rebuild (above).
 - **Fully determines Build:** every value Build reads is present; `default_rule` guarantees
   totality so no implicit default is resolved at build time (§12).
 - **Secret-free by construction:** no field holds a credential; providers/models are referenced by
-  name only (§14.2). `extra="forbid"` on all models rejects unknown keys on import. D-21 runtime
-  denylist scan in `export_config()` catches injected secrets in free-text fields. Verified by the
-  secret-hygiene test (§18.3.10) and `tests/phase3/test_secret_free_export.py`.
+  name only (§14.2). `extra="forbid"` on all models — including shared embedded models
+  `TenancyBlock` and `LanguageShare` — rejects unknown keys on import. D-21 runtime denylist scan
+  in `export_config()` catches injected secrets in free-text fields (patterns cover legacy
+  `sk-<alnum>` and hyphenated `sk-proj-...` multi-segment keys). Verified by the secret-hygiene
+  test (§18.3.10) and `tests/phase3/test_secret_free_export.py`.
 - **Diffable/re-importable:** canonical JSON serialization; round-trips exactly (§6.4). Phase 3
   acceptance test `tests/phase3/test_config_roundtrip.py` asserts byte-identical re-export and
   tamper detection.

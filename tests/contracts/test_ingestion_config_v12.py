@@ -33,6 +33,7 @@ from finecorpus.contracts.ingestion_config import (
     TransformationSettings,
     to_canonical_json,
 )
+from finecorpus.contracts.parse_result import LanguageShare
 from finecorpus.contracts.shared.blocks import (
     PermissionFidelity,
     PermissionMode,
@@ -361,3 +362,177 @@ class TestM032M033M034FlagFields:
         assert "retain_original_ref" in tr
         assert "diff_preview_required" in tr
         assert "mark_rewritten_chunks" in tr
+
+
+# ---------------------------------------------------------------------------
+# Ruling 1: ClassDescription class_id/segment_class consistency
+# ---------------------------------------------------------------------------
+
+
+class TestClassDescriptionConsistency:
+    """class_id must equal segment_class.value (Ruling 1)."""
+
+    def test_mismatch_rejected(self) -> None:
+        """class_id='prose' with segment_class=table must raise ValidationError."""
+        with pytest.raises(ValidationError) as exc_info:
+            ClassDescription(
+                segment_class=SegmentType.table,
+                class_id="prose",  # mismatch: should be "table"
+                description="Should be rejected.",
+            )
+        errors = exc_info.value.errors()
+        # At least one error should mention class_id/segment_class mismatch
+        assert any(
+            "class_id" in str(e) or "segment_class" in str(e) or "mismatch" in str(e).lower()
+            for e in errors
+        ), f"Expected class_id/segment_class error, got: {errors}"
+
+    def test_mismatch_reversed_rejected(self) -> None:
+        """class_id='table' with segment_class=prose must also raise ValidationError."""
+        with pytest.raises(ValidationError):
+            ClassDescription(
+                segment_class=SegmentType.prose,
+                class_id="table",  # mismatch
+                description="Should be rejected.",
+            )
+
+    def test_match_accepted(self) -> None:
+        """class_id matching segment_class.value must be accepted."""
+        cd = ClassDescription(
+            segment_class=SegmentType.prose,
+            class_id="prose",
+            description="Valid prose description.",
+        )
+        assert cd.class_id == "prose"
+        assert cd.segment_class == SegmentType.prose
+
+    def test_match_table_accepted(self) -> None:
+        """class_id='table' with segment_class=table must be accepted."""
+        cd = ClassDescription(
+            segment_class=SegmentType.table,
+            class_id="table",
+            description="Tabular data.",
+        )
+        assert cd.class_id == "table"
+
+    def test_match_code_accepted(self) -> None:
+        """class_id='code' with segment_class=code must be accepted."""
+        cd = ClassDescription(
+            segment_class=SegmentType.code,
+            class_id="code",
+            description="Code blocks.",
+        )
+        assert cd.class_id == "code"
+
+
+# ---------------------------------------------------------------------------
+# Ruling 2: Duplicate class_id in class_descriptions on IngestionConfig
+# ---------------------------------------------------------------------------
+
+
+class TestDuplicateClassDescriptions:
+    """IngestionConfig must reject duplicate class_id values in class_descriptions (Ruling 2)."""
+
+    def test_duplicate_class_id_rejected(self) -> None:
+        """Two ClassDescriptions with the same class_id must raise ValidationError."""
+        cd1 = ClassDescription(
+            segment_class=SegmentType.prose,
+            class_id="prose",
+            description="First prose description.",
+        )
+        cd2 = ClassDescription(
+            segment_class=SegmentType.prose,
+            class_id="prose",
+            description="Second prose description — duplicate.",
+        )
+        with pytest.raises(ValidationError) as exc_info:
+            _make_minimal_config(class_descriptions=[cd1, cd2])
+        errors = exc_info.value.errors()
+        assert any(
+            "duplicate" in str(e).lower() or "class_id" in str(e) or "class_descriptions" in str(e)
+            for e in errors
+        ), f"Expected duplicate class_id error, got: {errors}"
+
+    def test_distinct_class_ids_accepted(self) -> None:
+        """Two ClassDescriptions with distinct class_ids must be accepted."""
+        cd1 = ClassDescription(
+            segment_class=SegmentType.prose,
+            class_id="prose",
+            description="Prose narrative content.",
+        )
+        cd2 = ClassDescription(
+            segment_class=SegmentType.table,
+            class_id="table",
+            description="Tabular structured data.",
+        )
+        config = _make_minimal_config(class_descriptions=[cd1, cd2])
+        assert len(config.class_descriptions) == 2
+
+    def test_single_entry_accepted(self) -> None:
+        """A single ClassDescription is trivially non-duplicate — must be accepted."""
+        cd = ClassDescription(
+            segment_class=SegmentType.code,
+            class_id="code",
+            description="Source code blocks.",
+        )
+        config = _make_minimal_config(class_descriptions=[cd])
+        assert len(config.class_descriptions) == 1
+
+
+# ---------------------------------------------------------------------------
+# Ruling 3: extra=forbid probe tests for TenancyBlock and LanguageShare
+# ---------------------------------------------------------------------------
+
+
+class TestTenancyBlockExtraForbid:
+    """TenancyBlock must reject extra keys (Ruling 3 — M-071 gap closed)."""
+
+    def test_extra_key_in_tenancy_rejected(self) -> None:
+        """An extra key in TenancyBlock must raise ValidationError."""
+        with pytest.raises(ValidationError) as exc_info:
+            TenancyBlock(
+                workspace_id="ws-test",
+                kb_id="kb-test",
+                permission_mode=PermissionMode.public_to_kb,
+                permission_principals=[],
+                permission_source=PermissionSource.platform,
+                permission_fidelity=PermissionFidelity.authoritative,
+                rogue_extra_field="should_be_rejected",  # type: ignore[call-arg]
+            )
+        assert any(
+            "rogue_extra_field" in str(e) or "extra" in str(e) for e in exc_info.value.errors()
+        )
+
+    def test_valid_tenancy_accepted(self) -> None:
+        """A well-formed TenancyBlock must be accepted."""
+        tb = TenancyBlock(
+            workspace_id="ws-test",
+            kb_id="kb-test",
+            permission_mode=PermissionMode.public_to_kb,
+            permission_principals=[],
+            permission_source=PermissionSource.platform,
+            permission_fidelity=PermissionFidelity.authoritative,
+        )
+        assert tb.workspace_id == "ws-test"
+
+
+class TestLanguageShareExtraForbid:
+    """LanguageShare must reject extra keys (Ruling 3 — M-071 gap closed)."""
+
+    def test_extra_key_in_language_share_rejected(self) -> None:
+        """An extra key in LanguageShare must raise ValidationError."""
+        with pytest.raises(ValidationError) as exc_info:
+            LanguageShare(
+                language="en",
+                fraction=0.95,
+                rogue_extra_field="should_be_rejected",  # type: ignore[call-arg]
+            )
+        assert any(
+            "rogue_extra_field" in str(e) or "extra" in str(e) for e in exc_info.value.errors()
+        )
+
+    def test_valid_language_share_accepted(self) -> None:
+        """A well-formed LanguageShare must be accepted."""
+        ls = LanguageShare(language="en", fraction=0.95)
+        assert ls.language == "en"
+        assert ls.fraction == pytest.approx(0.95)

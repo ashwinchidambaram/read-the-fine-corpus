@@ -302,3 +302,59 @@ class TestHighEntropyHeuristic:
         # Must not raise — clean content.
         export_config(config, f)
         assert f.exists()
+
+
+# ---------------------------------------------------------------------------
+# sk-proj- variant patterns (Ruling 4)
+# ---------------------------------------------------------------------------
+
+
+class TestSkProjPatterns:
+    """sk-proj-... multi-segment OpenAI keys must be caught by the denylist (Ruling 4)."""
+
+    def test_sk_proj_key_in_description_refused(self, tmp_path: Path) -> None:
+        """sk-proj- prefix in description → export refused (not just entropy — pattern match)."""
+        config = _make_clean_config(
+            description_text="Key: sk-proj-Abc123Xyz789DefGhi456Jkl012Mno345Pqr678 in field."
+        )
+        f = tmp_path / "config.json"
+        with pytest.raises(ConfigExportError) as exc_info:
+            export_config(config, f)
+        err_str = str(exc_info.value)
+        assert "Denylist" in err_str or "secret" in err_str.lower()
+        assert not f.exists(), "File must NOT be written when export is refused"
+
+    def test_sk_proj_multi_segment_refused(self, tmp_path: Path) -> None:
+        """sk-proj-<seg1>-<seg2>-<seg3> (three-segment key) must be caught."""
+        config = _make_clean_config(
+            description_text=(
+                "Credentials: sk-proj-AbcDef123-GhiJkl456-MnoPqr789Stu012Vwx345 embedded."
+            )
+        )
+        f = tmp_path / "config.json"
+        with pytest.raises(ConfigExportError):
+            export_config(config, f)
+        assert not f.exists()
+
+    def test_sk_proj_all_lowercase_refused(self, tmp_path: Path) -> None:
+        """sk-proj- with all-lowercase suffix must be caught by pattern, not just entropy."""
+        config = _make_clean_config(
+            description_text="token: sk-proj-abcdefghijklmnopqrstuvwxyzabcdefghijklmn here."
+        )
+        f = tmp_path / "config.json"
+        with pytest.raises(ConfigExportError) as exc_info:
+            export_config(config, f)
+        # Must be caught by denylist pattern (not just entropy), so error message says Denylist.
+        err_str = str(exc_info.value)
+        assert "Denylist" in err_str or "secret" in err_str.lower()
+        assert not f.exists()
+
+    def test_legacy_sk_key_still_caught(self, tmp_path: Path) -> None:
+        """Legacy sk-<48 alnum> pattern still caught after regex change."""
+        config = _make_clean_config(
+            description_text="Key: sk-ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwx here."
+        )
+        f = tmp_path / "config.json"
+        with pytest.raises(ConfigExportError):
+            export_config(config, f)
+        assert not f.exists()
