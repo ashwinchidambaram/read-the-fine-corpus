@@ -293,16 +293,24 @@ retrieval:
 class TestR2GlobalAdminNotLockedOut:
     """RULING 2 (MAJOR): global-scope principal must not filter by permission_principals.
 
-    Global admins' permission_principals is always their own principal_id, but
-    chunks are seeded with specific service-key IDs — so global admins match nothing.
-    Fix: global scope → empty permission_principals tuple (clause omitted).
+    Wave-2 R2 fix: global scope → empty permission_principals tuple (clause omitted) so
+    the vector search finds chunks even when the admin's own ID is not in permission_principals.
+
+    Phase 4 update (§2.3 break-glass enforcement): Admin-role principals — including global
+    admins — MUST provide a break-glass grant to read content.  Without a grant, admin content
+    reads are denied (PERMISSION_DENIED) regardless of scope.  The R2 fix (permission_principals
+    clause omitted for global scope) is still correct and still applies UNDER a valid grant;
+    it prevents the global admin from being locked out by the tenancy filter when they DO have
+    a grant.  Without a grant, the fail-closed check fires before the tenancy filter runs.
     """
 
-    def test_r2_global_admin_queries_kb_with_service_key_chunks(self) -> None:
-        """Global admin queries a KB whose chunks carry service-key permission_principals.
+    def test_r2_global_admin_without_grant_is_denied(self) -> None:
+        """Global admin WITHOUT a break-glass grant receives PERMISSION_DENIED (§2.3).
 
-        The global admin must get ResultStatus.matches, not no_matches or PERMISSION_DENIED.
+        Phase 4 behavior: admin content reads require a grant.  This test documents the
+        behavior BEFORE a break-glass grant is provided.
         """
+        from finecorpus.contracts.retrieval_response import ErrorCode
         from finecorpus.retrieval.service import query
 
         GLOBAL_ADMIN_PID = "pid-global-admin"
@@ -371,13 +379,17 @@ class TestR2GlobalAdminNotLockedOut:
                 session=object(),  # type: ignore[arg-type]
                 auth_enabled=True,
                 principal=global_admin,
+                break_glass_grant_id=None,  # No grant — must be denied (§2.3)
             )
 
-        assert response.result_status == ResultStatus.matches, (
-            f"Global admin got {response.result_status!r} — expected matches. "
-            "Global scope must not add permission_principals filter (global admins are locked out)."
+        # Phase 4 behavior: admin without grant → PERMISSION_DENIED (fail-closed §2.3)
+        assert response.result_status == ResultStatus.error, (
+            f"Global admin without grant got {response.result_status!r} — "
+            "expected error/PERMISSION_DENIED.  "
+            "Phase 4: admin content reads require a break-glass grant (§2.3)."
         )
-        assert len(response.results) > 0
+        assert response.error is not None
+        assert response.error.code == ErrorCode.PERMISSION_DENIED
 
 
 # ---------------------------------------------------------------------------

@@ -234,9 +234,192 @@ class BreakGlassRepository:
         record.revoked_at = revoked_at
         return record
 
+    def get(self, grant_id: str) -> BreakGlassGrantRecord | None:
+        """Return a grant by ID, or None if not found.
+
+        Args:
+            grant_id: Grant identifier.
+
+        Returns:
+            BreakGlassGrantRecord or None.
+        """
+        stmt = select(BreakGlassGrantRecord).where(BreakGlassGrantRecord.grant_id == grant_id)
+        return self._session.execute(stmt).scalar_one_or_none()
+
+    def list_active(self, *, now: datetime | None = None) -> list[BreakGlassGrantRecord]:
+        """Return all currently active (non-expired, non-revoked) grants.
+
+        Args:
+            now: Reference time (defaults to UTC now).
+
+        Returns:
+            List of active BreakGlassGrantRecord ordered by granted_at desc.
+        """
+        if now is None:
+            now = datetime.now(tz=UTC)
+
+        stmt = (
+            select(BreakGlassGrantRecord)
+            .where(BreakGlassGrantRecord.revoked_at.is_(None))
+            .where(BreakGlassGrantRecord.expires_at > now)
+            .order_by(BreakGlassGrantRecord.granted_at.desc())
+        )
+        return list(self._session.execute(stmt).scalars())
+
+
+# ---------------------------------------------------------------------------
+# Grant lifecycle service functions (M-001..M-004)
+# ---------------------------------------------------------------------------
+
+
+def issue_grant(
+    *,
+    session: Any,
+    target_kb_id: str,
+    granting_admin_id: str,
+    reason: str,
+    window: timedelta | None = None,
+    notified_principals: list[str] | None = None,
+) -> tuple[BreakGlassGrantRecord, Any]:
+    """Issue a break-glass grant with mandatory pre-audit (M-001..M-004).
+
+    Grant flow: append audit row FIRST (break_glass_grant), then grant with
+    audit_entry_id.  This ensures every grant has an immutable audit record
+    even if the grant itself fails or is rolled back.
+
+    M-004: Notification — the grant audit row and a log line serve as the
+    notification mechanism in Phase 4.  UI-based notification is deferred to
+    Phase 6.  Callers can inspect notified_principals to determine who was
+    notified (typically the KB team / workspace editors).
+
+    Args:
+        session: SQLAlchemy Session.
+        target_kb_id: KB being unlocked.
+        granting_admin_id: Admin principal ID creating the grant.
+        reason: Non-empty justification (M-001).
+        window: Grant duration (None → 4 h default, D-04).
+        notified_principals: List of principal IDs notified (log/audit-based, M-004).
+
+    Returns:
+        Tuple of (BreakGlassGrantRecord, AuditLogRecord).
+
+    Raises:
+        ValueError: If reason is empty (M-001) or window is invalid (D-04).
+    """
+    from finecorpus.control.audit import AuditAction, AuditLogRepository
+
+    if not reason or not reason.strip():
+        raise ValueError("break-glass grant requires a non-empty reason (M-001)")
+
+    effective_window = _validate_window(window)
+    notified = notified_principals or []
+
+    audit_repo = AuditLogRepository(session)
+    grant_repo = BreakGlassRepository(session)
+
+    # Audit FIRST — M-004: log notification intent before granting.
+    audit_record = audit_repo.append(
+        entry_type=AuditAction.break_glass_grant,
+        actor_id=granting_admin_id,
+        target_kb_id=target_kb_id,
+        details={
+            "reason": reason.strip(),
+            "window_hours": effective_window.total_seconds() / 3600,
+            "notified_principals": notified,
+        },
+    )
+    session.flush()  # materialize entry_id before FK reference
+
+    import logging as _logging
+
+    _log = _logging.getLogger(__name__)
+    _log.info(
+        "Break-glass grant issued: admin=%s kb=%s window=%s notified=%s audit=%s",
+        granting_admin_id,
+        target_kb_id,
+        effective_window,
+        notified,
+        audit_record.entry_id,
+    )
+
+    grant_record = grant_repo.grant(
+        target_kb_id=target_kb_id,
+        granting_admin_id=granting_admin_id,
+        reason=reason,
+        audit_entry_id=audit_record.entry_id,
+        window=effective_window,
+        notified_principals=notified,
+    )
+
+    return grant_record, audit_record
+
+
+def sweep_expired_grants(
+    *,
+    session: Any,
+    now: datetime | None = None,
+) -> list[tuple[BreakGlassGrantRecord, Any]]:
+    """Find expired grants, write audit rows, and log notification lines (M-004).
+
+    This is the expiry sweep function.  It finds grants that have passed their
+    expiry but are not yet revoked, writes a break_glass_expiry audit row for
+    each, and logs a notification line.  The grants are NOT marked as revoked
+    here — they are already expired (expires_at <= now) and the active_grant_for
+    / list_active queries exclude them.
+
+    M-004 notification: log-based for Phase 4; UI notification deferred to Phase 6.
+    Document: to be wired into a periodic task in Phase 6 (or on-demand sweep).
+
+    Args:
+        session: SQLAlchemy Session.
+        now: Reference time (defaults to UTC now).
+
+    Returns:
+        List of (BreakGlassGrantRecord, AuditLogRecord) for each expired grant.
+    """
+    import logging as _logging
+
+    _log = _logging.getLogger(__name__)
+
+    from finecorpus.control.audit import AuditAction, AuditLogRepository
+
+    if now is None:
+        now = datetime.now(tz=UTC)
+
+    grant_repo = BreakGlassRepository(session)
+    audit_repo = AuditLogRepository(session)
+
+    expired = grant_repo.expire_due(now=now)
+    results = []
+
+    for grant in expired:
+        audit_record = audit_repo.append(
+            entry_type=AuditAction.break_glass_expiry,
+            actor_id=grant.granting_admin_id,
+            target_kb_id=grant.target_kb_id,
+            details={
+                "grant_id": grant.grant_id,
+                "expires_at": grant.expires_at.isoformat(),
+                "reason": grant.reason,
+            },
+        )
+        _log.info(
+            "Break-glass grant expired: grant=%s admin=%s kb=%s expires_at=%s audit=%s",
+            grant.grant_id,
+            grant.granting_admin_id,
+            grant.target_kb_id,
+            grant.expires_at.isoformat(),
+            audit_record.entry_id,
+        )
+        results.append((grant, audit_record))
+
+    return results
+
 
 __all__ = [
     "BreakGlassGrantRecord",
     "BreakGlassRepository",
     "DEFAULT_WINDOW_HOURS",
+    "issue_grant",
+    "sweep_expired_grants",
 ]

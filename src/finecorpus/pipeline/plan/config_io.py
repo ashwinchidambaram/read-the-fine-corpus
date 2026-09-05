@@ -265,10 +265,103 @@ def diff_configs(a: IngestionConfig, b: IngestionConfig) -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# D-23: Confidence-floor lowering detection
+# ---------------------------------------------------------------------------
+
+
+def detect_confidence_floor_lowering(
+    prev: IngestionConfig,
+    next_: IngestionConfig,
+) -> list[dict[str, Any]]:
+    """Detect per-class confidence_floor or default_salience_filter weakenings (D-23).
+
+    A weakening is any change that makes the filter LESS restrictive:
+    - confidence_floor: new value < old value (lower floor = weaker filter).
+    - default_salience_filter: new set is a strict superset of old set (more
+      salience tiers allowed = weaker filter).
+
+    This is called by CLI `corpus config import` and `corpus config diff` to
+    surface a D-23 warning before a reindex is promoted.  An audit row
+    (AuditAction.confidence_floor_lowered) should be appended by the caller
+    when auth/session context is available.
+
+    Args:
+        prev: The current (previous) IngestionConfig.
+        next_: The incoming (new) IngestionConfig.
+
+    Returns:
+        List of weakening findings, each a dict with keys:
+          "class": segment class name (str)
+          "field": "confidence_floor" | "default_salience_filter"
+          "old": previous value
+          "new": new value
+          "severity": "warning"
+        Empty list means no weakening detected.
+    """
+    findings: list[dict[str, Any]] = []
+
+    prev_rules = {rule.segment_class: rule for rule in (prev.class_rules or [])}
+    next_rules = {rule.segment_class: rule for rule in (next_.class_rules or [])}
+
+    for cls, next_rule in next_rules.items():
+        prev_rule = prev_rules.get(cls)
+        if prev_rule is None:
+            # New class — no previous baseline to compare against.
+            continue
+
+        prev_rt = getattr(prev_rule, "retrieval_treatment", None)
+        next_rt = getattr(next_rule, "retrieval_treatment", None)
+        if prev_rt is None or next_rt is None:
+            continue
+
+        # confidence_floor: lower value = weaker filter
+        prev_floor = prev_rt.confidence_floor
+        next_floor = next_rt.confidence_floor
+        if prev_floor is not None and next_floor is not None and next_floor < prev_floor:
+            findings.append(
+                {
+                    "class": str(cls),
+                    "field": "confidence_floor",
+                    "old": prev_floor,
+                    "new": next_floor,
+                    "severity": "warning",
+                }
+            )
+        elif prev_floor is not None and next_floor is None:
+            # Removing the floor entirely is also a weakening.
+            findings.append(
+                {
+                    "class": str(cls),
+                    "field": "confidence_floor",
+                    "old": prev_floor,
+                    "new": None,
+                    "severity": "warning",
+                }
+            )
+
+        # default_salience_filter: superset = weaker (more content allowed through)
+        prev_salience = frozenset(str(t) for t in (prev_rt.default_salience_filter or []))
+        next_salience = frozenset(str(t) for t in (next_rt.default_salience_filter or []))
+        if next_salience > prev_salience:  # strict superset
+            findings.append(
+                {
+                    "class": str(cls),
+                    "field": "default_salience_filter",
+                    "old": sorted(prev_salience),
+                    "new": sorted(next_salience),
+                    "severity": "warning",
+                }
+            )
+
+    return findings
+
+
 __all__ = [
     "ConfigExportError",
     "ConfigImportError",
     "export_config",
     "import_config",
     "diff_configs",
+    "detect_confidence_floor_lowering",
 ]
