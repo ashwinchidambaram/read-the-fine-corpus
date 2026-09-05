@@ -202,15 +202,18 @@ def _split_into_paragraphs(text: str) -> list[str]:
     Primary path: split on blank lines (``\\n\\s*\\n+``).
 
     Fallback for blank-line-free extractions (the realistic pypdf shape for
-    native PDFs): when a single block exceeds ``_NO_BLANK_LINE_THRESHOLD``
-    chars AND contains multiple heading-like lines (as detected by
-    ``_is_heading``), we perform a secondary split at those heading lines.
-    This handles the common case where pypdf flattens all whitespace between
-    sections, producing one large blob.
+    native PDFs): every primary block is blank-line-free by construction, so
+    any block exceeding ``_NO_BLANK_LINE_THRESHOLD`` chars gets a secondary
+    split at interior heading-like lines (as detected by ``_is_heading``).
+    This handles pypdf flattening all whitespace between sections into one
+    large blob, per page or per document.
 
     Invariants preserved:
-    - Blank-line-separated documents produce IDENTICAL results (the secondary
-      split only fires when the primary yields a single oversized block).
+    - Blocks under the threshold, and blocks with no interior heading-like
+      line, are returned unchanged — so typical blank-line-separated prose
+      is unaffected (verified corpus-wide by the golden-fixture parity
+      tests). A 200+ char paragraph containing an interior heading-like
+      line WILL now split; that is the intended behavior change.
     - Lossless: the concatenation of returned blocks equals the concatenation
       of the original blocks after strip (same contract as before).
     - Table-like line runs (``|`` or tab-separated columns) are never split
@@ -221,8 +224,8 @@ def _split_into_paragraphs(text: str) -> list[str]:
     blocks = [block.strip() for block in raw_blocks if block.strip()]
 
     # --- Secondary split for blank-line-free extractions ---
-    # Only apply when the primary split yielded a single large block
-    # (or all blocks are large and few) — i.e. blank-line docs are unaffected.
+    # Every block is blank-line-free by construction; oversized blocks get
+    # heading-guided subdivision (no-op when no interior heading exists).
     result: list[str] = []
     for block in blocks:
         if len(block) >= _NO_BLANK_LINE_THRESHOLD:
