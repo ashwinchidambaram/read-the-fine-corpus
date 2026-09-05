@@ -79,6 +79,29 @@ class RetrievalStrategy(StrEnum):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# 2.0 Auth
+# ---------------------------------------------------------------------------
+
+
+class AuthConfig(BaseModel):
+    """API-key authentication settings (§14.2, Phase 4).
+
+    Defaults to disabled (``enabled=False``) for backward compatibility with
+    Phase 1–3 deployments that did not require authentication.  Set to
+    ``enabled=True`` to enforce API-key auth on all retrieval endpoints.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "§14.2, Phase 4 — When ``true``, all retrieval endpoints require a valid "
+            "API key (``Authorization: Bearer <key>`` or ``X-API-Key: <key>``). "
+            "When ``false`` (default), auth is bypassed for Phase 1–3 compatibility."
+        ),
+    )
+
+
 class PlatformConfig(BaseModel):
     """Platform identity and global behaviour (§4.6)."""
 
@@ -905,6 +928,7 @@ class Config(BaseModel):
     rejects plaintext credentials in the YAML file (§14.2).
     """
 
+    auth: AuthConfig = Field(default_factory=AuthConfig)
     platform: PlatformConfig = Field(default_factory=PlatformConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)

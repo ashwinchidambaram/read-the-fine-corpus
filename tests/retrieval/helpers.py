@@ -239,15 +239,23 @@ class FakeAdapter:
 
     @staticmethod
     def _matches_filter(payload: dict[str, Any], payload_filter: dict[str, Any]) -> bool:
-        """Return True if the point payload satisfies all exact-match filter conditions.
+        """Return True if the point payload satisfies all filter conditions.
 
         The filter dict uses dotted key paths (e.g. "tenancy.kb_id") mapped to
-        expected string values.  A missing key or a value mismatch causes the
-        point to be excluded from results — matching real Qdrant must-clause
-        semantics used by the retrieval service.
+        expected values.  Two value formats are supported:
+
+        - Plain scalar (str, int, bool, …): exact equality match against the
+          resolved payload value.
+        - ``{"__contains__": v}`` sentinel: the resolved payload field must be
+          a list that contains ``v`` as an element.  Used for
+          ``tenancy.permission_principals`` (Phase 4 M-072/M-073).
+
+        A missing key or a value mismatch causes the point to be excluded from
+        results — matching real Qdrant must-clause semantics used by the
+        retrieval service.
 
         This enforces tenancy isolation in the FakeAdapter so tests that seed
-        multi-tenant data cannot receive cross-tenant results (§18.3 test 2).
+        multi-tenant data cannot receive cross-tenant results (§18.3/T-02).
         """
         for dotted_key, expected in payload_filter.items():
             parts = dotted_key.split(".")
@@ -256,8 +264,15 @@ class FakeAdapter:
                 if not isinstance(node, dict):
                     return False
                 node = node.get(part)
-            if node != expected:
-                return False
+
+            if isinstance(expected, dict) and "__contains__" in expected:
+                # List-contains check: node must be a list with the element present.
+                contain_val = expected["__contains__"]
+                if not isinstance(node, list) or contain_val not in node:
+                    return False
+            else:
+                if node != expected:
+                    return False
         return True
 
     def search(

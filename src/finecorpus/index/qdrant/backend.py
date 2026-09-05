@@ -743,20 +743,30 @@ class QdrantAdapter(IndexAdapter):
 def _dict_to_qdrant_filter(filter_dict: dict[str, Any]) -> qm.Filter:
     """Convert a simple equality filter dict to a Qdrant Filter.
 
-    Supports a flat ``{field: value}`` dict where each entry becomes a
-    ``FieldCondition(match=MatchValue(value=value))``.  All conditions are
-    AND-joined (``must``).
+    Supports two value formats in the flat ``{field: value}`` dict:
+    - Plain value (str, int, bool): ``FieldCondition(match=MatchValue(value=value))``.
+    - ``{"__contains__": v}`` sentinel: ``FieldCondition(match=MatchValue(value=v))``.
+      On array-type payload fields Qdrant evaluates this as "v is one of the array
+      elements" — used for ``tenancy.permission_principals`` filtering (Phase 4).
 
-    This is intentionally minimal for Phase 1. The retrieval service builds
+    All conditions are AND-joined (``must``).
+
+    This is intentionally minimal for Phase 1–4. The retrieval service builds
     the filter dict and passes it here; more complex filter expressions can be
-    supported later.
+    supported in later phases.
     """
     conditions = []
     for key, value in filter_dict.items():
+        if isinstance(value, dict) and "__contains__" in value:
+            # List-contains sentinel: match if the scalar is an element of the
+            # stored array field (Qdrant MatchValue semantics on array fields).
+            match_value = value["__contains__"]
+        else:
+            match_value = value
         conditions.append(
             qm.FieldCondition(
                 key=key,
-                match=qm.MatchValue(value=value),
+                match=qm.MatchValue(value=match_value),
             )
         )
     return qm.Filter(must=conditions)
