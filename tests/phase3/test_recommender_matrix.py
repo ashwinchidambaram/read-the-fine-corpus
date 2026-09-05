@@ -420,3 +420,139 @@ class TestClassDescriptionBasis:
             r for r in result_with_desc.class_rules if r.segment_class == SegmentType.table
         )
         assert Tier2Operation.class_context in rule_with_desc.transformation.tier2_operations
+
+
+# ---------------------------------------------------------------------------
+# M-025 (RULING 1): Programmatic sweep — every chunking field set by each
+# builder must have a matching RecommendationProvenance entry.
+# ---------------------------------------------------------------------------
+
+# Fields checked per class rule: the recommender sets values on chunking.*
+# We enumerate the non-None fields actually set and assert provenance exists.
+_CHUNKING_FIELDS_ALWAYS = ["strategy", "max_tokens", "overlap_tokens"]
+
+
+def _prov_targets_for_class(seg_type: str, provenance: list) -> set[str]:
+    """Return the set of provenance target paths for a given class."""
+    class_prefix = f"/class_rules/{seg_type}"
+    return {
+        p.target[len(class_prefix) :] for p in provenance if p.target.startswith(f"{class_prefix}/")
+    }
+
+
+# ---------------------------------------------------------------------------
+# RULING 3: cross_reference dedicated builder
+# ---------------------------------------------------------------------------
+
+
+class TestCrossReferenceBuilder:
+    """RULING 3: dedicated _recommend_cross_reference builder.
+
+    The rationale for the cross_reference chunking/strategy provenance must
+    mention that resolution is performed by the Decompose stage's xref_resolve pass.
+    """
+
+    def test_cross_reference_has_dedicated_builder_not_generic(self):
+        """cross_reference class gets its own builder (not the generic fallback)."""
+        corpus = _make_corpus({"cross_reference": _make_class_stats("cross_reference")})
+        result = recommend(corpus, [])
+        rule = next(r for r in result.class_rules if r.segment_class == SegmentType.cross_reference)
+        # Should use recursive_char (builder-specific, same as generic but with metadata_schema)
+        assert rule.chunking.strategy == ChunkingStrategy.recursive_char
+        # Must have resolved_target in metadata_schema
+        field_names = [f.name for f in rule.metadata_schema]
+        assert "resolved_target" in field_names, (
+            "cross_reference rule must include resolved_target in metadata_schema"
+        )
+
+    def test_cross_reference_strategy_provenance_mentions_decompose(self):
+        """The chunking/strategy provenance rationale must name the Decompose stage."""
+        corpus = _make_corpus({"cross_reference": _make_class_stats("cross_reference")})
+        result = recommend(corpus, [])
+
+        xref_strategy_prov = [
+            p
+            for p in result.provenance
+            if p.target == "/class_rules/cross_reference/chunking/strategy"
+        ]
+        assert len(xref_strategy_prov) == 1, (
+            "Expected exactly one strategy provenance for cross_reference"
+        )
+        rationale = xref_strategy_prov[0].rationale.lower()
+        assert "decompose" in rationale, (
+            "cross_reference strategy provenance must mention the Decompose stage. "
+            f"Rationale: {xref_strategy_prov[0].rationale}"
+        )
+
+
+class TestProvnanceProgrammaticSweep:
+    """RULING 1: Programmatic sweep — every chunking field the recommender sets has provenance.
+
+    For EVERY emitted class rule, enumerate the chunking fields set (strategy,
+    max_tokens, overlap_tokens, and conditionally: respect_headings,
+    atomic_rows, repeat_headers_on_split, split_boundaries) and assert each
+    has a matching provenance target.
+
+    This test must fail before the Ruling 1 fix is applied (code has no
+    overlap_tokens or max_tokens provenance for code/scanned_region/boilerplate).
+    """
+
+    def _assert_chunking_provenance_complete(self, seg_type: str, rule, provenance: list) -> None:
+        """Assert all set chunking fields have provenance for a given class."""
+        targets = _prov_targets_for_class(seg_type, provenance)
+        chunking = rule.chunking
+
+        # strategy, max_tokens, overlap_tokens are always set
+        for field in ["strategy", "max_tokens", "overlap_tokens"]:
+            expected = f"/chunking/{field}"
+            assert expected in targets, (
+                f"[{seg_type}] Missing provenance for /chunking/{field}. "
+                f"Found targets: {sorted(t for t in targets if '/chunking/' in t)}"
+            )
+
+        # Conditional fields: assert provenance when value is set (non-None)
+        if chunking.respect_headings is not None:
+            expected = "/chunking/respect_headings"
+            assert expected in targets, (
+                f"[{seg_type}] Missing provenance for /chunking/respect_headings. "
+                f"Found: {sorted(t for t in targets if '/chunking/' in t)}"
+            )
+        if chunking.atomic_rows is not None:
+            expected = "/chunking/atomic_rows"
+            assert expected in targets, (
+                f"[{seg_type}] Missing provenance for /chunking/atomic_rows."
+            )
+        if chunking.repeat_headers_on_split is not None:
+            expected = "/chunking/repeat_headers_on_split"
+            assert expected in targets, (
+                f"[{seg_type}] Missing provenance for /chunking/repeat_headers_on_split."
+            )
+        if chunking.split_boundaries is not None:
+            expected = "/chunking/split_boundaries"
+            assert expected in targets, (
+                f"[{seg_type}] Missing provenance for /chunking/split_boundaries."
+            )
+
+    def test_all_known_classes_have_complete_chunking_provenance(self):
+        """Every class builder must emit provenance for all chunking fields it sets."""
+        all_seg_types = [
+            "prose",
+            "table",
+            "code",
+            "scanned_region",
+            "boilerplate",
+            "front_matter",
+            "heading",
+            "list",
+            "figure_caption",
+            "figure_region",
+            "cross_reference",
+            "unknown",
+        ]
+        classes = {st: _make_class_stats(st) for st in all_seg_types}
+        corpus = _make_corpus(classes)
+        result = recommend(corpus, [])
+
+        for rule in result.class_rules:
+            seg_type = rule.segment_class.value
+            self._assert_chunking_provenance_complete(seg_type, rule, result.provenance)

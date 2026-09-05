@@ -9,6 +9,28 @@ basis=heuristic and a plain-language rationale (M-025). Values influenced by a
 class description get basis=class_description.
 
 Deterministic: same stats in → identical config out.
+
+RULING 4 — §6.4 matrix coverage honesty
+----------------------------------------
+This module owns the segment-class rows of the §6.4 content matrix and emits
+ClassRule + RecommendationProvenance for each observed class.  The following
+§6.4 rows are deliberately NOT owned here — they live in other stages:
+
+* web_link / URL references → Collect-stage fetch policy (§6.1, LinkRecord).
+  Plan does not see fetched web content as a segment class; link treatment is
+  a Collect-stage concern.
+
+* spreadsheets (database and model kinds) → exclusion decisions in
+  stage.py::_build_exclusion_decisions (ExclusionDecisionReason.spreadsheet_database
+  and ExclusionDecisionReason.spreadsheet_model).  Spreadsheets that pass
+  spreadsheet_triage reach the pipeline as table segments; the rest are
+  excluded before the Plan stage is reached.
+
+* unservable content (audio, video, CAD, image-only PDF, etc.) → exclusion
+  decisions in stage.py::_build_exclusion_decisions
+  (ExclusionDecisionReason.unservable_content).  These never become segments.
+
+The module docstring does not claim ownership of those rows.
 """
 
 from __future__ import annotations
@@ -21,6 +43,9 @@ from finecorpus.contracts.ingestion_config import (
     ChunkingStrategy,
     ClassDescription,
     ClassRule,
+    MetadataField,
+    MetadataFieldSource,
+    MetadataFieldType,
     RecommendationBasis,
     RecommendationProvenance,
     RetrievalStrategy,
@@ -217,6 +242,16 @@ def _recommend_prose(
             "Sizes 90% of prose segments to fit in one chunk.",
         )
     )
+    overlap_tokens = max(32, max_tokens // 8)
+    provenance.append(
+        _prov(
+            f"{prefix}/chunking/overlap_tokens",
+            RecommendationBasis.heuristic,
+            f"Heuristic: overlap_tokens={overlap_tokens} computed as max(32, max_tokens // 8). "
+            "Overlap preserves cross-chunk context for prose retrieval. "
+            "Formula: max(32, max_tokens // 8) applies a standardised floor of 32 tokens.",
+        )
+    )
 
     return ClassRule(
         segment_class=SegmentType(stats.segment_type),
@@ -231,7 +266,7 @@ def _recommend_prose(
         chunking=ChunkingConfig(
             strategy=ChunkingStrategy.recursive_char,
             max_tokens=max_tokens,
-            overlap_tokens=max(32, max_tokens // 8),
+            overlap_tokens=overlap_tokens,
             respect_headings=respect_headings,
             atomic_rows=None,
             repeat_headers_on_split=None,
@@ -314,6 +349,25 @@ def _recommend_table(
             "Tables are kept larger than prose to preserve table structure.",
         )
     )
+    provenance.append(
+        _prov(
+            f"{prefix}/chunking/overlap_tokens",
+            RecommendationBasis.heuristic,
+            "Heuristic: overlap_tokens=0 for tables. Tables use atomic_rows semantics — "
+            "row boundaries are the correct split points. Overlap would duplicate rows and "
+            "corrupt table structure. Zero overlap is intentional and correct for "
+            "table_atomic strategy.",
+        )
+    )
+    provenance.append(
+        _prov(
+            f"{prefix}/chunking/respect_headings",
+            RecommendationBasis.heuristic,
+            "Heuristic: respect_headings=False for tables. Tables use table_atomic strategy "
+            "and split at row boundaries, not heading boundaries. Heading-based splitting is "
+            "irrelevant and disabled for table content.",
+        )
+    )
 
     return ClassRule(
         segment_class=SegmentType(stats.segment_type),
@@ -374,6 +428,34 @@ def _recommend_code(
             RecommendationBasis.heuristic,
             "Heuristic (§6.4 content matrix): code → code_syntax chunking. "
             "Syntax-aware splitting at function/class boundaries preserves logical code units.",
+        )
+    )
+    provenance.append(
+        _prov(
+            f"{prefix}/chunking/max_tokens",
+            RecommendationBasis.heuristic,
+            f"Heuristic: max_tokens={max_tokens} derived from p90 of the measured code "
+            "token-length distribution (rounded up to nearest 64-token boundary). "
+            "Sizes 90% of code segments to fit in one chunk.",
+        )
+    )
+    provenance.append(
+        _prov(
+            f"{prefix}/chunking/overlap_tokens",
+            RecommendationBasis.heuristic,
+            "Heuristic: overlap_tokens=0 for code. Code uses code_syntax strategy with "
+            "function/class boundary splitting — logical boundaries are the correct split "
+            "points. Overlap would duplicate code and corrupt logical units. "
+            "Zero overlap is intentional and documented for code_syntax strategy.",
+        )
+    )
+    provenance.append(
+        _prov(
+            f"{prefix}/chunking/respect_headings",
+            RecommendationBasis.heuristic,
+            "Heuristic: respect_headings=False for code. Code segments are split at "
+            "function/class boundaries by code_syntax strategy, not at heading boundaries. "
+            "Heading-based splitting is irrelevant and disabled for code.",
         )
     )
     provenance.append(
@@ -472,6 +554,34 @@ def _recommend_scanned_region(
     )
     provenance.append(
         _prov(
+            f"{prefix}/chunking/max_tokens",
+            RecommendationBasis.heuristic,
+            f"Heuristic: max_tokens={max_tokens} derived from p90 of the measured scanned_region "
+            "token-length distribution (rounded up to nearest 64-token boundary). "
+            "Sizes 90% of scanned segments to fit in one chunk.",
+        )
+    )
+    scan_overlap = max(32, max_tokens // 8)
+    provenance.append(
+        _prov(
+            f"{prefix}/chunking/overlap_tokens",
+            RecommendationBasis.heuristic,
+            f"Heuristic: overlap_tokens={scan_overlap} computed as max(32, max_tokens // 8). "
+            "OCR text may have degraded sentence boundaries so overlap preserves cross-chunk "
+            "context. Formula: max(32, max_tokens // 8) with a standardised floor of 32 tokens.",
+        )
+    )
+    provenance.append(
+        _prov(
+            f"{prefix}/chunking/respect_headings",
+            RecommendationBasis.heuristic,
+            "Heuristic: respect_headings=False for scanned regions. OCR output has no "
+            "reliable heading structure — heading boundaries are not available for "
+            "structure-aware splitting.",
+        )
+    )
+    provenance.append(
+        _prov(
             f"{prefix}/transformation/tier1_operations/ocr_cleanup",
             RecommendationBasis.heuristic,
             "Heuristic: scanned regions get ocr_cleanup as a Tier 1 operation to repair "
@@ -493,7 +603,7 @@ def _recommend_scanned_region(
         chunking=ChunkingConfig(
             strategy=ChunkingStrategy.recursive_char,
             max_tokens=max_tokens,
-            overlap_tokens=max(32, max_tokens // 8),
+            overlap_tokens=scan_overlap,
             respect_headings=False,
             atomic_rows=None,
             repeat_headers_on_split=None,
@@ -550,6 +660,35 @@ def _recommend_boilerplate_or_front_matter(
             "the class is excluded from default retrieval regardless of chunking strategy).",
         )
     )
+    provenance.append(
+        _prov(
+            f"{prefix}/chunking/max_tokens",
+            RecommendationBasis.heuristic,
+            f"Heuristic: max_tokens={max_tokens} derived from p90 of the measured "
+            f"'{stats.segment_type}' token-length distribution (rounded to 64-token boundary). "
+            "Sized conservatively — this class is excluded from default retrieval.",
+        )
+    )
+    bp_overlap = max(32, max_tokens // 8)
+    provenance.append(
+        _prov(
+            f"{prefix}/chunking/overlap_tokens",
+            RecommendationBasis.heuristic,
+            f"Heuristic: overlap_tokens={bp_overlap} computed as max(32, max_tokens // 8). "
+            f"Standard overlap formula applied to {stats.segment_type} even though it is "
+            "excluded from default retrieval — preserves chunk boundary consistency. "
+            "Formula: max(32, max_tokens // 8) with a standardised floor of 32 tokens.",
+        )
+    )
+    provenance.append(
+        _prov(
+            f"{prefix}/chunking/respect_headings",
+            RecommendationBasis.heuristic,
+            f"Heuristic: respect_headings=False for {stats.segment_type}. "
+            "Boilerplate and front matter have no meaningful heading structure to respect; "
+            "splitting is purely by size.",
+        )
+    )
 
     return ClassRule(
         segment_class=SegmentType(stats.segment_type),
@@ -564,7 +703,7 @@ def _recommend_boilerplate_or_front_matter(
         chunking=ChunkingConfig(
             strategy=ChunkingStrategy.recursive_char,
             max_tokens=max_tokens,
-            overlap_tokens=max(32, max_tokens // 8),
+            overlap_tokens=bp_overlap,
             respect_headings=False,
             atomic_rows=None,
             repeat_headers_on_split=None,
@@ -632,6 +771,24 @@ def _recommend_generic(
             f"for '{stats.segment_type}' (p90 rounded to 64-token boundary).",
         )
     )
+    generic_overlap = max(32, max_tokens // 8)
+    provenance.append(
+        _prov(
+            f"{prefix}/chunking/overlap_tokens",
+            RecommendationBasis.heuristic,
+            f"Heuristic: overlap_tokens={generic_overlap} computed as max(32, max_tokens // 8). "
+            f"Generic fallback overlap for '{stats.segment_type}'. "
+            "Formula: max(32, max_tokens // 8) with a standardised floor of 32 tokens.",
+        )
+    )
+    provenance.append(
+        _prov(
+            f"{prefix}/chunking/respect_headings",
+            RecommendationBasis.heuristic,
+            f"Heuristic: respect_headings=False for '{stats.segment_type}' (generic fallback). "
+            "No class-specific heading structure rule applies; splitting is purely by size.",
+        )
+    )
 
     return ClassRule(
         segment_class=SegmentType(stats.segment_type),
@@ -646,7 +803,7 @@ def _recommend_generic(
         chunking=ChunkingConfig(
             strategy=ChunkingStrategy.recursive_char,
             max_tokens=max_tokens,
-            overlap_tokens=max(16, max_tokens // 8),
+            overlap_tokens=generic_overlap,
             respect_headings=False,
             atomic_rows=None,
             repeat_headers_on_split=None,
@@ -654,6 +811,111 @@ def _recommend_generic(
         ),
         embedding_override=None,
         metadata_schema=[],
+        retrieval_treatment=RetrievalTreatment(
+            default_salience_filter=[SalienceTier.primary, SalienceTier.supporting],
+            salience_weights=None,
+            rerank_eligible=False,
+            strategy=RetrievalStrategy.dense,
+            confidence_floor=None,
+        ),
+    )
+
+
+def _recommend_cross_reference(
+    stats: ClassStats,
+    desc: ClassDescription | None,
+    provenance: list[RecommendationProvenance],
+    prefix: str,
+) -> ClassRule:
+    """§6.4 Cross-references: recursive_char with metadata_schema for resolved_target.
+
+    Resolution is performed by the Decompose stage's xref_resolve pass (intra-document).
+    Unresolved references are recorded explicitly. The Plan-level rule is recursive_char
+    chunking with a metadata_schema that includes a resolved_target field where available.
+    This builder's provenance is honest: resolution happens in Decompose, not here.
+    """
+    max_tokens = _max_tokens_from_stats(stats, _DEFAULT_MAX_TOKENS["cross_reference"])
+
+    tier2_ops = []
+    if desc is not None:
+        tier2_ops.append(Tier2Operation.class_context)
+        provenance.append(
+            _prov(
+                f"{prefix}/transformation/tier2_operations/class_context",
+                RecommendationBasis.class_description,
+                f"A class description is provided for '{stats.segment_type}': class_context "
+                "augmentation is enabled so cross-reference chunks carry the "
+                "description as context.",
+            )
+        )
+
+    provenance.append(
+        _prov(
+            f"{prefix}/chunking/strategy",
+            RecommendationBasis.heuristic,
+            "Heuristic (§6.4 content matrix): cross_reference → recursive_char chunking. "
+            "Reference resolution is performed by the Decompose stage's xref_resolve pass "
+            "(intra-document); unresolved references are recorded explicitly. The Plan-level "
+            "rule sets recursive_char with a metadata_schema including a resolved_target field "
+            "where the Decompose stage has resolved the target.",
+        )
+    )
+    provenance.append(
+        _prov(
+            f"{prefix}/chunking/max_tokens",
+            RecommendationBasis.heuristic,
+            f"Heuristic: max_tokens={max_tokens} derived from p90 of the measured "
+            "cross_reference token-length distribution (rounded to 64-token boundary). "
+            "Cross-references are typically short so the default is conservative.",
+        )
+    )
+    xref_overlap = max(32, max_tokens // 8)
+    provenance.append(
+        _prov(
+            f"{prefix}/chunking/overlap_tokens",
+            RecommendationBasis.heuristic,
+            f"Heuristic: overlap_tokens={xref_overlap} computed as max(32, max_tokens // 8). "
+            "Formula: max(32, max_tokens // 8) with a standardised floor of 32 tokens.",
+        )
+    )
+    provenance.append(
+        _prov(
+            f"{prefix}/chunking/respect_headings",
+            RecommendationBasis.heuristic,
+            "Heuristic: respect_headings=False for cross_reference. "
+            "Cross-references are short, structured anchors with no heading hierarchy to respect.",
+        )
+    )
+
+    return ClassRule(
+        segment_class=SegmentType(stats.segment_type),
+        transformation=TransformationSettings(
+            tier1_enabled=True,
+            tier1_operations=[Tier1Operation.whitespace_repair],
+            tier2_enabled=bool(tier2_ops),
+            tier2_operations=tier2_ops,
+            tier3_enabled=False,
+            tier3_settings=None,
+        ),
+        chunking=ChunkingConfig(
+            strategy=ChunkingStrategy.recursive_char,
+            max_tokens=max_tokens,
+            overlap_tokens=xref_overlap,
+            respect_headings=False,
+            atomic_rows=None,
+            repeat_headers_on_split=None,
+            split_boundaries=None,
+        ),
+        embedding_override=None,
+        # resolved_target field: populated by Decompose xref_resolve pass where available
+        metadata_schema=[
+            MetadataField(
+                name="resolved_target",
+                type=MetadataFieldType.str_,
+                filterable=False,
+                source=MetadataFieldSource.derived,
+            )
+        ],
         retrieval_treatment=RetrievalTreatment(
             default_salience_filter=[SalienceTier.primary, SalienceTier.supporting],
             salience_weights=None,
@@ -688,6 +950,8 @@ def _recommend_class(
         return _recommend_scanned_region(stats, desc, provenance, prefix)
     elif seg_type in (SegmentType.boilerplate.value, SegmentType.front_matter.value):
         return _recommend_boilerplate_or_front_matter(stats, desc, provenance, prefix)
+    elif seg_type == SegmentType.cross_reference.value:
+        return _recommend_cross_reference(stats, desc, provenance, prefix)
     else:
         return _recommend_generic(stats, desc, provenance, prefix)
 

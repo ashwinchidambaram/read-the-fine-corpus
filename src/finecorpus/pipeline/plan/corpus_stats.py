@@ -22,7 +22,23 @@ from typing import Any
 
 @dataclass
 class TokenLengthStats:
-    """Distribution summary for token lengths within a segment class."""
+    """Distribution summary for token lengths within a segment class.
+
+    NOTE on p90 interpolation (RULING 6):
+    ``p90`` (and other percentiles) are computed via ``statistics.quantiles(n=100)``,
+    which uses linear interpolation between order statistics.  For small samples
+    this means p90 *may be interpolated above the observed maximum* — a value like
+    p90 > max is not a bug; it is intentional sizing headroom that errs on the side
+    of leaving room for slightly longer-than-typical segments.  The recommender
+    consumes p90 to derive ``max_tokens``; a p90 that exceeds the observed max
+    produces a conservative (larger) chunk budget, which is the correct behaviour
+    for avoiding over-splitting on small corpora.
+
+    Where p90 is consumed:
+    - ``_max_tokens_from_stats`` in ``recommender.py`` uses p90 to size
+      ``ChunkingConfig.max_tokens`` (rounded up to the next 64-token boundary,
+      capped at 2048).  Small-sample headroom is thus bounded.
+    """
 
     count: int
     min: int

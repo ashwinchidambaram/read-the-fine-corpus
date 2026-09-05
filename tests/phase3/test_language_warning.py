@@ -193,6 +193,106 @@ class TestLanguageWarning:
 
 
 # ---------------------------------------------------------------------------
+# RULING 2 (M-041 fails-open): capabilities with None supported_languages
+# ---------------------------------------------------------------------------
+
+
+class TestLanguageWarningNoneCapabilities:
+    """RULING 2: capabilities.supported_languages=None must NOT silently proceed.
+
+    Spec §7.6: when capabilities is provided but its supported_languages is None,
+    fall back to embedding.supports_languages. If that fallback also gives no
+    language list (None/empty), emit warned_proceed with a client-readable message
+    stating the provider declares no supported languages so support could not be
+    verified.
+
+    When the fallback list covers all detected languages, proceed via fallback.
+
+    The tests that use a ProviderCapabilities object with supported_languages=None
+    must fail before the Ruling 2 fix (current code hits `if declared is None: pass`
+    → silently proceeds despite having non-English content).
+    """
+
+    def _make_caps_with_none_languages(self):
+        """Build a ProviderCapabilities that reports supported_languages=None.
+
+        ProviderCapabilities is a frozen dataclass typed list[str]|str (non-optional).
+        We use object.__setattr__ to inject None to simulate a provider that omits
+        this field or sets it to None at runtime.
+        """
+        from finecorpus.embedding.base import ProviderCapabilities
+
+        caps = ProviderCapabilities(
+            provider_id="fake-none",
+            model_id="none-embed",
+            vector_dimensions=128,
+            max_input_tokens=512,
+            max_batch_size=64,
+            supported_languages=[],  # placeholder; overwritten below
+            cross_lingual=False,
+            is_local=True,
+            cost_per_1k_tokens=None,
+            pricing_as_of=None,
+            api_version="test",
+        )
+        # Inject None to simulate a provider that does not declare supported languages
+        object.__setattr__(caps, "supported_languages", None)
+        return caps
+
+    def test_caps_with_none_languages_and_no_embedding_fallback_warns(self):
+        """capabilities.supported_languages=None + embedding.supports_languages=None
+        + significant non-English → warned_proceed (must NOT silently proceed).
+
+        This test FAILS against current code (hits `if declared is None: pass`).
+        """
+        corpus = _make_corpus_with_languages({"en": 60, "fr": 40})
+        embedding = _make_embedding(None)  # embedding also declares no languages
+        caps = self._make_caps_with_none_languages()
+
+        result = _compute_language_support(corpus, embedding, caps)
+        assert result.decision == LanguageDecision.warned_proceed, (
+            "When provider_capabilities.supported_languages is None and "
+            "embedding.supports_languages is also None/empty, the system must emit "
+            "warned_proceed (not silently proceed). "
+            f"Got: {result.decision}"
+        )
+
+    def test_caps_with_none_languages_fallback_list_covers_all_proceeds(self):
+        """capabilities.supported_languages=None but embedding.supports_languages covers
+        all detected languages → proceed via fallback (no warning).
+
+        This test FAILS against current code (silently proceeds regardless of fallback
+        because `if declared is None: pass` → no unsupported → proceed is correct by
+        accident, but for the wrong reason — it ignores fr entirely).
+        """
+        corpus = _make_corpus_with_languages({"en": 70, "fr": 30})
+        # embedding declares both languages → fallback covers corpus
+        embedding = _make_embedding(["en", "fr"])
+        caps = self._make_caps_with_none_languages()
+
+        result = _compute_language_support(corpus, embedding, caps)
+        assert result.decision == LanguageDecision.proceed, (
+            "When caps.supported_languages is None but embedding.supports_languages "
+            "covers all detected languages, proceed via fallback. "
+            f"Got: {result.decision}"
+        )
+
+    def test_caps_with_none_languages_warns_names_unsupported(self):
+        """When warned_proceed via None-capabilities path, unsupported_languages is populated."""
+        corpus = _make_corpus_with_languages({"en": 50, "de": 50})
+        embedding = _make_embedding(None)
+        caps = self._make_caps_with_none_languages()
+
+        result = _compute_language_support(corpus, embedding, caps)
+        assert result.decision == LanguageDecision.warned_proceed
+        assert len(result.unsupported_languages) > 0, (
+            "warned_proceed must name the languages that could not be verified"
+        )
+        # 'de' must be named since neither caps nor embedding declares German support
+        assert "de" in result.unsupported_languages
+
+
+# ---------------------------------------------------------------------------
 # Integration: PlanStage uses language decision correctly
 # ---------------------------------------------------------------------------
 

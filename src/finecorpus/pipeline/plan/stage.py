@@ -144,13 +144,20 @@ def _compute_language_support(
     Returns:
         LanguageSupportDecision with decision=proceed or warned_proceed.
     """
-    # Determine which languages the model supports
-    declared: list[str] | str
+    # Determine which languages the model supports.
+    # Spec §7.6: when capabilities declares None, fall back to embedding.supports_languages.
+    # If that is also None/empty, we cannot verify support → warn rather than embed silently.
+    declared: list[str] | str | None
     if provider_capabilities is not None:
-        declared = provider_capabilities.supported_languages
+        raw_declared = provider_capabilities.supported_languages  # may be None at runtime
         cross_lingual = provider_capabilities.cross_lingual
+        if raw_declared is None:
+            # Capabilities object provides no language list — fall back to embedding config
+            declared = embedding.supports_languages or None  # None if empty too
+        else:
+            declared = raw_declared
     else:
-        declared = embedding.supports_languages or []
+        declared = embedding.supports_languages or None  # None if None or []
         cross_lingual = None
 
     # Build language shares from corpus_stats
@@ -171,12 +178,19 @@ def _compute_language_support(
         fraction = count / total_segs
         detected.append(LanguageShare(language=lang, fraction=round(fraction, 4)))
 
-    # Determine unsupported languages with meaningful share
+    # Determine unsupported languages with meaningful share.
+    # Spec §7.6: when declared is None/empty → provider declares no supported languages;
+    # treat every meaningful-share non-und language as unverified → warned_proceed.
     unsupported: list[str] = []
 
     if declared is None:
-        # No declared languages — cannot determine support; proceed without warning
-        pass
+        # No declared languages — cannot verify support (spec §7.6: warn rather than
+        # embed silently). Every non-und language with meaningful share is flagged.
+        for ls in detected:
+            if ls.language == "und":
+                continue
+            if ls.fraction >= _LANGUAGE_WARN_SHARE_FLOOR:
+                unsupported.append(ls.language)
     elif declared == "*":
         # Universal coverage — all languages supported
         pass
