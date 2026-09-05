@@ -161,6 +161,40 @@ class TestOcrCleanup:
         out, changed = _apply_ocr_cleanup(text)
         assert "\n" in out
 
+    # -----------------------------------------------------------------------
+    # Ruling 2: ellipsis preservation (3-char runs preserved; 4+ collapsed)
+    # -----------------------------------------------------------------------
+
+    def test_ellipsis_preserved(self):
+        """'...' (3 chars) is semantically meaningful and must NOT be collapsed."""
+        text = "Wait for it..."
+        out, changed = _apply_ocr_cleanup(text)
+        assert out == text, f"Expected '...' to be preserved, got {out!r}"
+        assert changed is False
+
+    def test_four_dots_collapsed(self):
+        """'....' (4 chars) is an OCR artefact and MUST collapse to '.'."""
+        text = "see figure 1...."
+        out, changed = _apply_ocr_cleanup(text)
+        assert "...." not in out
+        assert out.endswith(".")
+        assert changed is True
+
+    def test_triple_exclamation_preserved(self):
+        """'!!!' (3 chars) is emphasis, not noise — must be preserved."""
+        text = "Warning!!!"
+        out, changed = _apply_ocr_cleanup(text)
+        assert out == text, f"Expected '!!!' to be preserved, got {out!r}"
+        assert changed is False
+
+    def test_four_exclamations_collapsed(self):
+        """'!!!!' (4 chars) is OCR noise — must collapse to '!'."""
+        text = "Alert!!!!"
+        out, changed = _apply_ocr_cleanup(text)
+        assert "!!!!" not in out
+        assert "!" in out
+        assert changed is True
+
 
 class TestTier1OcrRecord:
     def test_record_tier_and_operation(self):

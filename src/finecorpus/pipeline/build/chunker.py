@@ -77,9 +77,14 @@ def _count_tokens(text: str) -> int:
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(frozen=True)
 class ChunkSpan:
     """A single chunk produced from one segment.
+
+    Immutable by design (frozen=True): once constructed, no field may be
+    reassigned.  This enforces the T-04 guarantee that augmentation code
+    cannot accidentally mutate span.text.  Use ``dataclasses.replace(span,
+    field=new_value)`` to create a modified copy.
 
     Attributes:
         text: The exact text of this chunk (a substring of the segment text).

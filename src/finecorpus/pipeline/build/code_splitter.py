@@ -17,8 +17,8 @@ Supported language hints
 - ``unknown`` / ``""`` / any unrecognised hint: Falls back entirely to the
     recursive-char splitter (``split_text``).
 
-Tiling invariant (§12, T-04)
------------------------------
+Tiling invariant (§12)
+-----------------------
 The returned list of ChunkSpan objects tiles the input exactly:
   - spans[0].char_start == 0
   - spans[-1].char_end == len(text)
@@ -33,11 +33,26 @@ Fallback rules
    applied WITHIN that unit, keeping other units intact.
 3. Empty input: returns one zero-length ChunkSpan (consistent with chunker.py).
 
+Known limitations (heuristic trade-offs; recorded decisions)
+------------------------------------------------------------
+a. **String-literal false splits** — a ``def`` or ``class`` keyword at column 0
+   inside a multiline string literal (e.g. docstrings, raw string blocks) is
+   indistinguishable from a real top-level definition using line-based heuristics.
+   This causes false boundary splits in such files.  Correct detection requires a
+   full parse tree (e.g. tree-sitter); the heuristic approach is the accepted
+   Phase 3 trade-off.  See ``test_code_splitter.py::TestKnownLimitations`` for a
+   test that captures this behaviour and marks it as a documented limitation.
+b. **Column-0 decorators only** — the decorator back-extension in
+   ``_python_boundaries`` recognises only column-0 ``@`` lines.  Indented
+   decorators (rare in well-formed code) are not extended and remain in the
+   preceding span.
+
 See docs/pipeline/build.md for the full reference.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import re
 
 from finecorpus.pipeline.build.chunker import ChunkSpan, _count_tokens, split_text
@@ -91,11 +106,24 @@ _BRACE_LANGS = {"c", "cpp", "c++", "java", "rust", "rs", "csharp", "cs", "swift"
 
 
 def _python_boundaries(lines: list[str]) -> list[int]:
-    """Return 0-based line indices of top-level Python definitions."""
+    """Return 0-based line indices of top-level Python definitions.
+
+    When a ``def``/``class``/``async def`` boundary is detected, the boundary
+    index is extended backward over any immediately-preceding column-0 decorator
+    lines (``@...``).  Only column-0 decorators are recognised; indented decorators
+    are left as part of the preceding unit.  This ensures decorators travel with
+    the definition they annotate rather than being stranded in the previous span.
+    """
     boundaries: list[int] = []
     for i, line in enumerate(lines):
         if _PY_BOUNDARY_RE.match(line):
-            boundaries.append(i)
+            # Walk backward over column-0 @decorator lines immediately above.
+            start = i
+            j = i - 1
+            while j >= 0 and lines[j].startswith("@"):
+                start = j
+                j -= 1
+            boundaries.append(start)
     return boundaries
 
 
@@ -103,9 +131,12 @@ def _js_boundaries(lines: list[str]) -> list[int]:
     """Return 0-based line indices of top-level JS/TS declarations."""
     boundaries: list[int] = []
     for i, line in enumerate(lines):
+        if not line:
+            # Empty lines cannot be top-level declarations.
+            continue
         if _JS_BOUNDARY_RE.match(line.lstrip()):
-            # Only accept column-0 (top-level) declarations
-            if not line[0].isspace() or line[0] == "":
+            # Only accept column-0 (top-level) declarations.
+            if not line[0].isspace():
                 boundaries.append(i)
     return boundaries
 
@@ -274,7 +305,7 @@ def split_code(
     - The language is unrecognised.
     Oversized single units fall back to ``split_text`` within that unit.
 
-    Tiling invariant (§12, T-04):
+    Tiling invariant (§12):
     - ``spans[0].char_start == 0``
     - ``spans[-1].char_end == len(text)``
     - Consecutive spans are contiguous (no gaps, no overlaps).
@@ -318,10 +349,8 @@ def split_code(
     spans = _build_spans_from_boundaries(text, lines, boundaries, max_tokens, start_idx=0)
 
     # Re-index chunk_index to be dense 0-based (it already is from _build_spans_from_boundaries,
-    # but make explicit)
-    for new_idx, span in enumerate(spans):
-        # Create new span with corrected index (dataclass is mutable via field assignment)
-        span.chunk_index = new_idx
+    # but make explicit).  ChunkSpan is frozen; use dataclasses.replace to produce new instances.
+    spans = [dataclasses.replace(span, chunk_index=new_idx) for new_idx, span in enumerate(spans)]
 
     # --- Verify tiling invariant ---
     # (This is a development-time assertion; it will be caught by tests too.)

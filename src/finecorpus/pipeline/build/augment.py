@@ -204,10 +204,11 @@ def augment_chunk(
 ) -> tuple[Augmentation, list[TransformationRecord]]:
     """Compute Tier 2 augmentation for a chunk span.
 
-    This function is READ-ONLY with respect to ``span``.  There is NO code path
-    that mutates ``span``, ``span.text``, or any attribute of the segment.  The
-    function builds augmentation data from the segment metadata and optional LLM
-    client call, leaving the chunk text completely unchanged.
+    This function is READ-ONLY with respect to ``span``.  ``ChunkSpan`` is a
+    frozen dataclass, so mutation of any field (including ``span.text``) raises
+    ``FrozenInstanceError`` at runtime — the T-04 guarantee is structural, not
+    merely a convention.  The function builds augmentation data from the segment
+    metadata and optional LLM client call, leaving the chunk text completely unchanged.
 
     Augmentation operations applied depend on ``rule.transformation.tier2_operations``:
     - ``breadcrumb_augment``: populates ``parent_breadcrumb`` from ``segment.structural_path``.
@@ -291,11 +292,6 @@ def augment_chunk(
         parent_breadcrumb=parent_breadcrumb,
         class_context=class_context,
     )
-
-    # Strict post-condition check: verify the span text is byte-identical to what
-    # we received.  This will always pass (we never mutate span), but it makes the
-    # invariant explicit and catches future accidental mutations.
-    assert span.text == span.text  # noqa: PLR0124 — identity check; always True by design
 
     return augmentation, records
 

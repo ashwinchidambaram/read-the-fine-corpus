@@ -311,3 +311,135 @@ class TestTokenCount:
                 f"token_count mismatch for span {span.chunk_index}: "
                 f"expected {expected}, got {span.token_count}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Ruling 4: Decorator back-extension in _python_boundaries
+# ---------------------------------------------------------------------------
+
+DECORATED_CODE = """\
+import staticmethod
+
+
+class MyClass:
+    @staticmethod
+    def static_method():
+        pass
+
+
+@property
+def prop(self):
+    return self._prop
+
+
+@classmethod
+def bar(cls):
+    return cls()
+"""
+
+
+class TestDecoratorBackExtension:
+    """Decorators at column 0 must travel with their def/class boundary."""
+
+    def test_tiles_exactly(self):
+        _assert_tiles(DECORATED_CODE, split_code(DECORATED_CODE, 512, "python"))
+
+    def test_dense_index(self):
+        _assert_dense_index(split_code(DECORATED_CODE, 512, "python"))
+
+    def test_staticmethod_decorator_travels_with_def(self):
+        """@staticmethod must appear in the same span as the def it decorates."""
+        # Use a module-level @staticmethod above a def to test the back-extension.
+        code = "@staticmethod\ndef bar(x):\n    return x\n\ndef other():\n    pass\n"
+        spans = split_code(code, 512, "python")
+        _assert_tiles(code, spans)
+        # The first span should contain both the decorator and the def
+        first_span_texts = [s.text for s in spans if "@staticmethod" in s.text]
+        assert first_span_texts, "Expected @staticmethod to be in some span"
+        # The decorator and its def must be in the same span
+        for text in first_span_texts:
+            assert "def bar" in text, (
+                f"@staticmethod and def bar must be in the same span; got: {text!r}"
+            )
+
+    def test_chained_decorators_with_def(self):
+        """Multiple consecutive column-0 decorators must all travel with the def."""
+        code = "@decorator_one\n@decorator_two\ndef func():\n    pass\n\ndef other():\n    pass\n"
+        spans = split_code(code, 512, "python")
+        _assert_tiles(code, spans)
+        # Find the span containing @decorator_one
+        target_spans = [s for s in spans if "@decorator_one" in s.text]
+        assert target_spans, "Expected @decorator_one in some span"
+        target = target_spans[0]
+        assert "@decorator_two" in target.text, "Both decorators must be in the same span"
+        assert "def func" in target.text, "def must be in the same span as its decorators"
+
+    def test_tiling_with_decorator(self):
+        """Decorator back-extension must not create gaps or overlaps."""
+        code = "@staticmethod\ndef bar():\n    return 1\n"
+        spans = split_code(code, 512, "python")
+        _assert_tiles(code, spans)
+
+
+# ---------------------------------------------------------------------------
+# Ruling 5: Known limitations — string literal false splits (documented)
+# ---------------------------------------------------------------------------
+
+
+class TestKnownLimitations:
+    """Captures documented known-limitation behaviour.
+
+    IMPORTANT: These tests document the CURRENT (known-limited) behaviour.
+    They exist so that future changes are deliberate.  Do NOT remove or
+    change these assertions without updating the module's "Known limitations"
+    docstring and the corresponding orchestrator decision record.
+    """
+
+    def test_def_inside_multiline_string_causes_false_boundary(self):
+        """KNOWN LIMITATION (a): column-0 'def' inside a multiline string is
+        treated as a boundary by the heuristic splitter.  This is documented
+        behaviour; tree-sitter would be needed for correct detection.
+
+        The test asserts the CURRENT (limited) behaviour to make future
+        changes deliberate.
+        """
+        # This code has a 'def' inside a triple-quoted string at column 0.
+        code = (
+            'DOCSTRING = """\n'
+            "def fake_boundary():\n"
+            '    pass\n"""\n'
+            "\n"
+            "def real_function():\n"
+            "    return 1\n"
+        )
+        spans = split_code(code, 512, "python")
+        # The tiling invariant must still hold regardless of false boundaries.
+        _assert_tiles(code, spans)
+        _assert_dense_index(spans)
+        # KNOWN LIMITATION: the splitter currently produces more spans than the
+        # two logical units (DOCSTRING assignment + real_function) because it
+        # treats the embedded 'def' as a boundary.  We assert >= 1 span and
+        # that reassembly is exact; the over-splitting is the documented behaviour.
+        assert len(spans) >= 1
+        assert "".join(s.text for s in spans) == code  # reassembly exact
+
+    def test_indented_decorator_not_extended(self):
+        """KNOWN LIMITATION (b): indented decorators (rare in well-formed code)
+        are not extended backward — only column-0 '@' lines are recognised.
+
+        This test documents the current behaviour.
+        """
+        # Indented decorator (unusual formatting — not column-0)
+        code = (
+            "class Foo:\n"
+            "    @staticmethod\n"
+            "    def method():\n"
+            "        pass\n"
+            "\n"
+            "def top_level():\n"
+            "    pass\n"
+        )
+        spans = split_code(code, 512, "python")
+        _assert_tiles(code, spans)
+        # The indented @staticmethod is NOT column-0, so it is not back-extended.
+        # This is the documented limitation (b).

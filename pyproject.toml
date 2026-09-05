@@ -104,6 +104,12 @@ forbidden_modules = [
     "finecorpus.services",
 ]
 
+[tool.pytest.ini_options]
+# Explicit norecursedirs: keep standard ignores but exclude 'build' so that
+# tests/pipeline/build/ is discovered normally (pytest's built-in default
+# includes 'build', which silently skips that directory).
+norecursedirs = [".*", "*.egg", "dist", "node_modules", "venv", "{arch}", "_darcs", "CVS"]
+
 [dependency-groups]
 dev = [
     "fpdf2>=2.7",

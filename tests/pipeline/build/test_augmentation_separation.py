@@ -442,3 +442,42 @@ class TestStubClient:
     def test_satisfies_protocol(self):
         client = StubAugmentationClient()
         assert isinstance(client, AugmentationClient)
+
+
+# ---------------------------------------------------------------------------
+# Ruling 3: ChunkSpan is frozen — structural T-04 guarantee
+# ---------------------------------------------------------------------------
+
+
+class TestChunkSpanFrozen:
+    """ChunkSpan is a frozen dataclass; field mutation must raise FrozenInstanceError.
+
+    This is the structural enforcement of T-04: augmentation code cannot
+    accidentally mutate span.text even if a bug introduces an assignment.
+    """
+
+    def test_frozen_text_cannot_be_mutated(self):
+        """Assigning to span.text must raise FrozenInstanceError."""
+        import dataclasses
+
+        span = _make_span("immutable text")
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            span.text = "mutated"  # type: ignore[misc]
+
+    def test_frozen_chunk_index_cannot_be_mutated(self):
+        """Assigning to span.chunk_index must raise FrozenInstanceError."""
+        import dataclasses
+
+        span = _make_span()
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            span.chunk_index = 99  # type: ignore[misc]
+
+    def test_dataclasses_replace_produces_new_instance(self):
+        """dataclasses.replace() is the correct way to produce a modified copy."""
+        import dataclasses
+
+        span = _make_span("original")
+        new_span = dataclasses.replace(span, chunk_index=5)
+        assert new_span.chunk_index == 5
+        assert span.chunk_index == 0  # original unchanged
+        assert new_span.text == span.text  # text preserved

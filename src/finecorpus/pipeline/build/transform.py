@@ -42,8 +42,10 @@ _NULL_BYTE = "\x00"
 _CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 # Whitespace normalisation: collapse each run of spaces/tabs within a line
 _INLINE_WS_RE = re.compile(r"[ \t]{2,}")
-# Repeated punctuation (OCR artefact)
-_REPEATED_PUNCT_RE = re.compile(r"([.,:;!?])\1{2,}")
+# Repeated punctuation (OCR artefact): collapses runs of 4+ identical chars to 1.
+# Three-char runs (e.g. ``...``, ``!!!``) are intentionally preserved — they carry
+# semantic meaning (ellipsis, emphasis).  Four or more are treated as OCR noise.
+_REPEATED_PUNCT_RE = re.compile(r"([.,:;!?])\1{3,}")
 
 
 def _make_record(
@@ -111,7 +113,8 @@ def _apply_ocr_cleanup(text: str) -> tuple[str, bool]:
     1. Remove null bytes.
     2. Remove soft hyphens (U+00AD).
     3. Remove other C0 control characters (except \\t, \\n, \\r which are whitespace).
-    4. Collapse repeated punctuation runs of 3+ (e.g. ``...`` is fine; ``....`` → ``.``).
+    4. Collapse repeated punctuation runs of 4+ identical chars to 1
+       (e.g. ``...`` preserved; ``....`` → ``.``).
     5. Unicode NFC normalisation so decomposed characters become composed form.
 
     Note: We deliberately do NOT collapse all Unicode to ASCII — that would silently
@@ -131,6 +134,12 @@ def _apply_table_to_markdown(text: str) -> tuple[str, bool]:
     tables are already rendered.  This function exists so callers can emit an honest
     TransformationRecord when that upstream conversion occurred.  The text is returned
     unchanged; ``changed_text=False`` reflects that no bytes were altered HERE.
+
+    Wave-2 wiring note: ``build/stage.py::_build_table_to_markdown_record`` currently
+    emits a ``table_to_markdown`` TransformationRecord independently of this path.
+    Wave-2 MUST remove that independent emission and drive provenance exclusively through
+    ``apply_tier1``'s records to avoid double-recording.  The orchestrator is tracking
+    this as a Wave-2 brief item; this comment is the in-code breadcrumb.
     """
     # No-op: conversion already happened upstream (parse layer).
     return text, False
