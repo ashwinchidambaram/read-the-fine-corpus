@@ -185,6 +185,12 @@ internal_llm:
     # Default: 0.2
     temperature: 0.2
 
+    # Hard ceiling on output tokens per internal LLM call.  Prevents runaway
+    # completions.  Budget enforcement (§16) is deferred to Phase 4; this
+    # ceiling is the Phase 3 guard.  (provider-abstraction.md §4.3, D-21(b))
+    # Default: 1024
+    max_output_tokens: 1024
+
   operations:
     classification:
       # Provider for segment classification. Inherits default when null.

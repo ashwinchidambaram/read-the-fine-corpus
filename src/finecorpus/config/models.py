@@ -391,6 +391,16 @@ class InternalLLMDefaultConfig(BaseModel):
             "appears in the product. **(proposed)**"
         ),
     )
+    max_output_tokens: int = Field(
+        default=1024,
+        gt=0,
+        description=(
+            "provider-abstraction.md §4.3, D-21(b) — Hard ceiling on output tokens per "
+            "internal LLM call.  Prevents runaway completions.  Budget enforcement "
+            "(§16 cost cap) is deferred to Phase 4; this ceiling is the Phase 3 guard. "
+            "**(proposed)**"
+        ),
+    )
 
 
 class InternalLLMConfig(BaseModel):
