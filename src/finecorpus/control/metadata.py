@@ -32,6 +32,7 @@ from sqlalchemy import (
 from sqlalchemy import create_engine as sa_create_engine
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
+from sqlalchemy.schema import DDL
 
 logger = logging.getLogger(__name__)
 
@@ -161,16 +162,124 @@ def create_engine(dsn: str, **kwargs: Any) -> Engine:
         raise type(exc)(str(exc).replace(dsn, _redact_dsn(dsn))) from None
 
 
+def _ensure_all_models_imported() -> None:
+    """Import all ORM model modules so their tables are registered with Base.metadata.
+
+    SQLAlchemy's declarative ORM only adds a table to ``Base.metadata`` when the
+    class body is executed (i.e. when the module is imported).  This function
+    imports every control-plane module that contains an ORM model, guaranteeing
+    that ``Base.metadata.create_all()`` creates ALL Phase 4 tables — not just the
+    ones that happen to have been imported by the caller.
+
+    Uses late imports to avoid circular import issues (these modules import Base
+    from this module; importing them at module-load time would cause a cycle if
+    metadata.py is not fully initialized yet).
+    """
+    import finecorpus.control.audit  # noqa: F401
+    import finecorpus.control.auth  # noqa: F401
+    import finecorpus.control.break_glass  # noqa: F401
+    import finecorpus.control.cost_ledger  # noqa: F401
+    import finecorpus.control.jobs  # noqa: F401
+    import finecorpus.control.reindex  # noqa: F401
+    import finecorpus.control.tombstone  # noqa: F401
+
+
 def create_tables(engine: Engine) -> None:
     """Create all control-plane tables if they do not exist.
 
     In production, tables are created by Alembic migrations. This function is
     provided for integration tests that bring up a fresh schema.
 
+    For PostgreSQL engines, this function also creates the immutability triggers
+    on ``audit_log`` and ``tombstone_log`` so that ``create_tables()`` and the
+    Alembic migration produce identical DB-level enforcement.
+
     Args:
         engine: Bound SQLAlchemy engine.
     """
+    # Ensure all ORM model modules have been imported so their tables are
+    # registered with Base.metadata before create_all() is called.
+    _ensure_all_models_imported()
     _Base.metadata.create_all(engine)
+    _attach_immutability_triggers(engine)
+
+
+# ---------------------------------------------------------------------------
+# PG immutability triggers (attached after create_all for integration tests)
+# ---------------------------------------------------------------------------
+
+_AUDIT_LOG_TRIGGER_FN_DDL = DDL(
+    """
+CREATE OR REPLACE FUNCTION _rtfc_audit_log_immutable()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'audit_log is append-only (entry_id=%)', OLD.entry_id;
+END;
+$$;
+"""
+)
+
+_AUDIT_LOG_TRIGGER_DDL = DDL(
+    """
+CREATE TRIGGER trg_audit_log_immutable
+BEFORE UPDATE OR DELETE ON audit_log
+FOR EACH ROW EXECUTE FUNCTION _rtfc_audit_log_immutable();
+"""
+)
+
+_TOMBSTONE_LOG_TRIGGER_FN_DDL = DDL(
+    """
+CREATE OR REPLACE FUNCTION _rtfc_tombstone_log_immutable()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'tombstone_log is append-only (entry_id=%)', OLD.entry_id;
+END;
+$$;
+"""
+)
+
+_TOMBSTONE_LOG_TRIGGER_DDL = DDL(
+    """
+CREATE TRIGGER trg_tombstone_log_immutable
+BEFORE UPDATE OR DELETE ON tombstone_log
+FOR EACH ROW EXECUTE FUNCTION _rtfc_tombstone_log_immutable();
+"""
+)
+
+
+def _attach_immutability_triggers(engine: Engine) -> None:
+    """Attach PG immutability triggers after table creation.
+
+    No-op on non-PostgreSQL engines (e.g. SQLite used in unit tests).
+
+    Args:
+        engine: Bound SQLAlchemy engine.
+    """
+    if engine.dialect.name != "postgresql":
+        return
+
+    # Check if audit_log and tombstone_log tables exist before attempting
+    # to create triggers — they may not exist yet if only alias_records was created.
+    with engine.connect() as conn:
+        # Attempt each trigger; ignore "already exists" (idempotent)
+        for ddl in (
+            _AUDIT_LOG_TRIGGER_FN_DDL,
+            _AUDIT_LOG_TRIGGER_DDL,
+            _TOMBSTONE_LOG_TRIGGER_FN_DDL,
+            _TOMBSTONE_LOG_TRIGGER_DDL,
+        ):
+            try:
+                conn.execute(ddl)
+                conn.commit()
+            except Exception as exc:
+                conn.rollback()
+                # Idempotency: only "already exists" is skippable. Anything
+                # else (e.g. insufficient privileges) would silently drop the
+                # DB-level append-only enforcement — that must surface.
+                if "already exists" in str(exc).lower():
+                    logger.debug("immutability trigger already present: %s", exc)
+                    continue
+                raise
 
 
 # ---------------------------------------------------------------------------
