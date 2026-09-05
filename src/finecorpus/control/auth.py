@@ -36,6 +36,28 @@ from sqlalchemy.orm import Mapped, Session, mapped_column
 from finecorpus.control.metadata import Base
 
 # ---------------------------------------------------------------------------
+# Action enum for authorize()
+# ---------------------------------------------------------------------------
+
+
+class Action(StrEnum):
+    """Actions that can be authorized against the capability matrix.
+
+    Role × Scope containment (§2.2):
+    - platform scope ⊇ workspace scope ⊇ kb scope
+    - admin has operational control everywhere (§2.2) but content reads are
+      gated by break-glass (§2.3) — content-read gating is a later PR;
+      admin can query_kb for now to allow administrative inspection.
+    - editor can query their own workspace/KB.
+    - viewer can query their own KB.
+    - service can query their own KB.
+    """
+
+    query_kb = "query_kb"
+    """Query a knowledge base for retrieval results (M-072/M-073)."""
+
+
+# ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
@@ -231,6 +253,15 @@ class ApiKeyRepository:
         role = Role(role)
         scope_kind = ScopeKind(scope_kind)
 
+        # Scope-symmetry enforcement (PR #33 R4): workspace-scoped keys without
+        # workspace_id and kb-scoped keys without kb_id are corrupt at issuance time —
+        # reject early so validate() never returns a principal with a missing scope
+        # anchor (which would then silently fail open).
+        if scope_kind == ScopeKind.workspace and not workspace_id:
+            raise AuthError("workspace-scoped key requires a non-empty workspace_id")
+        if scope_kind == ScopeKind.kb and not kb_id:
+            raise AuthError("kb-scoped key requires a non-empty kb_id")
+
         full_key, stored_prefix, key_hash = _generate_raw_key()
         key_id = secrets.token_hex(16)
         now = datetime.now(tz=UTC)
@@ -393,11 +424,90 @@ class ApiKeyRepository:
         )
 
 
+# ---------------------------------------------------------------------------
+# Authorization — capability matrix (§2.2, Role docstring)
+# ---------------------------------------------------------------------------
+
+# Capability matrix: role → set of (action, scope_kinds_allowed)
+# Scope containment: global_ ⊇ workspace ⊇ kb.
+# A principal with broader scope can act on narrower-scoped resources.
+# admin can perform all actions at all scope levels (operational control).
+# editor can query_kb at workspace or kb scope.
+# viewer can query_kb at kb scope only.
+# service can query_kb at kb scope only (§14.2 service principal).
+
+_QUERY_KB_ALLOWED_SCOPES: dict[Role, frozenset[ScopeKind]] = {
+    Role.admin: frozenset({ScopeKind.global_, ScopeKind.workspace, ScopeKind.kb}),
+    Role.editor: frozenset({ScopeKind.workspace, ScopeKind.kb}),
+    Role.viewer: frozenset({ScopeKind.kb}),
+    Role.service: frozenset({ScopeKind.kb}),
+}
+
+_ACTION_SCOPE_MAP: dict[Action, dict[Role, frozenset[ScopeKind]]] = {
+    Action.query_kb: _QUERY_KB_ALLOWED_SCOPES,
+}
+
+
+def authorize(
+    principal: Principal,
+    action: Action,
+    *,
+    kb_id: str | None = None,
+    workspace_id: str | None = None,
+) -> None:
+    """Authorize a principal to perform an action, enforcing the RBAC matrix.
+
+    Checks role × scope containment per the §2.2 capability matrix.  The
+    principal's scope_kind determines what resource granularity they can access:
+    - global_ scope can act on any resource (platform-wide).
+    - workspace scope can act on resources within their workspace_id.
+    - kb scope can act on resources within their kb_id only.
+
+    Args:
+        principal: Authenticated principal (from ApiKeyRepository.validate()).
+        action: The action to authorize (e.g. Action.query_kb).
+        kb_id: The knowledge-base ID being acted on (optional).
+        workspace_id: The workspace ID being acted on (optional).
+
+    Raises:
+        AuthError: If the principal lacks permission to perform the action.
+            NEVER includes key material in the error message.
+    """
+    scope_map = _ACTION_SCOPE_MAP.get(action)
+    if scope_map is None:
+        raise AuthError(f"unknown action: {action!r}")
+
+    allowed_scopes = scope_map.get(principal.role, frozenset())
+    if principal.scope_kind not in allowed_scopes:
+        raise AuthError(
+            f"role '{principal.role}' with scope '{principal.scope_kind}' "
+            f"is not permitted to perform '{action}'"
+        )
+
+    # Scope containment checks: narrow-scope principals must match the resource.
+    if principal.scope_kind == ScopeKind.kb:
+        # KB-scoped principal: must match the exact KB being accessed.
+        if kb_id is not None and principal.kb_id != kb_id:
+            raise AuthError(f"KB-scoped principal is not permitted to access KB '{kb_id}'")
+    elif principal.scope_kind == ScopeKind.workspace:
+        # Workspace-scoped principal: must match the workspace.
+        if workspace_id is not None and principal.workspace_id != workspace_id:
+            raise AuthError(
+                f"workspace-scoped principal is not permitted to access workspace '{workspace_id}'"
+            )
+        # Also check KB is within their workspace (if alias record provides workspace_id).
+        # For query_kb, the KB's workspace is resolved by the service layer and
+        # passed as workspace_id.  No additional check needed here.
+    # global_ scope: no containment restriction needed.
+
+
 __all__ = [
+    "Action",
     "ApiKeyRepository",
     "AuthError",
     "Principal",
     "Role",
     "ScopeKind",
     "ServicePrincipalKeyRecord",
+    "authorize",
 ]

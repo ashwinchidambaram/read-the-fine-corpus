@@ -69,6 +69,7 @@ from finecorpus.contracts.shared.blocks import (
     TrustLevel,
 )
 from finecorpus.contracts.versions import RETRIEVAL_RESPONSE_SCHEMA_VERSION as _SCHEMA_VERSION
+from finecorpus.control.auth import Principal
 from finecorpus.control.metadata import AliasRecord, AliasRepository
 from finecorpus.embedding.base import EmbeddingProvider, ProviderUnavailableError
 from finecorpus.embedding.cache import QueryEmbeddingCache, get_query_cache
@@ -94,14 +95,20 @@ _TOP_K_DEFAULT = 10
 class TenancyScope:
     """Resolved tenancy scope for a single query.
 
-    Phase 1: only kb_id is used (workspace_id and permission_principals are
-    not enforced until Phase 4). The filter seam exists so Phase 4 can slot
-    in without changing the query-builder call sites.
+    Phase 4: kb_id is mandatory (D-06: single-KB queries only).
+    workspace_id and permission_principals are enforced when a principal is
+    present (auth enabled).
 
     Attributes:
         kb_id: Knowledge-base ID derived from the URL path parameter.
-        workspace_id: Resolved workspace (empty in Phase 1 — not enforced).
-        permission_principals: Resolved principals (empty in Phase 1).
+        workspace_id: Resolved workspace from the authenticated principal.
+            Empty string when auth is disabled (Phase 1–3 compat).
+        permission_principals: Principal identifiers allowed to retrieve.
+            The query filter checks that the authenticated principal's ID is
+            present in each retrieved chunk's tenancy.permission_principals
+            list — OR that the chunk is public_to_kb (permission_mode check
+            is done by payload filter, not here).
+            Empty tuple when auth is disabled.
     """
 
     kb_id: str
@@ -112,28 +119,62 @@ class TenancyScope:
 def _build_tenancy_filter(scope: TenancyScope) -> dict[str, Any]:
     """Build the mandatory tenancy must-clause for the vector-DB query.
 
-    Phase 1: filters on tenancy.kb_id only. Phase 4 will add workspace_id
-    and permission_principals. The returned dict is the Qdrant filter format
-    accepted by IndexAdapter.search(payload_filter=…).
+    Phase 4: extends Phase 1 (kb_id only) with workspace_id and
+    permission_principals when the scope carries a principal.
 
     The tenancy clause is ALWAYS present and is a mandatory must clause (§11.4,
-    overview.md §tenant-isolation). It can only narrow the result set.
+    M-060: server-side only, never client-overridable). It can only narrow the
+    result set; it cannot be expanded by the caller.
+
+    Payload field mapping (from build_point_payload / TenancyBlock):
+    - ``tenancy.kb_id``              — exact match on the KB ULID (D-06).
+    - ``tenancy.workspace_id``       — exact match on the owning workspace (when
+                                       a workspace-or-narrower-scoped principal is
+                                       present).
+    - ``tenancy.permission_principals`` — the authenticated principal_id must be
+                                       present in this list (MatchValue on an array
+                                       field: Qdrant checks if the value is one of
+                                       the array elements; FakeAdapter handles this
+                                       via contains semantics).
 
     Args:
         scope: The resolved tenancy scope.
 
     Returns:
-        Qdrant-format payload filter dict keyed by must conditions.
+        Qdrant-format payload filter dict keyed by dotted field path to match
+        value.  For list-type fields (permission_principals) the value is a
+        sentinel dict ``{"__contains__": value}`` understood by both
+        ``_dict_to_qdrant_filter`` and ``FakeAdapter._matches_filter``.
+
+        When permission_principals is empty (auth disabled or global scope),
+        the permission_principals clause is omitted — all principals can read.
     """
-    # Flat equality dict format consumed by IndexAdapter._dict_to_qdrant_filter.
-    # Phase 4 extension: add "tenancy.workspace_id": scope.workspace_id here.
-    return {"tenancy.kb_id": scope.kb_id}
+    f: dict[str, Any] = {"tenancy.kb_id": scope.kb_id}
+
+    if scope.workspace_id:
+        f["tenancy.workspace_id"] = scope.workspace_id
+
+    if scope.permission_principals:
+        # Each principal in the tuple must be present in the chunk's
+        # permission_principals list.  For Phase 4 the tuple always has exactly
+        # one element (the authenticated principal_id).  The ``__contains__``
+        # sentinel signals list-contains semantics to the adapter layer.
+        for pid in scope.permission_principals:
+            f["tenancy.permission_principals"] = {"__contains__": pid}
+            break  # Phase 4: single principal; loop is forward-compat only.
+
+    return f
 
 
 def _tenancy_applied_filter(scope: TenancyScope) -> AppliedFilter:
     """Build the AppliedFilter that records the tenancy clause origin."""
+    parts = [f"tenancy.kb_id == {scope.kb_id!r}"]
+    if scope.workspace_id:
+        parts.append(f"tenancy.workspace_id == {scope.workspace_id!r}")
+    if scope.permission_principals:
+        parts.append(f"tenancy.permission_principals contains {scope.permission_principals[0]!r}")
     return AppliedFilter(
-        expression=f"tenancy.kb_id == {scope.kb_id!r}",
+        expression=" AND ".join(parts),
         origin=FilterOrigin.tenancy,
     )
 
@@ -356,17 +397,20 @@ def query(
     top_k: int = _TOP_K_DEFAULT,
     score_threshold: float | None = None,
     cache: QueryEmbeddingCache | None = None,
+    principal: Principal | None = None,
+    auth_enabled: bool = False,
 ) -> RetrievalResponse:
-    """Execute a Phase 1 dense retrieval query.
+    """Execute a dense retrieval query with optional auth enforcement.
 
     This is the library-level entry point (C-5). The FastAPI handler calls this
     and maps the result to HTTP status codes; all business logic lives here.
 
-    Phase 1 is dense-only. Hybrid search, reranking, and per-request metadata
-    filters are not supported and MUST NOT be passed. They do not exist as
-    parameters; there is no silent fallback.
+    Dense-only retrieval. Hybrid search, reranking, and per-request metadata
+    filters are not supported and MUST NOT be passed.
 
     Fail-closed conditions (§15) returned as result_status=error:
+    - PERMISSION_DENIED: auth is enabled and principal is None (fail closed,
+      M-061/T-02: cross-tenant must fail closed before any index access).
     - EMBEDDING_MODEL_MISMATCH: provider model identity != alias record's.
       Provider is never called on mismatch (§15, provider-abstraction §3.3).
     - PROVIDER_UNAVAILABLE: embedding provider raised ProviderUnavailableError.
@@ -377,10 +421,10 @@ def query(
     - no_matches: vector search returned 0 candidates before threshold.
     - filtered_to_zero: candidates existed but score_threshold eliminated all.
 
-    Tenancy seam (Phase 4):
-    The tenancy.kb_id must-clause is derived from the path kb_id and injected
-    server-side into every query. Phase 4 will add workspace_id and permission
-    principal filtering to TenancyScope without changing this call site.
+    Tenancy enforcement (Phase 4, M-060):
+    The TenancyScope is built from the authenticated principal (workspace_id,
+    permission_principals).  The resulting filter is injected server-side into
+    every query and CANNOT be overridden by client-supplied request body fields.
 
     Args:
         kb_id: Knowledge-base ID (from the URL path).
@@ -391,6 +435,12 @@ def query(
         top_k: Maximum results to return (default 10, max 100).
         score_threshold: Minimum score to include a result (optional).
         cache: Query-embedding cache; uses module default if None.
+        principal: Authenticated principal (Phase 4).  When ``auth_enabled``
+            is True and ``principal`` is None the query returns PERMISSION_DENIED
+            (fail closed, M-061).  Ignored when auth_enabled is False.
+        auth_enabled: True when the auth subsystem is active.  When False,
+            the principal is ignored and no tenancy filters beyond kb_id
+            are applied (Phase 1–3 compatibility).
 
     Returns:
         RetrievalResponse per the retrieval-response contract.
@@ -401,8 +451,125 @@ def query(
     # Clamp top_k to valid range
     top_k = max(1, min(top_k, _TOP_K_MAX))
 
-    # Resolve tenancy scope (Phase 4 will add more fields)
-    scope = TenancyScope(kb_id=kb_id)
+    # ------------------------------------------------------------------
+    # Phase 4: fail closed when auth enabled and no principal (M-061/T-02)
+    # ------------------------------------------------------------------
+    if auth_enabled and principal is None:
+        return _error_response(
+            query_text,
+            [],
+            ErrorCode.PERMISSION_DENIED,
+            "Authentication required.  Provide a valid API key.",
+            retriable=False,
+        )
+
+    # ------------------------------------------------------------------
+    # Phase 4 fail-closed checks (auth enabled, principal present):
+    # All checks happen BEFORE alias resolution and BEFORE index access.
+    # ------------------------------------------------------------------
+    if auth_enabled and principal is not None:
+        from finecorpus.control.auth import Action, AuthError, ScopeKind, authorize
+
+        # R4c: workspace-scoped principal with null workspace_id is a corrupt
+        # stored record — it would silently drop the workspace containment clause
+        # and fail open.  Reject immediately.
+        if principal.scope_kind == ScopeKind.workspace and not principal.workspace_id:
+            return _error_response(
+                query_text,
+                [],
+                ErrorCode.PERMISSION_DENIED,
+                "workspace-scoped principal has no workspace_id — key record is corrupt.",
+                retriable=False,
+            )
+
+        # R4c symmetric: kb-scoped principal with null kb_id is also corrupt.
+        if principal.scope_kind == ScopeKind.kb and not principal.kb_id:
+            return _error_response(
+                query_text,
+                [],
+                ErrorCode.PERMISSION_DENIED,
+                "kb-scoped principal has no kb_id — key record is corrupt.",
+                retriable=False,
+            )
+
+        # Service-level scope containment (M-061/T-02, fail closed):
+        # enforce that a KB-scoped principal can only query their own KB.
+        # This is the innermost safety gate — even if the FastAPI dependency
+        # layer already checked, the service re-checks so the library is
+        # independently safe regardless of call site.
+        try:
+            authorize(principal, Action.query_kb, kb_id=kb_id)
+        except AuthError:
+            return _error_response(
+                query_text,
+                [],
+                ErrorCode.PERMISSION_DENIED,
+                f"Principal does not have access to knowledge base '{kb_id}'.",
+                retriable=False,
+            )
+
+    # ------------------------------------------------------------------
+    # R3: For workspace-scoped principals, resolve alias record FIRST so we
+    # can verify KB→workspace containment before touching the index.
+    # This pre-alias-resolution workspace check must fire BEFORE the tenancy
+    # scope is built and BEFORE the adapter is called.
+    # ------------------------------------------------------------------
+    if auth_enabled and principal is not None:
+        from finecorpus.control.auth import ScopeKind
+
+        if principal.scope_kind == ScopeKind.workspace and principal.workspace_id:
+            # Resolve alias record to check workspace containment.
+            _pre_repo = AliasRepository(session)
+            _pre_alias = alias_name(kb_id)
+            try:
+                _pre_record = _pre_repo.get(_pre_alias)
+            except Exception:
+                _pre_record = None
+
+            if _pre_record is not None and hasattr(_pre_record, "workspace_id"):
+                if _pre_record.workspace_id and _pre_record.workspace_id != principal.workspace_id:
+                    # KB belongs to a different workspace — PERMISSION_DENIED, not no_matches.
+                    return _error_response(
+                        query_text,
+                        [],
+                        ErrorCode.PERMISSION_DENIED,
+                        (
+                            f"Knowledge base '{kb_id}' belongs to workspace "
+                            f"'{_pre_record.workspace_id}', not the principal's "
+                            f"workspace '{principal.workspace_id}'."
+                        ),
+                        retriable=False,
+                    )
+
+    # Resolve tenancy scope from the authenticated principal (M-060):
+    # workspace_id and permission_principals come from the principal, never
+    # from client-supplied request body fields.
+    #
+    # R2: global-scope principals must NOT add a permission_principals filter.
+    # Global scope means platform-wide access — injecting the admin's own
+    # principal_id into the filter would match zero chunks (chunks carry the
+    # ingesting service key's ID, not the admin's ID).  The permission_principals
+    # clause is only meaningful for workspace- and kb-scoped principals whose ID
+    # was written into the chunk's tenancy block at ingest time.
+    if auth_enabled and principal is not None:
+        from finecorpus.control.auth import ScopeKind
+
+        if principal.scope_kind == ScopeKind.global_:
+            # Global scope: no permission_principals restriction (platform-wide admin access).
+            scope = TenancyScope(
+                kb_id=kb_id,
+                workspace_id="",  # global scope does not filter by workspace
+                permission_principals=(),  # omit — all content is readable
+            )
+        else:
+            scope = TenancyScope(
+                kb_id=kb_id,
+                workspace_id=principal.workspace_id or "",
+                permission_principals=(principal.principal_id,),
+            )
+    else:
+        scope = TenancyScope(kb_id=kb_id)
+
     tenancy_filter = _build_tenancy_filter(scope)
     tenancy_af = _tenancy_applied_filter(scope)
     filters_applied = [tenancy_af]

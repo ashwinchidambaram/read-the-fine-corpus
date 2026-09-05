@@ -239,15 +239,23 @@ class FakeAdapter:
 
     @staticmethod
     def _matches_filter(payload: dict[str, Any], payload_filter: dict[str, Any]) -> bool:
-        """Return True if the point payload satisfies all exact-match filter conditions.
+        """Return True if the point payload satisfies all filter conditions.
 
         The filter dict uses dotted key paths (e.g. "tenancy.kb_id") mapped to
-        expected string values.  A missing key or a value mismatch causes the
-        point to be excluded from results — matching real Qdrant must-clause
-        semantics used by the retrieval service.
+        expected values.  Two value formats are supported:
+
+        - Plain scalar (str, int, bool, …): exact equality match against the
+          resolved payload value.
+        - ``{"__contains__": v}`` sentinel: the resolved payload field must be
+          a list that contains ``v`` as an element.  Used for
+          ``tenancy.permission_principals`` (Phase 4 M-072/M-073).
+
+        A missing key or a value mismatch causes the point to be excluded from
+        results — matching real Qdrant must-clause semantics used by the
+        retrieval service.
 
         This enforces tenancy isolation in the FakeAdapter so tests that seed
-        multi-tenant data cannot receive cross-tenant results (§18.3 test 2).
+        multi-tenant data cannot receive cross-tenant results (§18.3/T-02).
         """
         for dotted_key, expected in payload_filter.items():
             parts = dotted_key.split(".")
@@ -256,8 +264,15 @@ class FakeAdapter:
                 if not isinstance(node, dict):
                     return False
                 node = node.get(part)
-            if node != expected:
-                return False
+
+            if isinstance(expected, dict) and "__contains__" in expected:
+                # List-contains check: node must be a list with the element present.
+                contain_val = expected["__contains__"]
+                if not isinstance(node, list) or contain_val not in node:
+                    return False
+            else:
+                if node != expected:
+                    return False
         return True
 
     def search(
@@ -414,18 +429,46 @@ def make_chunk_payload(
     kb_id: str = "kb-test",
     score: float = 0.9,
     source_document_id: str = "doc-001",
+    permission_principals: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Build a Qdrant point dict with a full payload (ready for FakeAdapter.seed_collection)."""
+    """Build a Qdrant point dict with a full payload (ready for FakeAdapter.seed_collection).
+
+    Args:
+        chunk_id: Chunk identifier.
+        text: Chunk text content.
+        kb_id: Knowledge-base ID written into ``tenancy.kb_id``.
+        score: Simulated vector-search score.
+        source_document_id: Source document identifier.
+        permission_principals: Optional list of principal IDs written into
+            ``tenancy.permission_principals``.  When ``None`` (default) the
+            field is omitted from the tenancy block, which means the chunk
+            is accessible to all principals (FakeAdapter filter: missing key
+            → no constraint applied for that field).
+
+            NOTE on FakeAdapter vs Qdrant semantics: FakeAdapter uses strict
+            list-contains semantics for ``permission_principals`` (the
+            ``{"__contains__": v}`` sentinel in ``_matches_filter``).  Real
+            Qdrant uses MatchValue on the array field.  When auth is enabled
+            the ingestion layer stores ``permission_principals`` as a ``list()``
+            — so the FakeAdapter ``__contains__`` check and Qdrant MatchValue
+            check are both satisfied by the same stored value.  See
+            ``_build_tenancy_filter`` in ``retrieval.service`` for the
+            canonical filter construction.
+    """
+    tenancy: dict[str, Any] = {
+        "kb_id": kb_id,
+        "workspace_id": "ws-test",
+    }
+    if permission_principals is not None:
+        tenancy["permission_principals"] = list(permission_principals)
+
     return {
         "id": chunk_id,
         "score": score,
         "payload": {
             "chunk_id": chunk_id,
             "text": text,
-            "tenancy": {
-                "kb_id": kb_id,
-                "workspace_id": "ws-test",
-            },
+            "tenancy": tenancy,
             "provenance": make_provenance_payload(
                 source_document_id=source_document_id,
             ),
