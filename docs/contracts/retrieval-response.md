@@ -23,6 +23,7 @@ Root model: `RetrievalResponse`.
 | `results` | `list[RetrievalResult]` | yes (may be empty) | The returned chunks with scores and full provenance. Empty when `result_status` is `no_matches`, `filtered_to_zero`, or `error`. |
 | `error` | `ErrorEnvelope` | no | Present iff `result_status = error`. Carries the error code taxonomy (§15). |
 | `explain` | `ExplainBlock` | no | Present only when the query requested explain mode (§11.5). |
+| `break_glass_read_ref` | `str` | no | Audit-log entry ID when this response was served under an active break-glass grant (§2.3). Non-null iff a Platform Admin exercised break-glass content access; the grant is time-bound and every read is written to an immutable audit log. Callers MUST surface non-null values in any downstream audit trail. *(Added schema v1.2.)* |
 
 ## `RequestEcho`
 
@@ -82,11 +83,16 @@ enum ErrorCode {
 }
 ```
 
-**Schema version note**: `CONTROL_PLANE_UNAVAILABLE` and `PAYLOAD_CORRUPT` were added in schema
-version 1.1 (backward-compatible MINOR bump per the contract versioning discipline in
+**Schema version note (1.1)**: `CONTROL_PLANE_UNAVAILABLE` and `PAYLOAD_CORRUPT` were added in
+schema version 1.1 (backward-compatible MINOR bump per the contract versioning discipline in
 [README.md](README.md#contract-versioning)).  Consumers that declared `SpecRange(major=1,
 min_minor=0)` must update to `SpecRange(major=1, min_minor=1)` to handle the new codes.
 The `SUPPORTED_RETRIEVAL_RESPONSE` constant in `contracts/versions.py` has been updated accordingly.
+
+**Schema version note (1.2)**: `RATE_LIMITED` was added in schema version 1.2 (backward-compatible
+MINOR bump).  Consumers at 1.1 still accept 1.2 payloads without change (the new code is additive).
+`RATE_LIMITED` maps to HTTP 429; the `retriable` field on the `ErrorEnvelope` is `True` and a
+`Retry-After` header is present on the HTTP response.
 
 `EMBEDDING_MODEL_MISMATCH` and `VECTOR_DB_UNAVAILABLE` are called out explicitly because they are
 the two §15 fail-closed paths most likely to be mishandled as "empty result"; they MUST surface as
@@ -112,6 +118,7 @@ not a bypass (§11.5); it never contains cross-tenant candidates, exclusions, or
 | `chunk_id` | `str` | yes | Candidate chunk. |
 | `scores` | `Scores` | yes | Raw and reranked scores. |
 | `provenance` | `Provenance` | yes | Full provenance for the candidate (§11.5 requires provenance for every candidate). |
+| `permission_resolved_at` | `datetime` | no | When the chunk's TenancyBlock permission was last resolved (D-17). Surfaced in explain mode so a KB editor can assess whether the permission snapshot may be stale (e.g. the chunk was ingested days ago and a permission change has not yet triggered a reindex). Policy enforcement on staleness is deferred; this field is informational only. *(Added schema v1.2.)* |
 
 ### `ExplainExclusion`
 
