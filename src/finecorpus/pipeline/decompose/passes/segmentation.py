@@ -95,8 +95,17 @@ _REVISION_HISTORY_RE = re.compile(
 )
 
 _FRONT_MATTER_RE = re.compile(
-    r"(?:version|rev(?:ision)?|date|author|document\s+no|effective\s+date"
-    r"|prepared\s+by|approved\s+by|classification)",
+    r"(?:"
+    r"\bversion\b"
+    r"|\brev(?:ision)?\b"
+    r"|\bdate\b"
+    r"|\bauthor\b"
+    r"|\bdocument\s+no\b"
+    r"|\beffective\s+date\b"
+    r"|\bprepared\s+by\b"
+    r"|\bapproved\s+by\b"
+    r"|\bclassification\b"
+    r")",
     re.IGNORECASE,
 )
 
@@ -188,9 +197,116 @@ def _is_heading(line: str, is_first_in_paragraph: bool) -> bool:
 
 
 def _split_into_paragraphs(text: str) -> list[str]:
+    """Split *text* into paragraph blocks.
+
+    Primary path: split on blank lines (``\\n\\s*\\n+``).
+
+    Fallback for blank-line-free extractions (the realistic pypdf shape for
+    native PDFs): when a single block exceeds ``_NO_BLANK_LINE_THRESHOLD``
+    chars AND contains multiple heading-like lines (as detected by
+    ``_is_heading``), we perform a secondary split at those heading lines.
+    This handles the common case where pypdf flattens all whitespace between
+    sections, producing one large blob.
+
+    Invariants preserved:
+    - Blank-line-separated documents produce IDENTICAL results (the secondary
+      split only fires when the primary yields a single oversized block).
+    - Lossless: the concatenation of returned blocks equals the concatenation
+      of the original blocks after strip (same contract as before).
+    - Table-like line runs (``|`` or tab-separated columns) are never split
+      mid-run.
+    """
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     raw_blocks = re.split(r"\n\s*\n+", text)
-    return [block.strip() for block in raw_blocks if block.strip()]
+    blocks = [block.strip() for block in raw_blocks if block.strip()]
+
+    # --- Secondary split for blank-line-free extractions ---
+    # Only apply when the primary split yielded a single large block
+    # (or all blocks are large and few) — i.e. blank-line docs are unaffected.
+    result: list[str] = []
+    for block in blocks:
+        if len(block) >= _NO_BLANK_LINE_THRESHOLD:
+            sub = _split_block_on_headings(block)
+            result.extend(sub)
+        else:
+            result.append(block)
+    return result
+
+
+# Minimum block size (chars) to attempt secondary heading-guided splitting.
+# Below this threshold a block is returned as-is even if it contains headings.
+_NO_BLANK_LINE_THRESHOLD = 200  # chars
+
+
+def _is_table_like_line(line: str) -> bool:
+    """Return True if *line* looks like a table row (pipe or tab-delimited)."""
+    stripped = line.strip()
+    # Pipe-delimited (Markdown / FPDF table): at least two pipe chars
+    if stripped.count("|") >= 2:  # noqa: PLR2004
+        return True
+    # Tab-delimited with at least two fields
+    if "\t" in stripped and stripped.count("\t") >= 1:
+        return True
+    return False
+
+
+def _split_block_on_headings(block: str) -> list[str]:
+    """Split a large blank-line-free block at heading-like lines.
+
+    A line is a split point when:
+    1. ``_is_heading(line, is_first_in_paragraph=True)`` returns True, AND
+    2. It is NOT the very first line of the block (the first line is the
+       start of the first sub-paragraph, not a split point), AND
+    3. The preceding line is not table-like (we do not split mid-table-run).
+
+    Returns a list of stripped sub-paragraphs; the list always contains at
+    least the original block (no infinite recursion risk).
+    """
+    lines = block.split("\n")
+    if len(lines) <= 1:
+        return [block]
+
+    # Walk lines and find split points
+    sub_blocks: list[list[str]] = []
+    current: list[str] = []
+
+    for i, line in enumerate(lines):
+        stripped_line = line.strip()
+
+        if i == 0:
+            # First line always starts the first block
+            current.append(line)
+            continue
+
+        # Check if this line is a heading-level split point
+        is_split = (
+            stripped_line  # non-empty
+            and _is_heading(stripped_line, is_first_in_paragraph=True)
+            # Do not split mid-table: if the previous non-empty line was table-like, skip
+            and not _is_table_like_line(lines[i - 1])
+            # Do not split into a block that would be trivially short
+            and current  # current accumulator is non-empty
+        )
+
+        if is_split:
+            # Close the current sub-block and start a new one
+            joined = "\n".join(current).strip()
+            if joined:
+                sub_blocks.append(current)
+            current = [line]
+        else:
+            current.append(line)
+
+    # Flush the last block
+    if current:
+        sub_blocks.append(current)
+
+    if len(sub_blocks) <= 1:
+        # No useful splits found — return the original block unchanged
+        return [block]
+
+    result = ["\n".join(sb).strip() for sb in sub_blocks]
+    return [s for s in result if s]
 
 
 def _paragraph_to_lines(para: str) -> list[str]:

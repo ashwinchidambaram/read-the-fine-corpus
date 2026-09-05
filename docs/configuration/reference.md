@@ -108,7 +108,7 @@ Phase 3 real implementation. Keys marked **(Phase 3)** are wired to `ResolvedOpC
 | `internal_llm.default.model` | string | — | §7.3 | Exact model identifier (e.g. `gpt-4o-mini`, `llama3.2`). **(Phase 3)** |
 | `internal_llm.default.endpoint` | string | provider default | §7.3, M-037 | Override endpoint URL. Required for Ollama (`http://localhost:11434`); optional for OpenAI-compatible servers. **(Phase 3)** |
 | `internal_llm.default.temperature` | float [0,1] | `0.2` | §7.3 | Temperature for internal model calls. **(Phase 3)** |
-| `internal_llm.default.max_output_tokens` | int | `512` | §7.3, D-21 | Hard ceiling on output tokens per call. Bounds cost against compromised/misconfigured endpoints (D-21 resolution). **(Phase 3)** |
+| `internal_llm.default.max_output_tokens` | int | `1024` | §7.3, D-21 | Hard ceiling on output tokens per call. Bounds cost against compromised/misconfigured endpoints (D-21 resolution). **(Phase 3)** |
 | `internal_llm.operations.classification.provider` | string | inherits default | provider-abstraction.md §4.2 | Provider for segment classification. |
 | `internal_llm.operations.classification.model` | string | inherits default | provider-abstraction.md §4.2 | |
 | `internal_llm.operations.classification.temperature` | float [0,1] | `0.0` **(proposed)** | provider-abstraction.md §4.2 | Determinism is strongly preferred for classification. |

@@ -260,25 +260,54 @@ class TestT04:
     slice — position-exact, not canonical.index(text) which masks off-by-position
     bugs on repeated text.
 
-    This class is a thin acceptance-level reference.  The corpus-wide position-exact
-    assertion lives in:
-        tests/phase3/test_t04_byte_identity.TestT04CorpusWide
-            .test_corpus_wide_byte_identity_position_exact
+    This class invokes ``run_corpus_wide_t04_verification`` — the shared helper
+    extracted from TestT04CorpusWide per Ruling 4 — to run the REAL corpus-wide
+    verification and assert on the returned stats.  This supersedes the former
+    method-existence-only sentinel test.
 
-    Every tier-2 TransformationRecord changed_text=False assertion lives in:
+    Detailed per-chunk test coverage lives in:
         tests/phase3/test_t04_byte_identity.TestT04CorpusWide
-            .test_corpus_wide_tier2_changed_text_false
-
-    We import and re-run the core corpus-wide fixture here to make the §19 criterion
-    acceptance-visible in the phase3 acceptance test suite without duplicating logic.
     """
 
-    def test_t04_corpus_wide_byte_identity_criterion_is_covered(self) -> None:
-        """§19 criterion 2 is covered by TestT04CorpusWide in test_t04_byte_identity.py.
+    def test_t04_corpus_wide_real_verification(self, tmp_path: pathlib.Path) -> None:
+        """§19 criterion 2: run corpus-wide byte-identity verification for real.
 
-        This sentinel test confirms the module is importable and the class exists.
-        The actual corpus-wide assertion runs as
-        test_t04_byte_identity.TestT04CorpusWide.test_corpus_wide_byte_identity_position_exact.
+        Invokes ``run_corpus_wide_t04_verification()`` (Ruling 4 callable helper)
+        and asserts on the returned stats:
+        - fixtures_verified > 0 (at least one fixture contributed chunks)
+        - chunks_verified > 0 (at least one chunk was checked)
+        - zero byte-identity violations
+        - zero tier-2 changed_text=True violations
+        """
+        from tests.phase3.test_t04_byte_identity import (  # noqa: PLC0415
+            run_corpus_wide_t04_verification,
+        )
+
+        stats = run_corpus_wide_t04_verification(tmp_path)
+
+        assert stats["fixtures_verified"] > 0, (
+            "§19 criterion 2: corpus-wide T-04 verification found no fixtures with chunks. "
+            f"stats={stats}"
+        )
+        assert stats["chunks_verified"] > 0, (
+            "§19 criterion 2: corpus-wide T-04 verification found no chunks to check. "
+            f"stats={stats}"
+        )
+        assert not stats["violations"], (
+            f"§19 criterion 2: byte-identity failures in {len(stats['violations'])} chunks "
+            f"(fixtures_verified={stats['fixtures_verified']}, "
+            f"chunks_verified={stats['chunks_verified']}):\n" + "\n".join(stats["violations"][:10])
+        )
+        assert not stats["tier2_violations"], (
+            f"§19 criterion 2: tier-2 changed_text=True in {len(stats['tier2_violations'])} "
+            f"records:\n" + "\n".join(stats["tier2_violations"][:10])
+        )
+
+    def test_t04_corpus_wide_byte_identity_criterion_is_covered(self) -> None:
+        """§19 criterion 2: TestT04CorpusWide and run_corpus_wide_t04_verification exist.
+
+        Structural sentinel confirming the module, class, and callable helper are present.
+        The real verification runs in test_t04_corpus_wide_real_verification above.
         """
         from tests.phase3 import test_t04_byte_identity  # noqa: PLC0415
 
@@ -291,6 +320,10 @@ class TestT04:
         )
         assert hasattr(cls, "test_corpus_wide_tier2_changed_text_false"), (
             "test_corpus_wide_tier2_changed_text_false must exist in TestT04CorpusWide"
+        )
+        assert hasattr(test_t04_byte_identity, "run_corpus_wide_t04_verification"), (
+            "run_corpus_wide_t04_verification callable must exist in test_t04_byte_identity "
+            "(Ruling 4: acceptance sentinel invokes real verification)"
         )
 
     def test_t04_unit_position_exact_passes(self, tmp_path: pathlib.Path) -> None:
@@ -867,4 +900,125 @@ class TestCostGate:
         assert result.embedding_provider is None, (
             "embedding_provider must be None when the provider is unavailable "
             "(returning a fake provider would misrepresent the cost as $0.00)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Corpus-wide manifest segment-type parity (Ruling 3 — drift sentinel)
+#
+# Asserts that each golden fixture's produced segment-type set matches the
+# expected_segment_types declared in manifest.yaml.
+#
+# Semantics: SUBSET — the manifest declares a minimum required set; the
+# pipeline may produce additional types not listed (e.g. cross_reference,
+# boilerplate) without failing this assertion.  Fixtures with an empty
+# expected_segment_types list (excluded fixtures) must produce no segments.
+#
+# This makes manifest drift impossible to hide: any change to segmentation
+# that adds or removes a type from a fixture will be caught here UNLESS the
+# manifest is also updated.  Fixtures with a `note:` key are allowed to have
+# the pipeline produce a subset of what the content logically contains (the
+# note explains the limitation).
+# ---------------------------------------------------------------------------
+
+
+class TestManifestSegmentTypeParity:
+    """Corpus-wide manifest parity: expected_segment_types vs pipeline output.
+
+    Semantics:
+    - expected_segment_types is EMPTY → fixture is excluded; assert 0 segments.
+    - expected_segment_types is NON-EMPTY → every declared type must appear in
+      the produced segment set (subset semantics: pipeline may produce more).
+
+    This sentinel makes segmentation drift impossible to hide without updating
+    the manifest.
+    """
+
+    @pytest.fixture(scope="class")
+    def corpus_seg_types(self, tmp_path_factory: pytest.TempPathFactory) -> dict[str, set[str]]:
+        """Run full pipeline over golden corpus; return {fixture_name: set(segment_types)}.
+
+        Uses content_hash (sha256 in manifest) to map fixtures to segment sets — the
+        document_id is an opaque generated key, but content_hash is stable and declared
+        in the manifest.
+        """
+        import os
+
+        tmp_path = tmp_path_factory.mktemp("manifest-parity")
+        src_dir = tmp_path / "corpus"
+        src_dir.mkdir()
+        entries = _load_manifest()
+        for i, entry in enumerate(entries):
+            name = pathlib.Path(entry["file"]).name
+            shutil.copy2(CORPUS_DIR / name, src_dir / name)
+            mtime_ns = int(datetime(2026, 8, 1 + i, tzinfo=UTC).timestamp() * 1_000_000_000)
+            os.utime(src_dir / name, ns=(mtime_ns, mtime_ns))
+
+        from finecorpus.pipeline import run_pipeline
+        from finecorpus.pipeline.artifact_store import ArtifactStore
+
+        artifacts_root = tmp_path / "artifacts"
+        run_pipeline(
+            source_dir=src_dir,
+            artifacts_root=artifacts_root,
+            run_id="manifest-parity",
+            workspace_id="ws-mp",
+            kb_id="kb-mp",
+        )
+        store = ArtifactStore(artifacts_root=artifacts_root, run_id="manifest-parity")
+        decompose_raw = store.load("decompose")
+
+        # Build {content_hash → set(segment_types)} mapping
+        hash_to_types: dict[str, set[str]] = {}
+        for ss in decompose_raw.get("segment_sets", []):
+            content_hash = ss.get("content_hash", "")
+            types = {seg.get("segment_type", "") for seg in ss.get("segments", [])}
+            hash_to_types[content_hash] = types
+
+        # Map fixture filename → segment types using manifest sha256 as key
+        result: dict[str, set[str]] = {}
+        for entry in entries:
+            name = pathlib.Path(entry["file"]).name
+            sha256 = entry.get("sha256", "")
+            result[name] = hash_to_types.get(sha256, set())
+
+        return result
+
+    def test_manifest_segment_type_parity(self, corpus_seg_types: dict[str, set[str]]) -> None:
+        """Every declared expected_segment_type must appear in the produced set.
+
+        Excluded fixtures (empty expected_segment_types) must produce no segments.
+        Subset semantics: pipeline may produce ADDITIONAL types not in the manifest.
+
+        Drift sentinel: if segmentation changes add/remove a type from a fixture,
+        this test fails — the manifest must be updated to reflect the new reality.
+        """
+        entries = _load_manifest()
+        failures: list[str] = []
+
+        for entry in entries:
+            name = pathlib.Path(entry["file"]).name
+            expected = set(entry.get("expected_segment_types") or [])
+            produced = corpus_seg_types.get(name, set())
+
+            if not expected:
+                # Excluded fixture — must produce no segments
+                if produced:
+                    failures.append(
+                        f"  {name}: expected EXCLUDED (empty types) but got segments: "
+                        f"{sorted(produced)}"
+                    )
+            else:
+                # Must produce at least all declared types (subset semantics)
+                missing = expected - produced
+                if missing:
+                    failures.append(
+                        f"  {name}: manifest declares {sorted(expected)} but "
+                        f"pipeline produced {sorted(produced)}; "
+                        f"missing: {sorted(missing)}"
+                    )
+
+        assert not failures, (
+            "Manifest segment-type parity failures (update manifest.yaml to pin "
+            "the measured truth, add note: if a limitation exists):\n" + "\n".join(failures)
         )
