@@ -63,10 +63,14 @@ from finecorpus.pipeline.plan.class_descriptions import (
 from finecorpus.pipeline.plan.config_version import derive_config_version
 from finecorpus.pipeline.plan.corpus_stats import CorpusStats, compute_corpus_stats
 from finecorpus.pipeline.plan.recommender import RecommendationResult, recommend
-from finecorpus.pipeline.stage import Stage
+from finecorpus.pipeline.stage import Stage, StageError
 
 if TYPE_CHECKING:
     from finecorpus.embedding.base import ProviderCapabilities
+
+import logging as _logging
+
+_plan_logger = _logging.getLogger("finecorpus.pipeline.plan")
 
 # Fixed naive baseline reference (§9.3).
 _NAIVE_BASELINE = NaiveBaselineRef(
@@ -335,6 +339,106 @@ def _remediation_for_reason(reason: str) -> str:
     return _remediation.get(reason, _remediation["other"])
 
 
+# ---------------------------------------------------------------------------
+# D-16: Permission-gap fail-closed gate (§14.3)
+# ---------------------------------------------------------------------------
+
+
+def check_permission_gap_gate(
+    segment_sets: list[dict],
+    *,
+    acknowledged_permission_gap: bool = False,
+    session: Any = None,
+    actor_id: str = "plan_stage",
+) -> None:
+    """D-16 fail-closed gate: refuse to plan when permission_fidelity=unavailable is unacknowledged.
+
+    Checks every document's TenancyBlock.permission_fidelity.  If any document
+    has fidelity='unavailable' and the source run has NOT acknowledged the gap
+    (acknowledged_permission_gap != True), the gate FAILS CLOSED — raising
+    StageError with the offending document IDs named explicitly.
+
+    The acknowledged path emits AuditAction.permission_gap_ack when a
+    control-plane session is available.  In direct mode (no DSN / no session)
+    a WARNING is logged and the audit row is omitted (not blocking).
+
+    Justification for placement in Plan stage:
+    - Plan is the earliest stage that sees TenancyBlock.permission_fidelity
+      across all documents (from the SegmentSetBatch produced by Decompose).
+    - Failing at Plan prevents embeddings from being generated for documents
+      whose permissions cannot be reliably enforced — the strictest safe point.
+    - Build stage also has permission_fidelity but failing there wastes the
+      Collect/Assess/Decompose cost already incurred.
+
+    Args:
+        segment_sets: List of SegmentSet dicts from the SegmentSetBatch.
+        acknowledged_permission_gap: Whether the source run acknowledged the gap.
+        session: Optional SQLAlchemy Session for audit row emission.
+        actor_id: Actor identifier for the audit row.
+
+    Raises:
+        StageError: If any document has permission_fidelity=unavailable and
+            acknowledged_permission_gap is False/None.
+    """
+    unavailable_doc_ids: list[str] = []
+
+    for ss in segment_sets:
+        tenancy_raw = ss.get("tenancy", {})
+        fidelity = tenancy_raw.get("permission_fidelity", "")
+        if fidelity == PermissionFidelity.unavailable:
+            doc_id = ss.get("document_id", ss.get("document_path", "<unknown>"))
+            unavailable_doc_ids.append(str(doc_id))
+
+    if not unavailable_doc_ids:
+        return  # No unavailable fidelity — gate passes
+
+    if acknowledged_permission_gap:
+        # Acknowledged — emit audit row and proceed
+        _plan_logger.warning(
+            "D-16: permission_fidelity=unavailable on %d document(s) — acknowledged "
+            "(acknowledged_permission_gap=True): %s",
+            len(unavailable_doc_ids),
+            unavailable_doc_ids[:10],
+        )
+        if session is not None:
+            try:
+                from finecorpus.control.audit import AuditAction, AuditLogRepository
+
+                audit_repo = AuditLogRepository(session)
+                audit_repo.append(
+                    entry_type=AuditAction.permission_gap_ack,
+                    actor_id=actor_id,
+                    details={
+                        "document_ids_with_unavailable_fidelity": unavailable_doc_ids,
+                        "acknowledged_permission_gap": True,
+                        "gate": "D-16",
+                    },
+                )
+                session.commit()
+            except Exception as exc:  # noqa: BLE001
+                _plan_logger.warning(
+                    "D-16: audit row for permission_gap_ack failed (non-fatal): %s", exc
+                )
+        else:
+            _plan_logger.warning(
+                "D-16: no control-plane session available — permission_gap_ack audit row omitted. "
+                "Configure FINECORPUS__STORAGE__POSTGRES__URL for full audit coverage."
+            )
+        return
+
+    # Unacknowledged — FAIL CLOSED
+    doc_list = ", ".join(f"'{d}'" for d in unavailable_doc_ids[:10])
+    if len(unavailable_doc_ids) > 10:
+        doc_list += f" ... and {len(unavailable_doc_ids) - 10} more"
+    raise StageError(
+        f"D-16 fail-closed: permission_fidelity=unavailable on {len(unavailable_doc_ids)} "
+        f"document(s) without acknowledged_permission_gap. "
+        f"Documents: {doc_list}. "
+        f"Set acknowledged_permission_gap=True on SourceRun to override (§14.3). "
+        f"This gate blocks indexing to prevent serving content with unreliable permissions."
+    )
+
+
 class PlanStage(Stage):
     """Stage 4 — Plan (Phase 3: real heuristic recommendation engine).
 
@@ -372,12 +476,16 @@ class PlanStage(Stage):
         run_started_at: datetime | None = None,
         class_descriptions_path: str | pathlib.Path | None = None,
         provider_capabilities: ProviderCapabilities | None = None,
+        acknowledged_permission_gap: bool = False,
+        audit_session: Any = None,
     ) -> None:
         self._run_started_at = run_started_at or datetime.now(tz=UTC)
         self._class_descriptions_path = (
             pathlib.Path(class_descriptions_path) if class_descriptions_path is not None else None
         )
         self._provider_capabilities = provider_capabilities
+        self._acknowledged_permission_gap = acknowledged_permission_gap
+        self._audit_session = audit_session
 
     def _produce(self, input_data: dict[str, Any] | None) -> dict[str, Any]:
         """Produce a complete IngestionConfig via heuristic corpus analysis."""
@@ -389,6 +497,15 @@ class PlanStage(Stage):
             tenancy_raw = segment_sets[0].get("tenancy", {})
         else:
             tenancy_raw = {}
+
+        # --- D-16: permission-gap fail-closed gate (§14.3) ---
+        # Must run before any processing so we never embed content with
+        # unreliable permissions (fail at the earliest possible point).
+        check_permission_gap_gate(
+            segment_sets,
+            acknowledged_permission_gap=self._acknowledged_permission_gap,
+            session=self._audit_session,
+        )
 
         tenancy = TenancyBlock(
             workspace_id=tenancy_raw.get("workspace_id", ""),

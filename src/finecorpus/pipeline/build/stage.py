@@ -909,6 +909,38 @@ class BuildStage(Stage):
             else:
                 shadow_ctx.state = BuildState.INGESTING  # eligible for promote
 
+        # Orphan scan (post-build warning; §10.5)
+        # Scans the shadow collection for document IDs present in the index but
+        # NOT in the current batch.  Orphans indicate leftover chunks from a
+        # prior build that were not cleaned up.  This is a WARNING only — it
+        # never blocks build or promotion.
+        orphan_warning = ""
+        if not self._dry_run and shadow_ctx is not None and self._adapter is not None:
+            try:
+                from finecorpus.pipeline.deletion import scan_orphans
+
+                known_doc_ids: set[str] = set(chunks_by_document.keys())
+                orphans = scan_orphans(
+                    adapter=self._adapter,
+                    collection=shadow_collection,
+                    known_document_ids=known_doc_ids,
+                )
+                if orphans:
+                    orphan_warning = (
+                        f" ORPHAN WARNING: {len(orphans)} orphan document ID(s) found in "
+                        f"shadow collection (not in current batch): {orphans[:10]}"
+                        f"{'...' if len(orphans) > 10 else ''}. "
+                        f"Consider running incremental cleanup (§10.5)."
+                    )
+                    logger.warning(
+                        "build: %d orphan document ID(s) in shadow '%s': %s",
+                        len(orphans),
+                        shadow_collection,
+                        orphans[:10],
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("build: scan_orphans failed (non-fatal): %s", exc)
+
         # Build report
         n_docs = len(chunks_by_document)
         n_skipped = len(skipped_documents)
@@ -920,6 +952,7 @@ class BuildStage(Stage):
             f"Shadow collection: {shadow_collection or '(none — dry_run)'}. "
             f"Validation: {'PASSED' if validation_passed else 'FAILED'}."
             f"{dry_run_note}"
+            f"{orphan_warning}"
         )
 
         result = BuildResult(
