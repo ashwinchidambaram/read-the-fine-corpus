@@ -1026,22 +1026,37 @@ def query(
 
         audit_repo = AuditLogRepository(session)
         chunk_ids_returned = [r.chunk_id for r in retrieval_results]
-        audit_record = audit_repo.append(
-            entry_type=AuditAction.break_glass_read,
-            actor_id=principal.principal_id,
-            target_kb_id=kb_id,
-            details={
-                "grant_id": _bg_grant_record.grant_id,
-                "query_text": query_text,
-                "chunk_ids_returned": chunk_ids_returned,
-                "top_k": top_k,
-                "score_threshold": score_threshold,
-            },
-        )
         try:
-            session.flush()  # ensure entry_id is available
+            audit_record = audit_repo.append(
+                entry_type=AuditAction.break_glass_read,
+                actor_id=principal.principal_id,
+                target_kb_id=kb_id,
+                details={
+                    "grant_id": _bg_grant_record.grant_id,
+                    "query_text": query_text,
+                    "chunk_ids_returned": chunk_ids_returned,
+                    "top_k": top_k,
+                    "score_threshold": score_threshold,
+                },
+            )
+            session.flush()  # the record MUST be durable-at-commit before content leaves
         except Exception:
-            pass
+            # M-003 fail closed: an elevated-privilege read without a durable
+            # audit record is forbidden — deny content rather than serve
+            # unaudited. No key/content material in the log line.
+            logger.error(
+                "Break-glass audit persistence failed for grant=%s kb=%s — "
+                "denying content (M-003 fail-closed)",
+                _bg_grant_record.grant_id,
+                kb_id,
+            )
+            return _error_response(
+                query_text,
+                effective_filters,
+                ErrorCode.CONTROL_PLANE_UNAVAILABLE,
+                "Break-glass audit record could not be persisted; content denied (M-003).",
+                retriable=True,
+            )
         break_glass_ref = audit_record.entry_id
         logger.info(
             "Break-glass read audited: grant=%s kb=%s admin=%s chunks=%d audit=%s",

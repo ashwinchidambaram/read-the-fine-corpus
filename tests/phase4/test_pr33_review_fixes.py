@@ -311,7 +311,6 @@ class TestR2GlobalAdminNotLockedOut:
         behavior BEFORE a break-glass grant is provided.
         """
         from finecorpus.contracts.retrieval_response import ErrorCode
-
         from finecorpus.retrieval.service import query
 
         GLOBAL_ADMIN_PID = "pid-global-admin"

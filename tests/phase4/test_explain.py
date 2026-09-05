@@ -13,11 +13,8 @@ from __future__ import annotations
 
 import sys
 from contextlib import contextmanager
-from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import patch
-
-import pytest
 
 from finecorpus.contracts.retrieval_response import FilterOrigin, ResultStatus
 from finecorpus.embedding.fake import FakeProvider
@@ -29,8 +26,6 @@ sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent.parent / "ret
 from helpers import (  # type: ignore[import-not-found]
     FakeAdapter,
     FakeAliasRecord,
-    FakeAliasRepository,
-    make_chunk_payload,
     make_provenance_payload,
 )
 
@@ -179,14 +174,22 @@ class TestExplainCrossTenantParity:
         adapter = FakeAdapter()
 
         # Seed KB-A with 2 chunks and KB-B with 2 chunks
-        adapter.seed_collection(alias_name(KB_A), COLL_A, [
-            _make_chunk("chk-a-001", KB_A, score=0.9),
-            _make_chunk("chk-a-002", KB_A, score=0.8),
-        ])
-        adapter.seed_collection(alias_name(KB_B), COLL_B, [
-            _make_chunk("chk-b-001", KB_B, score=0.95),
-            _make_chunk("chk-b-002", KB_B, score=0.85),
-        ])
+        adapter.seed_collection(
+            alias_name(KB_A),
+            COLL_A,
+            [
+                _make_chunk("chk-a-001", KB_A, score=0.9),
+                _make_chunk("chk-a-002", KB_A, score=0.8),
+            ],
+        )
+        adapter.seed_collection(
+            alias_name(KB_B),
+            COLL_B,
+            [
+                _make_chunk("chk-b-001", KB_B, score=0.95),
+                _make_chunk("chk-b-002", KB_B, score=0.85),
+            ],
+        )
 
         alias_records = {
             alias_name(KB_A): _make_alias_record(KB_A, WS_A, COLL_A),
@@ -199,10 +202,9 @@ class TestExplainCrossTenantParity:
         assert response.explain is not None
 
         explain = response.explain
-        all_chunk_ids_in_explain = (
-            {c.chunk_id for c in explain.candidates}
-            | {e.chunk_id for e in explain.exclusions}
-        )
+        all_chunk_ids_in_explain = {c.chunk_id for c in explain.candidates} | {
+            e.chunk_id for e in explain.exclusions
+        }
 
         # No KB-B chunk IDs should appear
         kb_b_chunk_ids = {"chk-b-001", "chk-b-002"}
@@ -222,10 +224,14 @@ class TestExplainExclusionAttribution:
     def test_explain_exclusion_attribution(self) -> None:
         """Candidates excluded by score_threshold each name the threshold filter."""
         adapter = FakeAdapter()
-        adapter.seed_collection(alias_name(KB_A), COLL_A, [
-            _make_chunk("chk-a-high", KB_A, score=0.9),
-            _make_chunk("chk-a-low", KB_A, score=0.3),
-        ])
+        adapter.seed_collection(
+            alias_name(KB_A),
+            COLL_A,
+            [
+                _make_chunk("chk-a-high", KB_A, score=0.9),
+                _make_chunk("chk-a-low", KB_A, score=0.3),
+            ],
+        )
 
         alias_records = {alias_name(KB_A): _make_alias_record(KB_A, WS_A, COLL_A)}
 
@@ -246,9 +252,11 @@ class TestExplainExclusionAttribution:
     def test_each_exclusion_has_applied_filter(self) -> None:
         """Every exclusion record has a non-null removed_by AppliedFilter."""
         adapter = FakeAdapter()
-        adapter.seed_collection(alias_name(KB_A), COLL_A, [
-            _make_chunk(f"chk-{i}", KB_A, score=0.1 * i) for i in range(1, 6)
-        ])
+        adapter.seed_collection(
+            alias_name(KB_A),
+            COLL_A,
+            [_make_chunk(f"chk-{i}", KB_A, score=0.1 * i) for i in range(1, 6)],
+        )
 
         alias_records = {alias_name(KB_A): _make_alias_record(KB_A, WS_A, COLL_A)}
         response = _run_query(KB_A, adapter, alias_records, score_threshold=0.4, explain=True)
@@ -266,9 +274,13 @@ class TestExplainFiltersEchoOrigins:
     def test_explain_filters_echo_origins(self) -> None:
         """The filters_applied list contains at least the tenancy filter with correct origin."""
         adapter = FakeAdapter()
-        adapter.seed_collection(alias_name(KB_A), COLL_A, [
-            _make_chunk("chk-a-001", KB_A, score=0.9),
-        ])
+        adapter.seed_collection(
+            alias_name(KB_A),
+            COLL_A,
+            [
+                _make_chunk("chk-a-001", KB_A, score=0.9),
+            ],
+        )
 
         alias_records = {alias_name(KB_A): _make_alias_record(KB_A, WS_A, COLL_A)}
         response = _run_query(KB_A, adapter, alias_records, explain=True)
@@ -291,9 +303,13 @@ class TestExplainFiltersEchoOrigins:
     def test_score_threshold_filter_has_request_origin(self) -> None:
         """When score_threshold is set, the threshold filter has origin=request."""
         adapter = FakeAdapter()
-        adapter.seed_collection(alias_name(KB_A), COLL_A, [
-            _make_chunk("chk-a-001", KB_A, score=0.9),
-        ])
+        adapter.seed_collection(
+            alias_name(KB_A),
+            COLL_A,
+            [
+                _make_chunk("chk-a-001", KB_A, score=0.9),
+            ],
+        )
 
         alias_records = {alias_name(KB_A): _make_alias_record(KB_A, WS_A, COLL_A)}
         response = _run_query(KB_A, adapter, alias_records, score_threshold=0.5, explain=True)
@@ -313,10 +329,14 @@ class TestExplainCandidateProvenanceComplete:
         """All explain candidates have non-null provenance and scores."""
         resolved_ts = "2026-09-01T12:00:00+00:00"
         adapter = FakeAdapter()
-        adapter.seed_collection(alias_name(KB_A), COLL_A, [
-            _make_chunk("chk-a-001", KB_A, score=0.9, permission_resolved_at=resolved_ts),
-            _make_chunk("chk-a-002", KB_A, score=0.8),
-        ])
+        adapter.seed_collection(
+            alias_name(KB_A),
+            COLL_A,
+            [
+                _make_chunk("chk-a-001", KB_A, score=0.9, permission_resolved_at=resolved_ts),
+                _make_chunk("chk-a-002", KB_A, score=0.8),
+            ],
+        )
 
         alias_records = {alias_name(KB_A): _make_alias_record(KB_A, WS_A, COLL_A)}
         response = _run_query(KB_A, adapter, alias_records, explain=True)
@@ -341,9 +361,13 @@ class TestExplainCandidateProvenanceComplete:
     def test_explain_strategy_is_dense(self) -> None:
         """The explain block strategy is 'dense' (Phase 4 is dense-only)."""
         adapter = FakeAdapter()
-        adapter.seed_collection(alias_name(KB_A), COLL_A, [
-            _make_chunk("chk-a-001", KB_A, score=0.9),
-        ])
+        adapter.seed_collection(
+            alias_name(KB_A),
+            COLL_A,
+            [
+                _make_chunk("chk-a-001", KB_A, score=0.9),
+            ],
+        )
 
         alias_records = {alias_name(KB_A): _make_alias_record(KB_A, WS_A, COLL_A)}
         response = _run_query(KB_A, adapter, alias_records, explain=True)
@@ -356,9 +380,13 @@ class TestExplainCandidateProvenanceComplete:
         from finecorpus.retrieval.service import query
 
         adapter = FakeAdapter()
-        adapter.seed_collection(alias_name(KB_A), COLL_A, [
-            _make_chunk("chk-a-001", KB_A, score=0.9),
-        ])
+        adapter.seed_collection(
+            alias_name(KB_A),
+            COLL_A,
+            [
+                _make_chunk("chk-a-001", KB_A, score=0.9),
+            ],
+        )
 
         alias_records = {alias_name(KB_A): _make_alias_record(KB_A, WS_A, COLL_A)}
         provider = _make_provider()
@@ -400,10 +428,14 @@ class TestFilteredToZeroCounterD24:
     def test_filtered_to_zero_counter_d24(self) -> None:
         """Counter increments when score threshold eliminates all candidates."""
         adapter = FakeAdapter()
-        adapter.seed_collection(alias_name(KB_A), COLL_A, [
-            _make_chunk("chk-a-001", KB_A, score=0.3),
-            _make_chunk("chk-a-002", KB_A, score=0.2),
-        ])
+        adapter.seed_collection(
+            alias_name(KB_A),
+            COLL_A,
+            [
+                _make_chunk("chk-a-001", KB_A, score=0.3),
+                _make_chunk("chk-a-002", KB_A, score=0.2),
+            ],
+        )
 
         alias_records = {alias_name(KB_A): _make_alias_record(KB_A, WS_A, COLL_A)}
 
@@ -416,9 +448,13 @@ class TestFilteredToZeroCounterD24:
     def test_counter_not_incremented_on_matches(self) -> None:
         """Counter does NOT increment when results survive the threshold."""
         adapter = FakeAdapter()
-        adapter.seed_collection(alias_name(KB_A), COLL_A, [
-            _make_chunk("chk-a-001", KB_A, score=0.95),
-        ])
+        adapter.seed_collection(
+            alias_name(KB_A),
+            COLL_A,
+            [
+                _make_chunk("chk-a-001", KB_A, score=0.95),
+            ],
+        )
 
         alias_records = {alias_name(KB_A): _make_alias_record(KB_A, WS_A, COLL_A)}
 
@@ -445,9 +481,13 @@ class TestFilteredToZeroCounterD24:
     def test_counter_accumulates_across_multiple_filtered_queries(self) -> None:
         """Counter accumulates across multiple filtered-to-zero events."""
         adapter = FakeAdapter()
-        adapter.seed_collection(alias_name(KB_A), COLL_A, [
-            _make_chunk("chk-a-001", KB_A, score=0.2),
-        ])
+        adapter.seed_collection(
+            alias_name(KB_A),
+            COLL_A,
+            [
+                _make_chunk("chk-a-001", KB_A, score=0.2),
+            ],
+        )
 
         alias_records = {alias_name(KB_A): _make_alias_record(KB_A, WS_A, COLL_A)}
 
@@ -480,9 +520,13 @@ class TestExplainNoMatchesBlock:
         """When explain=True and filtered_to_zero, explain block has candidates and exclusions."""
         reset_filtered_to_zero_count()
         adapter = FakeAdapter()
-        adapter.seed_collection(alias_name(KB_A), COLL_A, [
-            _make_chunk("chk-a-001", KB_A, score=0.2),
-        ])
+        adapter.seed_collection(
+            alias_name(KB_A),
+            COLL_A,
+            [
+                _make_chunk("chk-a-001", KB_A, score=0.2),
+            ],
+        )
 
         alias_records = {alias_name(KB_A): _make_alias_record(KB_A, WS_A, COLL_A)}
         response = _run_query(KB_A, adapter, alias_records, score_threshold=0.9, explain=True)

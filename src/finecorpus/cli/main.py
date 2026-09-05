@@ -628,7 +628,8 @@ def _cmd_config_diff(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
         print(
-            "  An audit row (confidence_floor_lowered) should be recorded before promotion.\n"
+            "  Audit: recorded when config activation flows through the control plane\n"
+            "  (Phase 6); in direct file mode this warning is the D-23 surface.\n"
             "  Review the weakening before triggering a reindex.",
             file=sys.stderr,
         )

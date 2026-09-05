@@ -13,20 +13,19 @@ Covers:
 from __future__ import annotations
 
 import sys
-from contextlib import contextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from finecorpus.contracts.retrieval_response import ErrorCode, ResultStatus
 from finecorpus.control.audit import AuditAction, AuditLogRepository
 from finecorpus.control.auth import Principal, Role, ScopeKind
 from finecorpus.control.break_glass import BreakGlassRepository, issue_grant
 from finecorpus.control.metadata import create_tables
-from finecorpus.contracts.retrieval_response import ErrorCode, ResultStatus
 from finecorpus.embedding.fake import FakeProvider
 from finecorpus.index.adapter import alias_name
 
@@ -256,9 +255,13 @@ class TestGrantExpiresD04:
         grant_id = grant_record.grant_id
 
         adapter = FakeAdapter()
-        adapter.seed_collection(alias_name(KB_A), COLL_A, [
-            _make_chunk("chk-a-001", KB_A),
-        ])
+        adapter.seed_collection(
+            alias_name(KB_A),
+            COLL_A,
+            [
+                _make_chunk("chk-a-001", KB_A),
+            ],
+        )
         alias_records = {alias_name(KB_A): _make_alias_record(KB_A, WS_A, COLL_A)}
         principal = _make_admin_principal()
 
@@ -288,9 +291,13 @@ class TestNoGrantNoContentRead:
     def test_no_grant_no_content_read(self, db_session: Session) -> None:
         """Admin without break-glass grant receives PERMISSION_DENIED."""
         adapter = FakeAdapter()
-        adapter.seed_collection(alias_name(KB_A), COLL_A, [
-            _make_chunk("chk-a-001", KB_A),
-        ])
+        adapter.seed_collection(
+            alias_name(KB_A),
+            COLL_A,
+            [
+                _make_chunk("chk-a-001", KB_A),
+            ],
+        )
         alias_records = {alias_name(KB_A): _make_alias_record(KB_A, WS_A, COLL_A)}
         principal = _make_admin_principal()
 
@@ -320,9 +327,13 @@ class TestNoGrantNoContentRead:
         db_session.flush()
 
         adapter = FakeAdapter()
-        adapter.seed_collection(alias_name(KB_B), COLL_B, [
-            _make_chunk("chk-b-001", KB_B),
-        ])
+        adapter.seed_collection(
+            alias_name(KB_B),
+            COLL_B,
+            [
+                _make_chunk("chk-b-001", KB_B),
+            ],
+        )
         alias_records = {alias_name(KB_B): _make_alias_record(KB_B, WS_B, COLL_B)}
         principal = _make_admin_principal()
 
@@ -358,10 +369,14 @@ class TestT05EveryReadUnderGrantAudited:
         grant_id = grant_record.grant_id
 
         adapter = FakeAdapter()
-        adapter.seed_collection(alias_name(KB_A), COLL_A, [
-            _make_chunk("chk-a-001", KB_A),
-            _make_chunk("chk-a-002", KB_A),
-        ])
+        adapter.seed_collection(
+            alias_name(KB_A),
+            COLL_A,
+            [
+                _make_chunk("chk-a-001", KB_A),
+                _make_chunk("chk-a-002", KB_A),
+            ],
+        )
         alias_records = {alias_name(KB_A): _make_alias_record(KB_A, WS_A, COLL_A)}
         principal = _make_admin_principal()
 
@@ -382,9 +397,7 @@ class TestT05EveryReadUnderGrantAudited:
         # Count break_glass_read audit rows for this KB
         audit_repo = AuditLogRepository(db_session)
         all_entries = audit_repo.list_for_kb(KB_A, limit=100)
-        read_entries = [
-            e for e in all_entries if e.entry_type == AuditAction.break_glass_read
-        ]
+        read_entries = [e for e in all_entries if e.entry_type == AuditAction.break_glass_read]
         assert len(read_entries) >= n_queries, (
             f"Expected >= {n_queries} break_glass_read audit rows, got {len(read_entries)}"
         )
@@ -411,9 +424,13 @@ class TestBreakGlassReadRefInResponse:
         db_session.flush()
 
         adapter = FakeAdapter()
-        adapter.seed_collection(alias_name(KB_A), COLL_A, [
-            _make_chunk("chk-a-001", KB_A),
-        ])
+        adapter.seed_collection(
+            alias_name(KB_A),
+            COLL_A,
+            [
+                _make_chunk("chk-a-001", KB_A),
+            ],
+        )
         alias_records = {alias_name(KB_A): _make_alias_record(KB_A, WS_A, COLL_A)}
         principal = _make_admin_principal()
 
@@ -434,9 +451,13 @@ class TestBreakGlassReadRefInResponse:
     def test_normal_read_has_no_break_glass_ref(self, db_session: Session) -> None:
         """Non-break-glass reads have break_glass_read_ref = None."""
         adapter = FakeAdapter()
-        adapter.seed_collection(alias_name(KB_A), COLL_A, [
-            _make_chunk("chk-a-001", KB_A),
-        ])
+        adapter.seed_collection(
+            alias_name(KB_A),
+            COLL_A,
+            [
+                _make_chunk("chk-a-001", KB_A),
+            ],
+        )
         alias_records = {alias_name(KB_A): _make_alias_record(KB_A, WS_A, COLL_A)}
 
         # No auth, no break-glass
@@ -472,9 +493,13 @@ class TestRevokedGrantDenied:
         db_session.flush()
 
         adapter = FakeAdapter()
-        adapter.seed_collection(alias_name(KB_A), COLL_A, [
-            _make_chunk("chk-a-001", KB_A),
-        ])
+        adapter.seed_collection(
+            alias_name(KB_A),
+            COLL_A,
+            [
+                _make_chunk("chk-a-001", KB_A),
+            ],
+        )
         alias_records = {alias_name(KB_A): _make_alias_record(KB_A, WS_A, COLL_A)}
         principal = _make_admin_principal()
 
@@ -510,12 +535,20 @@ class TestTenancyStillAppliesUnderBreakGlass:
 
         adapter = FakeAdapter()
         # Seed KB-A and KB-B
-        adapter.seed_collection(alias_name(KB_A), COLL_A, [
-            _make_chunk("chk-a-001", KB_A, score=0.9),
-        ])
-        adapter.seed_collection(alias_name(KB_B), COLL_B, [
-            _make_chunk("chk-b-001", KB_B, score=0.95),
-        ])
+        adapter.seed_collection(
+            alias_name(KB_A),
+            COLL_A,
+            [
+                _make_chunk("chk-a-001", KB_A, score=0.9),
+            ],
+        )
+        adapter.seed_collection(
+            alias_name(KB_B),
+            COLL_B,
+            [
+                _make_chunk("chk-b-001", KB_B, score=0.95),
+            ],
+        )
 
         alias_records = {
             alias_name(KB_A): _make_alias_record(KB_A, WS_A, COLL_A),
@@ -551,9 +584,13 @@ class TestTenancyStillAppliesUnderBreakGlass:
         adapter = FakeAdapter()
         # Seed both KBs into the same collection (simulating a misconfigured adapter)
         # Real Qdrant uses kb_id filter — FakeAdapter also enforces it.
-        adapter.seed_collection(alias_name(KB_A), COLL_A, [
-            _make_chunk("chk-a-001", KB_A, score=0.9),
-        ])
+        adapter.seed_collection(
+            alias_name(KB_A),
+            COLL_A,
+            [
+                _make_chunk("chk-a-001", KB_A, score=0.9),
+            ],
+        )
 
         alias_records = {alias_name(KB_A): _make_alias_record(KB_A, WS_A, COLL_A)}
         principal = _make_admin_principal()
@@ -626,6 +663,46 @@ class TestGrantLifecycle:
         db_session.flush()
 
         delta = grant_record.expires_at - grant_record.granted_at
-        assert abs(delta.total_seconds() - 4 * 3600) < 5, (
-            f"Expected 4-hour window, got {delta}"
+        assert abs(delta.total_seconds() - 4 * 3600) < 5, f"Expected 4-hour window, got {delta}"
+
+
+class TestAuditFailureFailsClosed:
+    """M-003: if the break-glass audit record cannot be persisted, content
+    must NOT be served. A swallowed audit failure would mean an unaudited
+    elevated-privilege read — the exact shape T-05 exists to prevent."""
+
+    def test_audit_persistence_failure_denies_content(
+        self, db_session: Session, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        grant_record, _ = issue_grant(
+            session=db_session,
+            target_kb_id=KB_A,
+            granting_admin_id=ADMIN_ID,
+            reason="M-003 fail-closed test",
         )
+        db_session.flush()
+
+        adapter = FakeAdapter()
+        adapter.seed_collection(alias_name(KB_A), COLL_A, [_make_chunk("chk-a-001", KB_A)])
+        alias_records = {alias_name(KB_A): _make_alias_record(KB_A, WS_A, COLL_A)}
+
+        def _boom(*a: object, **k: object) -> None:
+            raise RuntimeError("simulated audit persistence failure")
+
+        from finecorpus.control.audit import AuditLogRepository
+
+        monkeypatch.setattr(AuditLogRepository, "append", _boom, raising=True)
+
+        response = _run_service_query(
+            kb_id=KB_A,
+            adapter=adapter,
+            alias_records=alias_records,
+            session=db_session,
+            principal=_make_admin_principal(),
+            auth_enabled=True,
+            break_glass_grant_id=grant_record.grant_id,
+        )
+        assert response.result_status == ResultStatus.error, (
+            "audit persistence failure must fail closed, not serve content"
+        )
+        assert not response.results, "no content may be served without a durable audit record"
