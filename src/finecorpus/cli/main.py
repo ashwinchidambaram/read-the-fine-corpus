@@ -175,6 +175,114 @@ def _cmd_config_diff(args: argparse.Namespace) -> int:
     return 1  # non-zero = configs differ (useful in scripts)
 
 
+def _cmd_plan(args: argparse.Namespace) -> int:
+    """Wire corpus plan → PlanStage over existing artifacts.
+
+    Prints: per-class routing table with basis labels, language warnings,
+    exclusion summary.  Zero business logic — C-5 thin wrapper.
+    """
+    from finecorpus.contracts.ingestion_config import LanguageDecision
+    from finecorpus.pipeline.artifact_store import ArtifactStore, ArtifactStoreError
+    from finecorpus.pipeline.plan import PlanStage
+    from finecorpus.pipeline.stage import StageError
+
+    artifacts_root = args.artifacts
+    run_id = args.run_id
+    class_descriptions = args.class_descriptions
+
+    store = ArtifactStore(artifacts_root=artifacts_root, run_id=run_id)
+
+    try:
+        segment_set_batch = store.load("decompose")
+    except ArtifactStoreError as exc:
+        print(f"ERROR: Could not load decompose artifact — {exc}", file=sys.stderr)
+        print(
+            "Run 'corpus pipeline run' first to produce the decompose artifact.",
+            file=sys.stderr,
+        )
+        return 4
+
+    try:
+        plan = PlanStage(
+            class_descriptions_path=class_descriptions,
+        )
+        ingestion_config_dict = plan.run(input_data=segment_set_batch, store=store)
+    except StageError as exc:
+        print(f"ERROR: Plan stage failure — {exc}", file=sys.stderr)
+        return 3
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+    # Print per-class routing table with basis labels
+    class_rules = ingestion_config_dict.get("class_rules", [])
+    provenance = ingestion_config_dict.get("provenance", [])
+
+    # Build a provenance index: target prefix → list of (basis, rationale)
+    prov_by_class: dict[str, list[dict]] = {}
+    for p in provenance:
+        target: str = p.get("target", "")
+        if target.startswith("/class_rules/"):
+            parts = target.split("/")
+            if len(parts) >= 3:
+                seg_class = parts[2]
+                if seg_class not in prov_by_class:
+                    prov_by_class[seg_class] = []
+                prov_by_class[seg_class].append(p)
+
+    print(f"\nPlan Stage — run '{run_id}'")
+    print("=" * 60)
+
+    print("\nPer-Class Routing Table:")
+    print("-" * 60)
+    print(f"{'Class':<20} {'Strategy':<16} {'MaxTok':<8} {'Basis'}")
+    print(f"{'-----':<20} {'--------':<16} {'------':<8} {'-----'}")
+    for rule in class_rules:
+        seg_class = rule.get("segment_class", "?")
+        chunking = rule.get("chunking", {})
+        strategy = chunking.get("strategy", "?")
+        max_tokens = chunking.get("max_tokens", "?")
+        # Determine dominant basis for this class
+        prov_entries = prov_by_class.get(seg_class, [])
+        bases = {p.get("basis", "heuristic") for p in prov_entries}
+        if "class_description" in bases:
+            basis_label = "heuristic+class_desc"
+        elif "heuristic" in bases:
+            basis_label = "heuristic"
+        else:
+            basis_label = "heuristic"
+        print(f"{seg_class:<20} {strategy:<16} {str(max_tokens):<8} {basis_label}")
+
+    # Language warning (M-041)
+    lang_support = ingestion_config_dict.get("language_support", {})
+    decision = lang_support.get("decision", "proceed")
+    if decision == LanguageDecision.warned_proceed:
+        unsupported = lang_support.get("unsupported_languages", [])
+        print("\nWARNING (M-041): Language support gap detected")
+        print(f"  Unsupported languages: {', '.join(unsupported)}")
+        print("  The configured embedding model does not declare support for these languages.")
+        print("  Embeddings for these languages may be quietly meaningless.")
+        print("  Consider switching to a multilingual embedding model.")
+    else:
+        print("\nLanguage support: all detected languages supported (or no language data).")
+
+    # Exclusion summary
+    exclusions = ingestion_config_dict.get("exclusions_confirmed", [])
+    if exclusions:
+        from collections import Counter
+
+        reason_counts = Counter(e.get("reason", "other") for e in exclusions)
+        print(f"\nExclusions ({len(exclusions)} total):")
+        for reason, count in sorted(reason_counts.items()):
+            print(f"  {reason}: {count}")
+    else:
+        print("\nExclusions: none.")
+
+    print(f"\nConfig version: {ingestion_config_dict.get('config_version', '?')[:16]}...")
+    print(f"Class rules: {len(class_rules)} classes")
+    return 0
+
+
 def _cmd_report(args: argparse.Namespace) -> int:
     """Wire corpus report → finecorpus.pipeline.report.generate_report."""
     from pathlib import Path
@@ -410,6 +518,38 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Second config file",
     )
 
+    # --- plan subcommand (Phase 3: run Plan stage over existing artifacts) ---
+    plan_parser = sub.add_parser(
+        "plan",
+        help=(
+            "Run the Plan stage over existing pipeline artifacts — "
+            "produces per-class routing table, language warnings, and exclusion summary"
+        ),
+    )
+    plan_parser.add_argument(
+        "--artifacts",
+        required=True,
+        metavar="DIR",
+        help="Root directory for pipeline artifacts (same as used with 'corpus pipeline run')",
+    )
+    plan_parser.add_argument(
+        "--run-id",
+        required=True,
+        dest="run_id",
+        metavar="ID",
+        help="Pipeline run ID whose decompose artifact to plan from",
+    )
+    plan_parser.add_argument(
+        "--class-descriptions",
+        dest="class_descriptions",
+        metavar="FILE",
+        default=None,
+        help=(
+            "Optional YAML file with per-class descriptions "
+            "(see finecorpus.pipeline.plan.class_descriptions for schema)"
+        ),
+    )
+
     # --- report subcommand (Phase 2: findings + exclusion reports) ---
     report_parser = sub.add_parser(
         "report",
@@ -471,6 +611,8 @@ def main() -> None:
         else:
             parser.print_help()
             sys.exit(1)
+    elif args.command == "plan":
+        sys.exit(_cmd_plan(args))
     elif args.command == "report":
         sys.exit(_cmd_report(args))
     else:

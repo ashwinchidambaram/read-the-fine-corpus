@@ -178,6 +178,14 @@ class _Context:
     exclusion_records: dict[str, dict[str, Any]]
     # Whether the decompose artifact was present and successfully loaded (F-07)
     decompose_artifact_present: bool = True
+    # ExclusionDecision list from IngestionConfig (Plan output) — M-040
+    plan_exclusions_confirmed: list[dict[str, Any]] = None  # type: ignore[assignment]
+    # Language support decision from IngestionConfig (Plan output) — M-041
+    plan_language_support: dict[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        if self.plan_exclusions_confirmed is None:
+            self.plan_exclusions_confirmed = []
 
 
 def _load_context(store: ArtifactStore, run_id: str) -> _Context:
@@ -228,6 +236,17 @@ def _load_context(store: ArtifactStore, run_id: str) -> _Context:
         except ArtifactStoreError:
             decompose_artifact_present = False
 
+    # --- IngestionConfig (plan artifact) — M-040: load exclusions_confirmed ---
+    plan_exclusions_confirmed: list[dict[str, Any]] = []
+    plan_language_support: dict[str, Any] | None = None
+    if store.exists("plan"):
+        try:
+            plan_raw = store.load("plan")
+            plan_exclusions_confirmed = plan_raw.get("exclusions_confirmed", [])
+            plan_language_support = plan_raw.get("language_support")
+        except ArtifactStoreError:
+            pass  # plan artifact is optional for report generation
+
     return _Context(
         run_id=run_id,
         parse_results=parse_results,
@@ -237,6 +256,8 @@ def _load_context(store: ArtifactStore, run_id: str) -> _Context:
         source_paths=source_paths,
         exclusion_records=exclusion_records,
         decompose_artifact_present=decompose_artifact_present,
+        plan_exclusions_confirmed=plan_exclusions_confirmed,
+        plan_language_support=plan_language_support,
     )
 
 
@@ -449,6 +470,22 @@ def _build_findings_json(ctx: _Context) -> dict[str, Any]:
         if any(seg.get("injection_suspicion", 0.0) > 0.0 for seg in ss.get("segments", []))
     ]
 
+    # M-041: language support warning from Plan stage
+    language_warning: dict[str, Any] | None = None
+    if ctx.plan_language_support is not None:
+        ls = ctx.plan_language_support
+        if ls.get("decision") == "warned_proceed":
+            language_warning = {
+                "decision": "warned_proceed",
+                "unsupported_languages": ls.get("unsupported_languages", []),
+                "message": (
+                    "The configured embedding model does not declare support for one or more "
+                    "detected corpus languages. Embeddings for these languages may be quietly "
+                    "meaningless, degrading retrieval quality. "
+                    "Consider switching to a multilingual embedding model."
+                ),
+            }
+
     return {
         "schema_version": "1.0.0",
         "contract": "findings_report",
@@ -461,6 +498,7 @@ def _build_findings_json(ctx: _Context) -> dict[str, Any]:
             "version_family_count": len(ctx.version_families),
             "boilerplate_block_count": len(ctx.boilerplate_blocks),
             "corpus_language_distribution": corpus_lang,
+            "language_warning": language_warning,
         },
         "version_families": [
             {
@@ -546,6 +584,38 @@ def _build_exclusions_json(ctx: _Context) -> dict[str, Any]:
             entry["primary_source_path"] = primary_path
 
         exclusions.append(entry)
+
+    # M-040: merge plan-confirmed exclusions (from IngestionConfig.exclusions_confirmed).
+    # These are the Plan stage's confirmed exclusion decisions with remediation text.
+    # They are keyed by (document_id, reason) to avoid double-counting with decompose records.
+    decompose_doc_reason_pairs: set[tuple[str, str]] = {
+        (exc.get("document_id", ""), exc.get("reason", "")) for exc in exclusions
+    }
+    for plan_exc in ctx.plan_exclusions_confirmed:
+        doc_id = plan_exc.get("document_id", "")
+        reason = plan_exc.get("reason", "other")
+        pair = (doc_id, reason)
+        if pair in decompose_doc_reason_pairs:
+            # Already covered by decompose records — use the decompose entry (has exc_id)
+            # but enrich with plan remediation if the decompose entry lacks user_action
+            continue
+        source_path = ctx.source_paths.get(doc_id, doc_id)
+        scope = "document" if reason in _DOCUMENT_SCOPE_REASONS else "segment"
+        plan_remediation = plan_exc.get("remediation", _user_action_for_reason(reason))
+        exclusions.append(
+            {
+                "exclusion_id": f"plan-{doc_id}-{reason}",
+                "document_id": doc_id,
+                "source_path": source_path,
+                "scope": scope,
+                "reason": reason,
+                "reason_detail": _default_detail_for_reason(reason),
+                "reversible": True,
+                "source_region_ids": [],
+                "user_action": plan_remediation,
+                "from_plan": True,  # marks this entry as sourced from Plan stage
+            }
+        )
 
     # Reason-code summary
     reason_counts: dict[str, int] = defaultdict(int)
@@ -702,6 +772,21 @@ def _render_findings_md(data: dict[str, Any], run_id: str) -> str:
         f"{summary.get('documents_with_injection_signals', 0)}"
     )
     lines.append("")
+
+    # M-041: Language support warning (from Plan stage)
+    lang_warning = summary.get("language_warning")
+    if lang_warning:
+        langs = ", ".join(f"`{lang}`" for lang in lang_warning.get("unsupported_languages", []))
+        lines.append("## Language Support Warning")
+        lines.append("")
+        lines.append(
+            f"> **WARNING (M-041):** The configured embedding model does not declare support "
+            f"for: {langs}. "
+            "Embeddings for these languages may be quietly meaningless, degrading retrieval "
+            "quality. Consider switching to a multilingual embedding model "
+            '(e.g. a model with supported_languages=["*"]).'
+        )
+        lines.append("")
 
     # Language distribution
     lang_dist = summary.get("corpus_language_distribution", [])
