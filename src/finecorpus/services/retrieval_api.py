@@ -127,7 +127,21 @@ _require_query_access_dep = _noop_query_access
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Application lifespan: initialize singletons, then shut down cleanly."""
+    """Application lifespan: initialize singletons, then shut down cleanly.
+
+    Auth wiring note (PR #33 R1):
+    The route decorator ``@app.post(..., ...)`` captures the dependency callable
+    reference AT IMPORT TIME.  This means that reassigning the module-level
+    variable ``_require_query_access_dep`` after the route is registered has no
+    effect — the route closure already holds the old reference.
+
+    The correct mechanism is ``app.dependency_overrides``.  When auth is enabled,
+    we register the real auth dependency under the ``_noop_query_access`` key so
+    that FastAPI's override map redirects every incoming request to the real dep.
+    This is the ONLY mechanism that works at runtime after import-time capture.
+    Tests that want to inject a custom dep must also use ``app.dependency_overrides``
+    on ``_noop_query_access`` (the key the route was registered with).
+    """
     global _provider, _adapter, _session_factory
     global _auth_enabled, _key_repo_factory, _rate_limiter
     global _require_principal_dep, _require_query_access_dep
@@ -151,6 +165,79 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             # Rate limiter from config
             rate = cfg.retrieval.rate_limit.queries_per_second_per_tenant
             _rate_limiter = TokenBucketLimiter(rate=rate)
+
+            # ------------------------------------------------------------------
+            # Auth wiring (PR #33 R1): read auth.enabled from config and build
+            # real deps when enabled.  The route captured _noop_query_access at
+            # import time, so we register the real dep as an override on that key.
+            # ------------------------------------------------------------------
+            if cfg.auth.enabled:
+                from contextlib import contextmanager
+
+                from sqlalchemy.orm import Session
+
+                from finecorpus.control.metadata import (
+                    Base,
+                    _ensure_all_models_imported,
+                    create_engine,
+                )
+                from finecorpus.services.deps import (
+                    make_require_principal,
+                    make_require_query_access,
+                )
+
+                # Build the control-plane engine from the configured DSN.
+                # storage.postgres.url is the canonical control-plane DSN.
+                cp_dsn = cfg.storage.postgres.url
+                if not cp_dsn:
+                    logger.warning(
+                        "auth.enabled=True but storage.postgres.url is not set; "
+                        "auth will remain disabled."
+                    )
+                else:
+                    _ensure_all_models_imported()
+                    cp_engine = create_engine(cp_dsn)
+                    Base.metadata.create_all(cp_engine)
+
+                    from finecorpus.control.auth import ApiKeyRepository
+
+                    @contextmanager
+                    def _cp_session_ctx() -> Any:
+                        with Session(cp_engine) as s:
+                            yield s
+
+                    def _key_repo_factory_impl() -> Any:  # type: ignore[return]
+                        # Called per-request inside require_principal; yields a
+                        # session-bound repo.  The session is managed by the dep.
+                        # We return the repo after opening a short-lived session
+                        # because make_require_principal calls repo_factory() once
+                        # per request and the dep owns the session lifecycle.
+                        # NOTE: this factory is called inside the dep which does
+                        # NOT use a context manager — we open and hold a session
+                        # for the duration of the dep call.  In production this
+                        # would be a proper scoped session; for now open/close
+                        # in the repo factory is sufficient.
+                        sess = Session(cp_engine)
+                        return ApiKeyRepository(sess)
+
+                    _key_repo_factory = _key_repo_factory_impl
+
+                    # Set the module flag (used by query() in service.py)
+                    _auth_enabled = True
+
+                    # Build and register real deps via dependency_overrides.
+                    # This is the mechanism that actually works after import-time
+                    # route registration (see docstring above).
+                    _require_principal_dep = make_require_principal(
+                        repo_factory=_key_repo_factory,
+                        auth_enabled=True,
+                    )
+                    _require_query_access_dep = make_require_query_access(_require_principal_dep)
+                    app.dependency_overrides[_noop_query_access] = _require_query_access_dep
+
+                    logger.info(
+                        "Auth enabled: real API-key deps registered via dependency_overrides"
+                    )
         else:
             # Default in-process cache
             get_query_cache(reset=False)
@@ -160,6 +247,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     logger.info("%s started (version %s)", _SERVICE_NAME, finecorpus.__version__)
     yield
+
+    # Clean up auth state on shutdown so the module is reset to its default
+    # (Phase 1–3 compat) state.  This is especially important in test suites
+    # where the same process runs multiple test cases against the same module
+    # singleton: without cleanup, a test with auth.enabled=True would leave
+    # _auth_enabled=True, causing the next test (without auth patches) to
+    # reject all requests with PERMISSION_DENIED.
+    # NOTE: global declarations for these names are already at the top of
+    # this function; no duplicate global statement needed here.
+    _auth_enabled = False  # noqa: F841 (global declared at top of function)
+    _key_repo_factory = None  # noqa: F841
+    app.dependency_overrides.pop(_noop_query_access, None)
     logger.info("%s shutting down", _SERVICE_NAME)
 
 

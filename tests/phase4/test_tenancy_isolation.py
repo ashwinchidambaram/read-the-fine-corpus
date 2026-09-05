@@ -245,8 +245,9 @@ class TestT02CrossTenantFailsClosed:
                 principal=principal_a,
             )
 
-        # Should get results (the adapter finds the chunk for KB_A with principal_a's id)
-        assert response.result_status in (ResultStatus.matches, ResultStatus.no_matches)
+        # Must get matches exactly — a broken same-tenant filter that returns
+        # no_matches must fail the test (R5a: assert == matches, not `in (matches, no_matches)`).
+        assert response.result_status == ResultStatus.matches
         assert response.error is None
 
 

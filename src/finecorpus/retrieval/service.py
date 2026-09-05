@@ -463,14 +463,40 @@ def query(
             retriable=False,
         )
 
-    # Service-level scope containment (M-061/T-02, fail closed):
-    # When auth is enabled, enforce that a KB-scoped principal can only query
-    # their own KB.  This is the innermost safety gate — even if the FastAPI
-    # dependency layer already checked, the service re-checks so the library
-    # is independently safe regardless of call site.
+    # ------------------------------------------------------------------
+    # Phase 4 fail-closed checks (auth enabled, principal present):
+    # All checks happen BEFORE alias resolution and BEFORE index access.
+    # ------------------------------------------------------------------
     if auth_enabled and principal is not None:
-        from finecorpus.control.auth import Action, AuthError, authorize
+        from finecorpus.control.auth import Action, AuthError, ScopeKind, authorize
 
+        # R4c: workspace-scoped principal with null workspace_id is a corrupt
+        # stored record — it would silently drop the workspace containment clause
+        # and fail open.  Reject immediately.
+        if principal.scope_kind == ScopeKind.workspace and not principal.workspace_id:
+            return _error_response(
+                query_text,
+                [],
+                ErrorCode.PERMISSION_DENIED,
+                "workspace-scoped principal has no workspace_id — key record is corrupt.",
+                retriable=False,
+            )
+
+        # R4c symmetric: kb-scoped principal with null kb_id is also corrupt.
+        if principal.scope_kind == ScopeKind.kb and not principal.kb_id:
+            return _error_response(
+                query_text,
+                [],
+                ErrorCode.PERMISSION_DENIED,
+                "kb-scoped principal has no kb_id — key record is corrupt.",
+                retriable=False,
+            )
+
+        # Service-level scope containment (M-061/T-02, fail closed):
+        # enforce that a KB-scoped principal can only query their own KB.
+        # This is the innermost safety gate — even if the FastAPI dependency
+        # layer already checked, the service re-checks so the library is
+        # independently safe regardless of call site.
         try:
             authorize(principal, Action.query_kb, kb_id=kb_id)
         except AuthError:
@@ -482,15 +508,65 @@ def query(
                 retriable=False,
             )
 
+    # ------------------------------------------------------------------
+    # R3: For workspace-scoped principals, resolve alias record FIRST so we
+    # can verify KB→workspace containment before touching the index.
+    # This pre-alias-resolution workspace check must fire BEFORE the tenancy
+    # scope is built and BEFORE the adapter is called.
+    # ------------------------------------------------------------------
+    if auth_enabled and principal is not None:
+        from finecorpus.control.auth import ScopeKind
+
+        if principal.scope_kind == ScopeKind.workspace and principal.workspace_id:
+            # Resolve alias record to check workspace containment.
+            _pre_repo = AliasRepository(session)
+            _pre_alias = alias_name(kb_id)
+            try:
+                _pre_record = _pre_repo.get(_pre_alias)
+            except Exception:
+                _pre_record = None
+
+            if _pre_record is not None and hasattr(_pre_record, "workspace_id"):
+                if _pre_record.workspace_id and _pre_record.workspace_id != principal.workspace_id:
+                    # KB belongs to a different workspace — PERMISSION_DENIED, not no_matches.
+                    return _error_response(
+                        query_text,
+                        [],
+                        ErrorCode.PERMISSION_DENIED,
+                        (
+                            f"Knowledge base '{kb_id}' belongs to workspace "
+                            f"'{_pre_record.workspace_id}', not the principal's "
+                            f"workspace '{principal.workspace_id}'."
+                        ),
+                        retriable=False,
+                    )
+
     # Resolve tenancy scope from the authenticated principal (M-060):
     # workspace_id and permission_principals come from the principal, never
     # from client-supplied request body fields.
+    #
+    # R2: global-scope principals must NOT add a permission_principals filter.
+    # Global scope means platform-wide access — injecting the admin's own
+    # principal_id into the filter would match zero chunks (chunks carry the
+    # ingesting service key's ID, not the admin's ID).  The permission_principals
+    # clause is only meaningful for workspace- and kb-scoped principals whose ID
+    # was written into the chunk's tenancy block at ingest time.
     if auth_enabled and principal is not None:
-        scope = TenancyScope(
-            kb_id=kb_id,
-            workspace_id=principal.workspace_id or "",
-            permission_principals=(principal.principal_id,),
-        )
+        from finecorpus.control.auth import ScopeKind
+
+        if principal.scope_kind == ScopeKind.global_:
+            # Global scope: no permission_principals restriction (platform-wide admin access).
+            scope = TenancyScope(
+                kb_id=kb_id,
+                workspace_id="",  # global scope does not filter by workspace
+                permission_principals=(),  # omit — all content is readable
+            )
+        else:
+            scope = TenancyScope(
+                kb_id=kb_id,
+                workspace_id=principal.workspace_id or "",
+                permission_principals=(principal.principal_id,),
+            )
     else:
         scope = TenancyScope(kb_id=kb_id)
 

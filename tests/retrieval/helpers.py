@@ -429,18 +429,46 @@ def make_chunk_payload(
     kb_id: str = "kb-test",
     score: float = 0.9,
     source_document_id: str = "doc-001",
+    permission_principals: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Build a Qdrant point dict with a full payload (ready for FakeAdapter.seed_collection)."""
+    """Build a Qdrant point dict with a full payload (ready for FakeAdapter.seed_collection).
+
+    Args:
+        chunk_id: Chunk identifier.
+        text: Chunk text content.
+        kb_id: Knowledge-base ID written into ``tenancy.kb_id``.
+        score: Simulated vector-search score.
+        source_document_id: Source document identifier.
+        permission_principals: Optional list of principal IDs written into
+            ``tenancy.permission_principals``.  When ``None`` (default) the
+            field is omitted from the tenancy block, which means the chunk
+            is accessible to all principals (FakeAdapter filter: missing key
+            → no constraint applied for that field).
+
+            NOTE on FakeAdapter vs Qdrant semantics: FakeAdapter uses strict
+            list-contains semantics for ``permission_principals`` (the
+            ``{"__contains__": v}`` sentinel in ``_matches_filter``).  Real
+            Qdrant uses MatchValue on the array field.  When auth is enabled
+            the ingestion layer stores ``permission_principals`` as a ``list()``
+            — so the FakeAdapter ``__contains__`` check and Qdrant MatchValue
+            check are both satisfied by the same stored value.  See
+            ``_build_tenancy_filter`` in ``retrieval.service`` for the
+            canonical filter construction.
+    """
+    tenancy: dict[str, Any] = {
+        "kb_id": kb_id,
+        "workspace_id": "ws-test",
+    }
+    if permission_principals is not None:
+        tenancy["permission_principals"] = list(permission_principals)
+
     return {
         "id": chunk_id,
         "score": score,
         "payload": {
             "chunk_id": chunk_id,
             "text": text,
-            "tenancy": {
-                "kb_id": kb_id,
-                "workspace_id": "ws-test",
-            },
+            "tenancy": tenancy,
             "provenance": make_provenance_payload(
                 source_document_id=source_document_id,
             ),

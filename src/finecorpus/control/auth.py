@@ -253,6 +253,15 @@ class ApiKeyRepository:
         role = Role(role)
         scope_kind = ScopeKind(scope_kind)
 
+        # Scope-symmetry enforcement (PR #33 R4): workspace-scoped keys without
+        # workspace_id and kb-scoped keys without kb_id are corrupt at issuance time —
+        # reject early so validate() never returns a principal with a missing scope
+        # anchor (which would then silently fail open).
+        if scope_kind == ScopeKind.workspace and not workspace_id:
+            raise AuthError("workspace-scoped key requires a non-empty workspace_id")
+        if scope_kind == ScopeKind.kb and not kb_id:
+            raise AuthError("kb-scoped key requires a non-empty kb_id")
+
         full_key, stored_prefix, key_hash = _generate_raw_key()
         key_id = secrets.token_hex(16)
         now = datetime.now(tz=UTC)

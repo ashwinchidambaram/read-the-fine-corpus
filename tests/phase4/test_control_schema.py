@@ -476,6 +476,7 @@ class TestKeyHashRoundtrip:
             role=Role.editor,
             scope_kind=ScopeKind.workspace,
             created_by="admin",
+            workspace_id="ws-expired-test",  # R4: workspace-scoped key requires workspace_id
             expires_at=past,
         )
         sqlite_session.flush()
