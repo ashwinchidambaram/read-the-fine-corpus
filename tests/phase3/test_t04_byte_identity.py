@@ -604,152 +604,157 @@ class TestT04ByteIdentity:
 FIXTURE_CORPUS = pathlib.Path(__file__).parent.parent / "fixtures" / "golden" / "corpus"
 
 
+def run_corpus_wide_t04_verification(tmp_path: pathlib.Path) -> dict[str, Any]:
+    """Run corpus-wide T-04 byte-identity verification and return stats.
+
+    Callable helper extracted per Ruling 4 so that BOTH ``TestT04CorpusWide``
+    and ``tests.phase3.test_acceptance.TestT04`` can invoke the real verification
+    rather than merely asserting method existence.
+
+    Runs collect→assess→decompose→plan over the golden corpus, then builds in
+    dry_run=True mode with FakeLLMProvider and FakeEmbeddingProvider.
+
+    Returns
+    -------
+    dict with keys:
+      fixtures_verified: int   — number of distinct document_ids that contributed chunks
+      chunks_verified: int     — total chunks checked for byte-identity
+      violations: list[str]    — descriptions of any byte-identity failures
+      tier2_violations: list[str] — descriptions of changed_text=True tier-2 records
+    """
+    from finecorpus.contracts.ingestion_config import IngestionConfig
+    from finecorpus.embedding.fake import FakeProvider
+    from finecorpus.llm.fake import FakeLLMProvider
+    from finecorpus.llm.operations import ResolvedOpConfig
+    from finecorpus.pipeline import run_pipeline
+    from finecorpus.pipeline.artifact_store import ArtifactStore
+    from finecorpus.pipeline.build.stage import BuildStage
+
+    run_id = "t04-corpus-verify"
+    artifacts_root = tmp_path / "artifacts"
+
+    run_pipeline(
+        source_dir=FIXTURE_CORPUS,
+        artifacts_root=artifacts_root,
+        run_id=run_id,
+        workspace_id="ws-t04-verify",
+        kb_id="kb-t04-verify",
+    )
+
+    store = ArtifactStore(artifacts_root=artifacts_root, run_id=run_id)
+    ingestion_config = store.load_with_model_validation("plan", IngestionConfig)
+
+    fake_embed = FakeProvider()
+    fake_llm = FakeLLMProvider()
+    op_cfg = ResolvedOpConfig(
+        provider_id="fake",
+        model_id="fake-llm-v1",
+        temperature=0.0,
+        max_output_tokens=128,
+        max_retries=1,
+    )
+
+    build = BuildStage(
+        artifacts_root=artifacts_root,
+        run_id=run_id,
+        dry_run=True,
+        embedding_provider=fake_embed,
+        llm_provider=fake_llm,
+        llm_op_config=op_cfg,
+    )
+    result = build._produce(ingestion_config.model_dump(mode="json"))  # noqa: SLF001
+    chunks = result["chunks"]
+
+    violations: list[str] = []
+    tier2_violations: list[str] = []
+    for chunk in chunks:
+        text = chunk["text"]
+        canonical = chunk["canonical_text"]
+        char_start = chunk["char_start"]
+        char_end = chunk["char_end"]
+        position_slice = canonical[char_start:char_end]
+        if text.encode() != position_slice.encode():
+            violations.append(
+                f"doc={chunk['document_id']!r} seg={chunk['segment_path']!r} "
+                f"idx={chunk['chunk_index']}: "
+                f"chunk.text {text[:40]!r} != canonical[{char_start}:{char_end}] "
+                f"{position_slice[:40]!r}"
+            )
+        for tr in chunk["provenance"].get("transformations", []):
+            if tr.get("tier") == 2 and tr.get("changed_text") is not False:
+                tier2_violations.append(
+                    f"doc={chunk['document_id']!r} seg={chunk['segment_path']!r} "
+                    f"op={tr.get('operation')!r}: changed_text={tr.get('changed_text')}"
+                )
+
+    return {
+        "fixtures_verified": len({c["document_id"] for c in chunks}),
+        "chunks_verified": len(chunks),
+        "violations": violations,
+        "tier2_violations": tier2_violations,
+    }
+
+
 class TestT04CorpusWide:
     """§19 acceptance criterion 2: corpus-wide byte-identity over the golden fixture set.
 
     Runs the real pipeline (collect→assess→decompose→plan) over all 21 golden
-    fixtures, then builds in dry_run=True mode with:
-    - FakeProvider (embedding)
-    - FakeLLMProvider (tier-2 table descriptions)
-    - Tier 1 + Tier 2 enabled per class (via the Plan stage config)
+    fixtures, then builds in dry_run=True mode via ``run_corpus_wide_t04_verification``.
 
     Asserts for EVERY chunk of EVERY fixture:
     1. chunk.text byte-equals canonical[char_start:char_end] — position-exact
        (NOT canonical.index(text) which masks off-by-position on repeated text).
     2. Every tier-2 TransformationRecord has changed_text=False (§7.2).
-    3. Augmentation fields are populated where the class rule demands it.
 
     This test is THE §19 acceptance test for criterion 2.  It must be
-    unimpeachable.
+    unimpeachable.  The shared ``run_corpus_wide_t04_verification`` helper is
+    also called by ``test_acceptance.TestT04.test_t04_corpus_wide_real_verification``
+    so the acceptance sentinel runs the real verification rather than only checking
+    method existence.
     """
 
     @pytest.fixture(scope="class")
-    def corpus_build_result(self, tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
-        """Run the real pipeline + dry_run Build over the golden corpus.
+    def t04_stats(self, tmp_path_factory: pytest.TempPathFactory) -> dict[str, Any]:
+        """Run real corpus-wide T-04 verification and return stats dict."""
+        tmp_path = tmp_path_factory.mktemp("t04-corpus-wide")
+        return run_corpus_wide_t04_verification(tmp_path)
 
-        Returns the BuildStage result dict (contains all inline chunks).
-        """
-
-        from finecorpus.contracts.ingestion_config import IngestionConfig
-        from finecorpus.embedding.fake import FakeProvider
-        from finecorpus.llm.fake import FakeLLMProvider
-        from finecorpus.llm.operations import ResolvedOpConfig
-        from finecorpus.pipeline import run_pipeline
-        from finecorpus.pipeline.artifact_store import ArtifactStore
-        from finecorpus.pipeline.build.stage import BuildStage
-
-        artifacts_root = tmp_path_factory.mktemp("t04-corpus")
-        run_id = "t04-corpus-wide"
-
-        # Run all stages through Plan (Build will be skeleton — that's fine)
-        run_pipeline(
-            source_dir=FIXTURE_CORPUS,
-            artifacts_root=artifacts_root,
-            run_id=run_id,
-            workspace_id="ws-t04-corpus",
-            kb_id="kb-t04-corpus",
-        )
-
-        # Load the Plan artifact (IngestionConfig) produced by the Plan stage
-        store = ArtifactStore(artifacts_root=artifacts_root, run_id=run_id)
-        ingestion_config = store.load_with_model_validation("plan", IngestionConfig)
-
-        # Run Build in dry_run=True with FakeProvider + FakeLLMProvider
-        fake_embed = FakeProvider()
-        fake_llm = FakeLLMProvider()
-        op_cfg = ResolvedOpConfig(
-            provider_id="fake",
-            model_id="fake-llm-v1",
-            temperature=0.0,
-            max_output_tokens=128,
-            max_retries=1,
-        )
-
-        build = BuildStage(
-            artifacts_root=artifacts_root,
-            run_id=run_id,
-            dry_run=True,
-            embedding_provider=fake_embed,
-            llm_provider=fake_llm,
-            llm_op_config=op_cfg,
-        )
-
-        result = build._produce(ingestion_config.model_dump(mode="json"))  # noqa: SLF001
-        return result
-
-    def test_corpus_wide_chunk_count_positive(self, corpus_build_result: dict[str, Any]) -> None:
+    def test_corpus_wide_chunk_count_positive(self, t04_stats: dict[str, Any]) -> None:
         """Corpus-wide build must produce at least one chunk."""
-        chunks = corpus_build_result["chunks"]
-        assert len(chunks) > 0, "Corpus-wide dry_run produced no chunks"
+        assert t04_stats["chunks_verified"] > 0, "Corpus-wide dry_run produced no chunks"
 
-    def test_corpus_wide_byte_identity_position_exact(
-        self, corpus_build_result: dict[str, Any]
-    ) -> None:
+    def test_corpus_wide_byte_identity_position_exact(self, t04_stats: dict[str, Any]) -> None:
         """Every chunk.text must byte-equal canonical[char_start:char_end] — position-exact.
 
         This is the §19 acceptance criterion 2 assertion.  Uses span offsets
         (char_start, char_end) NOT canonical.index(text) — the latter masks
         off-by-position bugs when the same text appears at multiple positions.
         """
-        chunks = corpus_build_result["chunks"]
-        assert chunks, "No chunks to verify"
-
-        failures: list[str] = []
-        for chunk in chunks:
-            text = chunk["text"]
-            canonical = chunk["canonical_text"]
-            char_start = chunk["char_start"]
-            char_end = chunk["char_end"]
-
-            position_slice = canonical[char_start:char_end]
-            if text.encode() != position_slice.encode():
-                failures.append(
-                    f"doc={chunk['document_id']!r} seg={chunk['segment_path']!r} "
-                    f"idx={chunk['chunk_index']}: "
-                    f"chunk.text {text[:40]!r} != canonical[{char_start}:{char_end}] "
-                    f"{position_slice[:40]!r}"
-                )
-
-        fixture_count = len({c["document_id"] for c in chunks})
-        chunk_count = len(chunks)
-
-        assert not failures, (
-            f"T-04 byte-identity FAILED for {len(failures)}/{chunk_count} chunks "
-            f"across {fixture_count} fixtures:\n" + "\n".join(failures[:10])
+        violations = t04_stats["violations"]
+        chunks_verified = t04_stats["chunks_verified"]
+        fixtures_verified = t04_stats["fixtures_verified"]
+        assert not violations, (
+            f"T-04 byte-identity FAILED for {len(violations)}/{chunks_verified} chunks "
+            f"across {fixtures_verified} fixtures:\n" + "\n".join(violations[:10])
         )
 
-    def test_corpus_wide_tier2_changed_text_false(
-        self, corpus_build_result: dict[str, Any]
-    ) -> None:
+    def test_corpus_wide_tier2_changed_text_false(self, t04_stats: dict[str, Any]) -> None:
         """Every tier-2 TransformationRecord must have changed_text=False (§7.2)."""
-        chunks = corpus_build_result["chunks"]
-
-        failures: list[str] = []
-        for chunk in chunks:
-            for tr in chunk["provenance"].get("transformations", []):
-                if tr.get("tier") == 2 and tr.get("changed_text") is not False:
-                    failures.append(
-                        f"doc={chunk['document_id']!r} seg={chunk['segment_path']!r} "
-                        f"op={tr.get('operation')!r}: changed_text={tr.get('changed_text')}"
-                    )
-
-        assert not failures, f"Tier-2 changed_text=True for {len(failures)} records:\n" + "\n".join(
-            failures[:10]
+        tier2_violations = t04_stats["tier2_violations"]
+        assert not tier2_violations, (
+            f"Tier-2 changed_text=True for {len(tier2_violations)} records:\n"
+            + "\n".join(tier2_violations[:10])
         )
 
-    def test_corpus_wide_report_stats(self, corpus_build_result: dict[str, Any]) -> None:
+    def test_corpus_wide_report_stats(self, t04_stats: dict[str, Any]) -> None:
         """Report fixture and chunk counts for the orchestrator."""
-        chunks = corpus_build_result["chunks"]
-        fixture_count = len({c["document_id"] for c in chunks})
-        chunk_count = len(chunks)
-
-        # At minimum we expect chunks from the 21 fixtures (some may produce 0 due to
-        # all-excluded segments, but the overall count should be well above 0)
-        assert fixture_count >= 1, "Expected at least 1 fixture with chunks"
-        assert chunk_count >= 1, "Expected at least 1 chunk from corpus"
+        assert t04_stats["fixtures_verified"] >= 1, "Expected at least 1 fixture with chunks"
+        assert t04_stats["chunks_verified"] >= 1, "Expected at least 1 chunk from corpus"
 
         # Log counts for orchestrator (printed in verbose mode)
+        chunk_count = t04_stats["chunks_verified"]
+        fixture_count = t04_stats["fixtures_verified"]
         print(
-            f"\n[T-04 corpus-wide] {chunk_count} chunks from {fixture_count} fixtures verified "
-            f"position-exact (char_start:char_end)"
+            f"\n[T-04 corpus-wide] {chunk_count} chunks from "
+            f"{fixture_count} fixtures verified position-exact (char_start:char_end)"
         )

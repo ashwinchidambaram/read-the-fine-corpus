@@ -286,6 +286,85 @@ to fail; this is rare since `html.parser` is permissive.
 
 ---
 
+---
+
+## Phase 3 failure modes
+
+### pytest silently skips tests in `tests/**/build/` directories
+
+**Symptom:** Adding test files under a `tests/phase3/build/` or `tests/pipeline/build/`
+subdirectory does not increase the reported test count. `pytest --collect-only` does not
+list any tests from those directories. No error is reported.
+
+**Meaning:** `pytest` ships with a default `norecursedirs` setting that includes `build`.
+Any test directory named `build` (at any depth under the test root) is silently skipped
+by the collector. This affects not only top-level `build/` but also nested paths like
+`tests/phase3/build/` — the directory name alone triggers the skip, regardless of nesting.
+
+**How discovered:** During Phase 3 build, tests written under
+`tests/phase3/build/test_chunkers.py` produced a mysteriously stable test count.
+`pytest --collect-only` confirmed zero items collected from that path. Renaming the
+directory to `tests/phase3/chunkers/` immediately fixed collection.
+
+**Fix:** Either rename the directory away from `build`, or add an explicit `norecursedirs`
+override in `pyproject.toml` to un-exclude it:
+
+```toml
+[tool.pytest.ini_options]
+norecursedirs = [".git", ".venv", "__pycache__", "node_modules", "dist", ".eggs"]
+# Note: "build" is intentionally absent — we have test directories under that name.
+```
+
+The full default `norecursedirs` list that pytest applies (as of pytest 7+) is:
+`*.egg`, `.svn`, `CVS`, `.bzr`, `.hg`, `.git`, `__pycache__`, `{arch}`, `.tox`,
+`venv`, `.venv`, `_darcs`, `buck-out`, `build`, `dist`, `node_modules`.
+
+**Recommendation:** Always add an explicit `norecursedirs` in `pyproject.toml` so the
+setting is version-controlled and does not depend on pytest's default behaviour.
+
+---
+
+### Absolute checkout paths in subprocess cwd in tests
+
+**Symptom:** A test that uses `subprocess.run(..., cwd="/home/runner/work/repo")` or
+similar hard-coded paths passes locally but fails in CI with `FileNotFoundError` or
+`subprocess.CalledProcessError`. The failure message references a path that does not
+exist in the CI runner's filesystem.
+
+**Meaning:** CI runners (GitHub Actions, GitLab CI, etc.) check out repositories to
+runner-specific paths (`/home/runner/work/<repo>/<repo>` on GitHub) that differ from
+developer machines. Hard-coded absolute paths are never portable across environments.
+
+**How discovered:** During Phase 3 test development, a subprocess-based integration test
+hard-coded `cwd=pathlib.Path("/Users/dev/projects/rtfc/")` in the test helper. The test
+passed locally and failed immediately in CI with `No such file or directory`.
+
+**Fix:** Derive the working directory from `__file__` (the test module's own path) and
+navigate relative to that:
+
+```python
+# WRONG — hard-coded absolute path
+subprocess.run(["uv", "run", "pytest"], cwd="/Users/dev/projects/rtfc")
+
+# CORRECT — derived from __file__
+REPO_ROOT = pathlib.Path(__file__).parent.parent.parent  # adjust depth as needed
+subprocess.run(["uv", "run", "pytest"], cwd=REPO_ROOT)
+```
+
+For golden corpus paths specifically, use:
+
+```python
+CORPUS_DIR = pathlib.Path(__file__).parent.parent / "fixtures" / "golden" / "corpus"
+```
+
+This pattern is used consistently throughout the Phase 3 test suite.
+
+**Rule:** Never hard-code absolute paths as `cwd`, `source_dir`, or any filesystem
+argument in tests. Always derive from `__file__` or from `tmp_path` / `tmp_path_factory`
+pytest fixtures.
+
+---
+
 ### Missing decompose artifact in report
 
 **Symptom:** Running `corpus report` produces an exclusion report that opens with the

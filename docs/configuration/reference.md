@@ -100,17 +100,22 @@ are secret-free by construction (§14.2): provider names appear, credential valu
 
 ### 2.4 Providers — Internal LLM
 
+Phase 3 real implementation. Keys marked **(Phase 3)** are wired to `ResolvedOpConfig` and active.
+
 | Key path | Type | Default | Spec § | Source |
 |---|---|---|---|---|
-| `internal_llm.default.provider` | string | — | §7.3, provider-abstraction.md §4.2 | Default internal LLM provider (`openai` or `ollama`). |
-| `internal_llm.default.model` | string | — | §7.3, provider-abstraction.md §4.2 | Exact model identifier. |
-| `internal_llm.default.temperature` | float [0,1] | `0.2` **(proposed)** | §7.3 | Temperature for internal model calls. The only place temperature appears in the product. |
+| `internal_llm.default.provider` | string | — | §7.3, M-036/M-037 | Default internal LLM provider (`openai`, `ollama`, or `fake`). **(Phase 3)** |
+| `internal_llm.default.model` | string | — | §7.3 | Exact model identifier (e.g. `gpt-4o-mini`, `llama3.2`). **(Phase 3)** |
+| `internal_llm.default.endpoint` | string | provider default | §7.3, M-037 | Override endpoint URL. Required for Ollama (`http://localhost:11434`); optional for OpenAI-compatible servers. **(Phase 3)** |
+| `internal_llm.default.temperature` | float [0,1] | `0.2` | §7.3 | Temperature for internal model calls. **(Phase 3)** |
+| `internal_llm.default.max_output_tokens` | int | `1024` | §7.3, D-21 | Hard ceiling on output tokens per call. Bounds cost against compromised/misconfigured endpoints (D-21 resolution). **(Phase 3)** |
 | `internal_llm.operations.classification.provider` | string | inherits default | provider-abstraction.md §4.2 | Provider for segment classification. |
 | `internal_llm.operations.classification.model` | string | inherits default | provider-abstraction.md §4.2 | |
 | `internal_llm.operations.classification.temperature` | float [0,1] | `0.0` **(proposed)** | provider-abstraction.md §4.2 | Determinism is strongly preferred for classification. |
-| `internal_llm.operations.augmentation.provider` | string | inherits default | provider-abstraction.md §4.2 | Provider for table description and breadcrumb blurb generation. |
-| `internal_llm.operations.augmentation.model` | string | inherits default | provider-abstraction.md §4.2 | |
+| `internal_llm.operations.augmentation.provider` | string | inherits default | provider-abstraction.md §4.2 | Provider for table description augmentation (Tier 2). **(Phase 3)** |
+| `internal_llm.operations.augmentation.model` | string | inherits default | provider-abstraction.md §4.2 | **(Phase 3)** |
 | `internal_llm.operations.augmentation.temperature` | float [0,1] | `0.3` **(proposed)** | provider-abstraction.md §4.2 | |
+| `internal_llm.operations.augmentation.max_output_tokens` | int | inherits default | §7.3, D-21 | Per-operation override for augmentation output ceiling. **(Phase 3)** |
 | `internal_llm.operations.question_generation.provider` | string | inherits default | provider-abstraction.md §4.2 | Provider for eval question generation. |
 | `internal_llm.operations.question_generation.model` | string | inherits default | provider-abstraction.md §4.2 | |
 | `internal_llm.operations.question_generation.temperature` | float [0,1] | `0.7` **(proposed)** | provider-abstraction.md §4.2 | |
