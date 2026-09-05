@@ -8,11 +8,16 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
 from finecorpus.llm.fake import FakeLLMProvider
 from finecorpus.llm.operations import AugmentationOutput, ClassificationOutput
+
+# Repo root derived from this file's location — never hardcode a checkout path
+# (CI runners and other worktrees have different roots).
+_REPO_ROOT = str(Path(__file__).resolve().parents[2])
 
 
 class TestFakeDeterminism:
@@ -146,14 +151,14 @@ print(r.raw_json)
             capture_output=True,
             text=True,
             check=True,
-            cwd="/Users/ashwinchidambaram/dev/projects/rtfc-worktrees/p3-llm",
+            cwd=_REPO_ROOT,
         )
         result2 = subprocess.run(
             [sys.executable, "-c", script],
             capture_output=True,
             text=True,
             check=True,
-            cwd="/Users/ashwinchidambaram/dev/projects/rtfc-worktrees/p3-llm",
+            cwd=_REPO_ROOT,
         )
 
         assert result1.stdout.strip() == result2.stdout.strip(), (
@@ -175,14 +180,14 @@ print(r.raw_json)
             capture_output=True,
             text=True,
             check=True,
-            cwd="/Users/ashwinchidambaram/dev/projects/rtfc-worktrees/p3-llm",
+            cwd=_REPO_ROOT,
         )
         result2 = subprocess.run(
             [sys.executable, "-c", script],
             capture_output=True,
             text=True,
             check=True,
-            cwd="/Users/ashwinchidambaram/dev/projects/rtfc-worktrees/p3-llm",
+            cwd=_REPO_ROOT,
         )
 
         assert result1.stdout.strip() == result2.stdout.strip()
