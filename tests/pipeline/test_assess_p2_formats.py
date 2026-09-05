@@ -973,7 +973,14 @@ class TestTableTransformationRecord:
             ),
         )
 
-        provenance = _build_provenance(ss, seg)
+        # Phase 3: transformation records flow from apply_tier1, not auto-injected.
+        # The D-11 record is emitted when Tier1Operation.table_to_markdown is in the
+        # class rule's tier1_operations.  Test by running apply_tier1 with that op.
+        from finecorpus.contracts.ingestion_config import Tier1Operation
+        from finecorpus.pipeline.build.transform import apply_tier1
+
+        _, records = apply_tier1(seg.text, [Tier1Operation.table_to_markdown])
+        provenance = _build_provenance(ss, seg, records)
         transformations = provenance.get("transformations", [])
         assert transformations, (
             "Expected table_to_markdown TransformationRecord for table segment, "
@@ -985,7 +992,12 @@ class TestTableTransformationRecord:
         )
         rec = next(t for t in transformations if t["operation"] == "table_to_markdown")
         assert rec["tier"] == 1, f"Expected tier=1 (Tier 1), got {rec['tier']}"
-        assert rec["changed_text"] is True, "table_to_markdown must have changed_text=True"
+        # table_to_markdown is a no-op at Build (conversion happened at parse layer)
+        # so changed_text=False per Phase 3 design (transform.py _apply_table_to_markdown)
+        assert rec["changed_text"] is False, (
+            "table_to_markdown at Build layer is a parse-layer annotation: "
+            "changed_text=False (no bytes altered at Build)."
+        )
         assert rec["applied_by"] == "deterministic", (
             f"Expected deterministic, got {rec['applied_by']}"
         )
@@ -1055,7 +1067,8 @@ class TestTableTransformationRecord:
             ),
         )
 
-        provenance = _build_provenance(ss, seg)
+        # Phase 3: pass empty records (no tier1 ops applied for a plain prose segment)
+        provenance = _build_provenance(ss, seg, [])
         transformations = provenance.get("transformations", [])
         assert transformations == [], (
             f"Prose segment must have no TransformationRecords, got: {transformations}"

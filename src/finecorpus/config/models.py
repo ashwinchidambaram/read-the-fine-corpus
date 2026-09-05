@@ -382,6 +382,15 @@ class InternalLLMDefaultConfig(BaseModel):
         default=None,
         description=("§7.3, provider-abstraction.md §4.2 — Exact model identifier."),
     )
+    endpoint: str | None = Field(
+        default=None,
+        description=(
+            "§7.3 — Ollama HTTP endpoint for internal LLM calls.  "
+            "Used when ``provider='ollama'``.  Defaults to ``http://localhost:11434`` "
+            "when ``null``.  Not a secret — a plain URL.  "
+            "The registry falls back to this field via ``getattr(llm_cfg, 'endpoint', None)``."
+        ),
+    )
     temperature: float = Field(
         default=0.2,
         ge=0.0,

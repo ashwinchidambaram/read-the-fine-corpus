@@ -180,6 +180,12 @@ internal_llm:
     # Default: (none — set by first-run)
     model:
 
+    # Ollama HTTP endpoint for internal LLM calls.  Used when provider='ollama'.
+    # Defaults to http://localhost:11434 when null.  Not a secret — a plain URL.
+    # (§7.3)
+    # Default: (none — falls back to http://localhost:11434)
+    endpoint:
+
     # Temperature for internal model calls. The only place temperature
     # appears in the product.  (§7.3)  (proposed)
     # Default: 0.2
