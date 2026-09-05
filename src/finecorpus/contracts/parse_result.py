@@ -14,7 +14,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Annotated
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from finecorpus.contracts.shared.blocks import (
     InvisibleContentKind,
@@ -364,7 +364,10 @@ class LanguageShare(BaseModel):
     """Per-document language distribution entry (§7.6).
 
     See docs/contracts/parse-result.md LanguageShare.
+    extra="forbid": unknown keys rejected on parse (M-071 secret-free by construction).
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     language: str = Field(description="Detected language in BCP-47.")
     fraction: Annotated[float, Field(ge=0.0, le=1.0)] = Field(
