@@ -10,6 +10,9 @@ Provides:
 
 from __future__ import annotations
 
+import copy
+import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 from finecorpus.index.adapter import (
@@ -18,6 +21,8 @@ from finecorpus.index.adapter import (
     CollectionInfo,
     IndexError,
     SearchResult,
+    SnapshotError,
+    SnapshotRef,
     alias_name,
     collection_name,
 )
@@ -130,6 +135,8 @@ class FakeAdapter:
     """In-memory IndexAdapter for retrieval unit tests.
 
     Supports seeding point payloads and optional failure injection.
+    Also implements the snapshot surface (§10.2, §17.1) with deep-copy
+    in-memory semantics sufficient for unit tests.
     """
 
     def __init__(
@@ -143,6 +150,9 @@ class FakeAdapter:
         self._fail_on_search = fail_on_search
         self._fail_alias_not_found = fail_alias_not_found
         self.search_call_count = 0
+        # Snapshot store: snapshot_id → deep copy of collection data
+        self._snapshots: dict[str, SnapshotRef] = {}
+        self._snapshot_data: dict[str, dict[str, Any]] = {}
 
     def seed_collection(
         self,
@@ -290,6 +300,55 @@ class FakeAdapter:
         return [
             AdapterAliasRecord(alias_name=a, collection_name=c) for a, c in self.aliases.items()
         ]
+
+    # ------------------------------------------------------------------
+    # Snapshot operations (§10.2, §17.1) — in-memory deep-copy semantics
+    # ------------------------------------------------------------------
+
+    def snapshot_collection(self, collection_name: str) -> SnapshotRef:
+        """Deep-copy the collection into an in-memory snapshot store."""
+        if collection_name not in self.collections:
+            from finecorpus.index.adapter import CollectionNotFoundError
+
+            raise CollectionNotFoundError(f"Collection '{collection_name}' does not exist")
+        snapshot_id = f"snap_{collection_name}_{uuid.uuid4().hex[:8]}"
+        ref = SnapshotRef(
+            collection=collection_name,
+            snapshot_id=snapshot_id,
+            created_at=datetime.now(tz=UTC),
+            location=f"memory://{snapshot_id}",
+        )
+        self._snapshots[snapshot_id] = ref
+        self._snapshot_data[snapshot_id] = copy.deepcopy(self.collections[collection_name])
+        return ref
+
+    def restore_snapshot(self, ref: SnapshotRef, new_collection_name: str) -> None:
+        """Restore the deep-copied snapshot into a new (must-not-exist) collection."""
+        if new_collection_name in self.collections:
+            raise IndexError(
+                f"Cannot restore snapshot: target collection '{new_collection_name}' already "
+                "exists.  Restore always goes INTO a new collection — never in place."
+            )
+        if ref.snapshot_id not in self._snapshot_data:
+            raise SnapshotError(f"Snapshot '{ref.snapshot_id}' not found in fake adapter store.")
+        self.collections[new_collection_name] = copy.deepcopy(self._snapshot_data[ref.snapshot_id])
+
+    def list_snapshots(self, collection_name: str) -> list[SnapshotRef]:
+        """Return all snapshots taken from the given collection, sorted by creation time."""
+        if collection_name not in self.collections:
+            from finecorpus.index.adapter import CollectionNotFoundError
+
+            raise CollectionNotFoundError(f"Collection '{collection_name}' does not exist")
+        refs = [ref for ref in self._snapshots.values() if ref.collection == collection_name]
+        refs.sort(key=lambda r: (r.created_at is None, r.created_at))
+        return refs
+
+    def delete_snapshot(self, ref: SnapshotRef) -> None:
+        """Remove a snapshot from the in-memory store."""
+        if ref.snapshot_id not in self._snapshots:
+            raise SnapshotError(f"Snapshot '{ref.snapshot_id}' not found in fake adapter store.")
+        del self._snapshots[ref.snapshot_id]
+        del self._snapshot_data[ref.snapshot_id]
 
 
 # ---------------------------------------------------------------------------

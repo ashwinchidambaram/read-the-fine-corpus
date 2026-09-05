@@ -68,6 +68,7 @@ from finecorpus.contracts.shared.blocks import (
     TransformationTier,
     TrustLevel,
 )
+from finecorpus.contracts.versions import RETRIEVAL_RESPONSE_SCHEMA_VERSION as _SCHEMA_VERSION
 from finecorpus.control.metadata import AliasRecord, AliasRepository
 from finecorpus.embedding.base import EmbeddingProvider, ProviderUnavailableError
 from finecorpus.embedding.cache import QueryEmbeddingCache, get_query_cache
@@ -80,7 +81,6 @@ from finecorpus.index.adapter import (
 
 logger = logging.getLogger(__name__)
 
-_SCHEMA_VERSION = "1.1.0"
 _TOP_K_MAX = 100
 _TOP_K_DEFAULT = 10
 

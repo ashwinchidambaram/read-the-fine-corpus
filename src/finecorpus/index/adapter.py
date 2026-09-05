@@ -62,6 +62,13 @@ class AliasNotFoundError(IndexError):
     """Raised when the alias does not exist or resolves to nothing."""
 
 
+class SnapshotError(IndexError):
+    """Raised when a snapshot operation fails at the backend layer.
+
+    See §10.2 (hot/cold retention) and §17.1 (deletion completeness for cold snapshots).
+    """
+
+
 # ---------------------------------------------------------------------------
 # Value objects
 # ---------------------------------------------------------------------------
@@ -79,6 +86,7 @@ class BackendCapabilities:
     - ``hybrid_search``: False (declared unsupported; not silent — M-009/M-010)
     - ``payload_filtering``: True
     - ``atomic_alias_swap``: True
+    - ``snapshots``: True (Phase 4: snapshot/restore via Qdrant snapshot API)
     """
 
     dense_search: bool = True
@@ -89,6 +97,16 @@ class BackendCapabilities:
     """Server-side payload filter injection on every search path."""
     atomic_alias_swap: bool = True
     """Atomic alias retarget — zero error window (§4, §18.3 test 1)."""
+    snapshots: bool = True
+    """Collection snapshot create/list/delete/restore (§10.2, §17.1).
+
+    Limitation (Qdrant local-storage): ``restore_snapshot`` uses the Qdrant
+    ``recover_snapshot`` API which requires a URL-accessible snapshot location.
+    For local-storage deployments the snapshot file URL is a ``file://`` path on
+    the Qdrant server's filesystem; callers MUST ensure the restored-into collection
+    does not already exist.  Cloud/S3-backed Qdrant deployments may expose an
+    external URL instead.
+    """
 
     hybrid_search_unavailable_reason: str = (
         "Hybrid search requires sparse-vector support (SPLADE/BM25). "
@@ -113,6 +131,32 @@ class SearchResult:
     chunk_id: str
     score: float
     payload: dict[str, Any]
+
+
+@dataclass
+class SnapshotRef:
+    """Identifies a collection snapshot (§10.2, §17.1).
+
+    A ``SnapshotRef`` is an opaque handle that callers pass back to ``restore_snapshot``,
+    ``delete_snapshot``, etc.  The ``location`` field is a backend-specific URI (e.g. a
+    Qdrant ``file://`` path or an external URL) and MUST be treated as opaque by callers.
+
+    Callers MUST NOT promote a restored collection without first replaying the tombstone
+    log (§17.1); that responsibility belongs to the lifecycle layer, not this adapter.
+
+    Attributes:
+        collection: The collection this snapshot was taken from.
+        snapshot_id: Backend-assigned snapshot name/identifier.
+        created_at: UTC timestamp when the snapshot was created; ``None`` if the
+            backend did not return a creation time.
+        location: Backend-specific URI for the snapshot file (e.g. Qdrant local
+            ``file://`` path or an external URL).  Passed to ``restore_snapshot``.
+    """
+
+    collection: str
+    snapshot_id: str
+    created_at: datetime | None
+    location: str
 
 
 @dataclass
@@ -633,6 +677,86 @@ class IndexAdapter(abc.ABC):
             List of AliasRecord value objects (alias_name → collection_name).
         """
 
+    # ------------------------------------------------------------------
+    # Snapshot operations (§10.2 hot/cold retention, §17.1 deletion completeness)
+    # ------------------------------------------------------------------
+
+    @abc.abstractmethod
+    def snapshot_collection(self, collection_name: str) -> SnapshotRef:
+        """Create a snapshot of a collection and return a reference to it.
+
+        Snapshots are the cold-storage mechanism for N-2, N-3, … index versions
+        (§10.2).  The returned ``SnapshotRef.location`` is a backend-specific URI
+        that callers pass back to ``restore_snapshot``.
+
+        IMPORTANT: the lifecycle layer is responsible for replaying the tombstone
+        log before promoting a restored collection (§17.1).  This method only
+        creates the snapshot; it does not enforce deletion-completeness invariants.
+
+        Args:
+            collection_name: The raw collection name to snapshot.
+
+        Returns:
+            A ``SnapshotRef`` describing the created snapshot.
+
+        Raises:
+            CollectionNotFoundError: If the collection does not exist.
+            SnapshotError: If the backend snapshot operation fails.
+        """
+
+    @abc.abstractmethod
+    def restore_snapshot(self, ref: SnapshotRef, new_collection_name: str) -> None:
+        """Restore a snapshot INTO a new collection (never in place).
+
+        Callers promote the new collection via an alias swap after tombstone-log
+        replay (§17.1).  The adapter MUST NOT overwrite an existing collection;
+        if ``new_collection_name`` already exists, this method MUST raise
+        ``IndexError``.
+
+        Limitation (Qdrant local-storage): ``recover_snapshot`` requires that the
+        snapshot location is accessible as a URL from the Qdrant server.  For local
+        deployments the ``ref.location`` is a ``file://`` path on the Qdrant server
+        filesystem.  Callers in remote/cloud setups MUST use an externally reachable
+        URL (e.g. via Qdrant's snapshot download endpoint).
+
+        Args:
+            ref: The ``SnapshotRef`` returned by ``snapshot_collection``.
+            new_collection_name: Name for the restored collection.  Must not exist.
+
+        Raises:
+            IndexError: If ``new_collection_name`` already exists.
+            SnapshotError: If the backend restore operation fails.
+        """
+
+    @abc.abstractmethod
+    def list_snapshots(self, collection_name: str) -> list[SnapshotRef]:
+        """List all snapshots for a collection.
+
+        Args:
+            collection_name: The raw collection name whose snapshots to list.
+
+        Returns:
+            List of ``SnapshotRef`` objects, ordered by creation time (oldest first)
+            where the backend provides timestamps; otherwise backend-native order.
+
+        Raises:
+            CollectionNotFoundError: If the collection does not exist.
+            SnapshotError: If the list operation fails.
+        """
+
+    @abc.abstractmethod
+    def delete_snapshot(self, ref: SnapshotRef) -> None:
+        """Delete a snapshot from the backend.
+
+        Does not affect the live collection or any alias.
+
+        Args:
+            ref: The ``SnapshotRef`` to delete.
+
+        Raises:
+            SnapshotError: If the snapshot does not exist or the delete fails.
+        """
+
 
 # ---------------------------------------------------------------------------
 # Promoted timestamp helper
@@ -656,6 +780,8 @@ __all__ = [
     "IndexError",
     "ModelIdentity",
     "SearchResult",
+    "SnapshotError",
+    "SnapshotRef",
     "UnsupportedCapabilityError",
     "alias_name",
     "build_point_payload",

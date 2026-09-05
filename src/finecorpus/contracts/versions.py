@@ -141,7 +141,18 @@ SUPPORTED_CHUNK = SpecRange(major=1, min_minor=0)
 SUPPORTED_EVAL_SET = SpecRange(major=1, min_minor=0)
 SUPPORTED_RETRIEVAL_RESPONSE = SpecRange(major=1, min_minor=1)
 """Retrieval-response consumer range — bumped to 1.1 with addition of
-CONTROL_PLANE_UNAVAILABLE and PAYLOAD_CORRUPT error codes."""
+CONTROL_PLANE_UNAVAILABLE and PAYLOAD_CORRUPT error codes.
+
+History:
+- 1.1: added CONTROL_PLANE_UNAVAILABLE and PAYLOAD_CORRUPT ErrorCode members.
+- 1.2: added RetrievalResponse.break_glass_read_ref, ErrorCode.RATE_LIMITED, and
+  ExplainCandidate.permission_resolved_at (all nullable/defaulted; MINOR-compatible).
+  SpecRange stays at min_minor=1 (MINOR: backward-compatible addition); consumers
+  built for 1.1.0+ accept 1.2.0.
+"""
+
+RETRIEVAL_RESPONSE_SCHEMA_VERSION = "1.2.0"
+"""Producer stamp for RetrievalResponse. Bump here when the contract MINOR/MAJOR changes."""
 
 
 def check_version(contract: str, schema_version: str, spec_range: SpecRange) -> None:
@@ -172,4 +183,5 @@ __all__ = [
     "SUPPORTED_CHUNK",
     "SUPPORTED_EVAL_SET",
     "SUPPORTED_RETRIEVAL_RESPONSE",
+    "RETRIEVAL_RESPONSE_SCHEMA_VERSION",
 ]

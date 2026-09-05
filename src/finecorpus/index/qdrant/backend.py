@@ -11,6 +11,7 @@ Spec references: §4.4, §4.2 C-2/C-3, index-lifecycle.md §2, §4.
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -26,6 +27,8 @@ from finecorpus.index.adapter import (
     IndexAdapter,
     IndexError,
     SearchResult,
+    SnapshotError,
+    SnapshotRef,
 )
 from finecorpus.index.adapter import (
     collection_name as _collection_name,
@@ -549,6 +552,187 @@ class QdrantAdapter(IndexAdapter):
             ]
         except Exception as exc:
             raise IndexError(f"Failed to list aliases: {exc}") from exc
+
+    # ------------------------------------------------------------------
+    # Snapshot operations (§10.2, §17.1)
+    # ------------------------------------------------------------------
+
+    def snapshot_collection(self, collection_name: str) -> SnapshotRef:
+        """Create a Qdrant snapshot for a collection and return a SnapshotRef.
+
+        Uses ``QdrantClient.create_snapshot``.  The ``location`` in the returned
+        ``SnapshotRef`` is a ``file://`` URL pointing to the snapshot on the Qdrant
+        server's local filesystem (for local/Docker deployments).  For cloud Qdrant
+        instances the location may differ — callers should treat it as opaque.
+
+        Limitation: ``restore_snapshot`` (recovery) requires the location URL to be
+        accessible from the Qdrant server; for local deployments this is always the
+        case via the ``file://`` scheme.
+        """
+        if not self.collection_exists(collection_name):
+            raise CollectionNotFoundError(f"Collection '{collection_name}' does not exist")
+        try:
+            desc = self._client.create_snapshot(collection_name=collection_name, wait=True)
+        except Exception as exc:
+            raise SnapshotError(
+                f"Failed to create snapshot for collection '{collection_name}': {exc}"
+            ) from exc
+
+        if desc is None:
+            raise SnapshotError(
+                f"Qdrant returned None for snapshot creation on '{collection_name}' "
+                "(wait=True should always return a SnapshotDescription)"
+            )
+
+        created_at: datetime | None = None
+        if desc.creation_time:
+            try:
+                created_at = datetime.fromisoformat(desc.creation_time).replace(tzinfo=UTC)
+            except (ValueError, TypeError):
+                created_at = None
+
+        # Qdrant local-storage snapshot URL: the client does not expose a download
+        # URL directly; we compose the standard Qdrant REST path that recover_snapshot
+        # also accepts as a file:// path on the server.
+        location = f"file:///qdrant/snapshots/{collection_name}/{desc.name}"
+
+        logger.info(
+            "Created snapshot '%s' for collection '%s' (size=%s bytes)",
+            desc.name,
+            collection_name,
+            desc.size,
+        )
+        return SnapshotRef(
+            collection=collection_name,
+            snapshot_id=desc.name,
+            created_at=created_at,
+            location=location,
+        )
+
+    def restore_snapshot(self, ref: SnapshotRef, new_collection_name: str) -> None:
+        """Restore a snapshot into a new collection (never in place).
+
+        Uses ``QdrantClient.recover_snapshot`` with ``priority=snapshot`` so the
+        restored data takes precedence over any existing shard state.
+
+        The target collection (``new_collection_name``) MUST NOT exist before calling
+        this method; callers are responsible for creating it with the correct vector
+        dimensionality first (Qdrant's recover_snapshot API requires the collection
+        to exist).
+
+        Limitation: the ``ref.location`` must be accessible from the Qdrant server.
+        For local/Docker deployments the ``file://`` path in ``ref.location`` works
+        as long as the Qdrant container mounts its snapshot directory.  For remote
+        Qdrant servers the snapshot must be served via HTTP(S).
+
+        After restore callers MUST replay the tombstone log before the collection is
+        eligible for alias promotion (§17.1 deletion completeness).
+        """
+        if self.collection_exists(new_collection_name):
+            raise IndexError(
+                f"Cannot restore snapshot: target collection '{new_collection_name}' already "
+                "exists.  Restore always goes INTO a new collection — never in place."
+            )
+
+        # Qdrant's recover_snapshot requires the collection to exist first.
+        # We create it here with the minimum viable vector config; the recovered
+        # data will overwrite the config via the snapshot content.
+        # We use a sentinel dimension of 1 — it will be replaced by the snapshot.
+        # Note: if the Qdrant version does not support creation-then-recover flow, this
+        # may fail; callers should check the Qdrant version compatibility.
+        try:
+            self._client.create_collection(
+                collection_name=new_collection_name,
+                vectors_config=qm.VectorParams(size=1, distance=qm.Distance.COSINE),
+            )
+        except Exception as exc:
+            raise SnapshotError(
+                f"Failed to create target collection '{new_collection_name}' "
+                f"before snapshot restore: {exc}"
+            ) from exc
+
+        try:
+            self._client.recover_snapshot(
+                collection_name=new_collection_name,
+                location=ref.location,
+                priority=qm.SnapshotPriority.SNAPSHOT,
+                wait=True,
+            )
+        except Exception as exc:
+            # Best-effort cleanup of the just-created empty collection
+            try:
+                self._client.delete_collection(collection_name=new_collection_name)
+            except Exception:
+                pass
+            raise SnapshotError(
+                f"Failed to restore snapshot '{ref.snapshot_id}' from '{ref.location}' "
+                f"into collection '{new_collection_name}': {exc}"
+            ) from exc
+
+        logger.info(
+            "Restored snapshot '%s' from collection '%s' into new collection '%s'",
+            ref.snapshot_id,
+            ref.collection,
+            new_collection_name,
+        )
+
+    def list_snapshots(self, collection_name: str) -> list[SnapshotRef]:
+        """List all snapshots for a collection, oldest first.
+
+        Uses ``QdrantClient.list_snapshots``.
+        """
+        if not self.collection_exists(collection_name):
+            raise CollectionNotFoundError(f"Collection '{collection_name}' does not exist")
+        try:
+            descs = self._client.list_snapshots(collection_name=collection_name)
+        except Exception as exc:
+            raise SnapshotError(
+                f"Failed to list snapshots for collection '{collection_name}': {exc}"
+            ) from exc
+
+        refs = []
+        for desc in descs:
+            created_at: datetime | None = None
+            if desc.creation_time:
+                try:
+                    created_at = datetime.fromisoformat(desc.creation_time).replace(tzinfo=UTC)
+                except (ValueError, TypeError):
+                    created_at = None
+            location = f"file:///qdrant/snapshots/{collection_name}/{desc.name}"
+            refs.append(
+                SnapshotRef(
+                    collection=collection_name,
+                    snapshot_id=desc.name,
+                    created_at=created_at,
+                    location=location,
+                )
+            )
+
+        # Sort by creation time (oldest first); refs without timestamps go last
+        refs.sort(key=lambda r: (r.created_at is None, r.created_at))
+        return refs
+
+    def delete_snapshot(self, ref: SnapshotRef) -> None:
+        """Delete a snapshot from Qdrant.
+
+        Uses ``QdrantClient.delete_snapshot``.
+        """
+        try:
+            self._client.delete_snapshot(
+                collection_name=ref.collection,
+                snapshot_name=ref.snapshot_id,
+                wait=True,
+            )
+        except Exception as exc:
+            raise SnapshotError(
+                f"Failed to delete snapshot '{ref.snapshot_id}' from "
+                f"collection '{ref.collection}': {exc}"
+            ) from exc
+        logger.info(
+            "Deleted snapshot '%s' from collection '%s'",
+            ref.snapshot_id,
+            ref.collection,
+        )
 
 
 # ---------------------------------------------------------------------------

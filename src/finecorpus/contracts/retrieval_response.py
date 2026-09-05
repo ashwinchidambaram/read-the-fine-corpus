@@ -7,10 +7,21 @@ See docs/contracts/retrieval-response.md for the authoritative spec
 This is the Serve→caller envelope: the shape the retrieval API (REST, MCP, Python client)
 returns for a query. Exists because §15 requires the response to distinguish "no matches"
 from "filtered to nothing" from "error".
+
+Version history:
+- 1.0.0: Initial contract (ResultStatus, FilterOrigin, ErrorCode, AppliedFilter, RequestEcho,
+  Scores, RetrievalResult, ErrorEnvelope).
+- 1.1.0: MINOR bump — added ExplainBlock/ExplainCandidate/ExplainExclusion (§11.5 explain mode),
+  CONTROL_PLANE_UNAVAILABLE and PAYLOAD_CORRUPT ErrorCode members.
+- 1.2.0: MINOR bump — added RetrievalResponse.break_glass_read_ref (§2.3 break-glass audit
+  reference), ErrorCode.RATE_LIMITED (§11.3 HTTP 429), ExplainCandidate.permission_resolved_at
+  (D-17 tenancy staleness surface). All additions are nullable/defaulted; consumers at 1.1
+  still validate successfully.
 """
 
 from __future__ import annotations
 
+from datetime import datetime
 from enum import StrEnum
 
 from pydantic import BaseModel, Field
@@ -81,6 +92,11 @@ class ErrorCode(StrEnum):
     PAYLOAD_CORRUPT = "PAYLOAD_CORRUPT"
     """A Qdrant point payload is missing required provenance fields (source_document_id /
     source_document_version).  The point is corrupt and cannot be served safely."""
+    RATE_LIMITED = "RATE_LIMITED"
+    """Caller has exceeded the per-tenant rate limit (§11.3).  Maps to HTTP 429.  The
+    in-process token bucket enforces per-replica limits; callers SHOULD retry after the
+    Retry-After interval indicated in the HTTP response headers.  This code is retriable
+    (retriable=True in the ErrorEnvelope) but the retry interval is set by the server."""
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +215,16 @@ class ExplainCandidate(BaseModel):
             "Full provenance for the candidate (§11.5 requires provenance for every candidate)."
         )
     )
+    permission_resolved_at: datetime | None = Field(
+        default=None,
+        description=(
+            "When the chunk's TenancyBlock permission was last resolved (D-17).  "
+            "Surfaced in explain mode only so a KB editor can assess whether the "
+            "permission snapshot may be stale (e.g. the chunk was ingested days ago "
+            "and a permission change has not yet triggered a reindex).  "
+            "Policy enforcement on staleness is deferred; this field is informational only."
+        ),
+    )
 
 
 class ExplainExclusion(BaseModel):
@@ -284,6 +310,17 @@ class RetrievalResponse(BaseModel):
     explain: ExplainBlock | None = Field(
         default=None,
         description="Present only when the query requested explain mode (§11.5).",
+    )
+    break_glass_read_ref: str | None = Field(
+        default=None,
+        description=(
+            "Audit-log entry ID when this response was served under an active break-glass "
+            "grant (§2.3).  Non-null iff the Platform Admin invoked break-glass content "
+            "access: the grant required a stated reason, is time-bound, and every read "
+            "under it is written to an immutable audit log visible to the KB team.  "
+            "Callers MUST treat a non-null value as an indicator that an elevated-privilege "
+            "read occurred and SHOULD surface it in any downstream audit trail."
+        ),
     )
 
 
