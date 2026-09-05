@@ -1,16 +1,26 @@
-"""Control API service stub.
+"""Control API service.
 
 Tenancy, RBAC, break-glass, config, job orchestration, audit log, cost accounting.
-Business logic will live in finecorpus.tenancy / finecorpus.jobs; this module is wiring only.
+Business logic lives in finecorpus.control.*; this module is wiring only (router includes).
+
+Phase 4: break-glass routes added.
 """
 
 from fastapi import FastAPI
 
 import finecorpus
+from finecorpus.services.control_routes.break_glass import router as break_glass_router
 
 app = FastAPI(title="control-api", version=finecorpus.__version__)
 
 _SERVICE_NAME = "control-api"
+
+# ---------------------------------------------------------------------------
+# Router includes — one line per Phase unit.  Sibling units (MCP, etc.) add
+# their own include lines here without touching the break-glass router.
+# ---------------------------------------------------------------------------
+
+app.include_router(break_glass_router)
 
 
 @app.get("/healthz")

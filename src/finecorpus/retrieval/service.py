@@ -1,4 +1,4 @@
-"""Phase 1 retrieval service — library-level query flow.
+"""Phase 4 retrieval service — library-level query flow.
 
 Implements C-5: all business logic lives here, not in the FastAPI wiring.
 
@@ -18,21 +18,30 @@ Query flow:
    - error: fail-closed condition (mismatch / provider down / vector DB down).
 6. Build and return RetrievalResponse per the contract.
 
-Tenancy seam (Phase 4 readiness):
+Tenancy seam (Phase 4):
 The query builder receives ``kb_id`` as a mandatory parameter and derives the
-tenancy ``must`` clause from it. Phase 4 will augment this with the resolved
-principal's workspace_id and permission_principals; the parameter structure
-is already factored to accept those without changing the call sites.
+tenancy ``must`` clause from it.  For workspace- and kb-scoped principals the
+filter also includes workspace_id and permission_principals.
 
-Phase 1 scope:
-- Dense retrieval only. Hybrid/rerank/per-request-filters do not exist —
-  callers attempting these will receive an INVALID_QUERY error (or, for
-  future HTTP params, a 422 from FastAPI because those fields do not exist
-  in the request schema).
-- Trust label is always untrusted_ingested (§14.1).
-- No per-tenant rate limits (Phase 4).
+Phase 4 additions:
+- Explain mode (M-062/M-063, §11.5): ``explain=True`` populates ExplainBlock
+  with parsed_query echo, filters in effect, every candidate with raw score
+  + provenance + permission_resolved_at (D-17), exclusions with the exact
+  AppliedFilter that removed each, and retrieval strategy.
+  NOTE: the tenancy filter stays inside the vector search (§11.5: explain is
+  NOT a bypass).  Tenancy exclusions are structurally invisible by design —
+  chunks that the tenant cannot see are never surfaced even in explain mode.
+  Only non-tenancy post-search filters (score_threshold, kb-config floors)
+  produce per-chunk ExplainExclusion records.
+- Break-glass read (M-001..M-004, T-05): ``break_glass_grant_id`` bypasses
+  the permission_principals clause (but NOT kb/workspace tenancy) when a
+  valid active grant exists for the querying admin and target KB.
+- D-24: Increment filtered_to_zero counter when a score filter alone empties
+  the survivor set.
+- Admin fail-closed: admin principals querying content MUST provide a
+  break-glass grant; without a grant, admin content reads are denied.
 
-Spec references: §11.1, §11.2, §15, §14.1, §8, §12, overview.md §tenant-isolation.
+Spec references: §11.1, §11.2, §11.5, §15, §14.1, §8, §12, §2.3.
 """
 
 from __future__ import annotations
@@ -48,6 +57,9 @@ from finecorpus.contracts.retrieval_response import (
     AppliedFilter,
     ErrorCode,
     ErrorEnvelope,
+    ExplainBlock,
+    ExplainCandidate,
+    ExplainExclusion,
     FilterOrigin,
     RequestEcho,
     ResultStatus,
@@ -77,13 +89,19 @@ from finecorpus.index.adapter import (
     AliasNotFoundError,
     IndexAdapter,
     IndexError,
+    SearchResult,
     alias_name,
 )
+from finecorpus.retrieval.metrics import increment_filtered_to_zero
 
 logger = logging.getLogger(__name__)
 
 _TOP_K_MAX = 100
 _TOP_K_DEFAULT = 10
+
+# Over-fetch multiplier for explain mode / score-threshold filtering.
+_OVER_FETCH_MULTIPLIER = 10
+_OVER_FETCH_CAP = 1000
 
 
 # ---------------------------------------------------------------------------
@@ -163,6 +181,27 @@ def _build_tenancy_filter(scope: TenancyScope) -> dict[str, Any]:
             f["tenancy.permission_principals"] = {"__contains__": pid}
             break  # Phase 4: single principal; loop is forward-compat only.
 
+    return f
+
+
+def _build_break_glass_tenancy_filter(scope: TenancyScope) -> dict[str, Any]:
+    """Build the tenancy filter for a break-glass read.
+
+    Under break-glass the permission_principals clause is bypassed for this
+    query — the admin can read content without being in the chunk's
+    permission_principals list.  However, kb/workspace tenancy clauses REMAIN
+    (break-glass is not a cross-KB bypass).
+
+    Args:
+        scope: The resolved tenancy scope (kb_id and workspace_id still apply).
+
+    Returns:
+        Qdrant-format payload filter dict without permission_principals clause.
+    """
+    f: dict[str, Any] = {"tenancy.kb_id": scope.kb_id}
+    if scope.workspace_id:
+        f["tenancy.workspace_id"] = scope.workspace_id
+    # permission_principals deliberately omitted
     return f
 
 
@@ -353,6 +392,25 @@ def _provenance_from_payload(payload: dict[str, Any], chunk_id: str) -> Provenan
     )
 
 
+def _permission_resolved_at_from_payload(payload: dict[str, Any]) -> datetime | None:
+    """Extract permission_resolved_at from the tenancy block in the payload (D-17).
+
+    Returns None if the field is absent or not parseable.
+    """
+    tenancy = payload.get("tenancy", {})
+    if not isinstance(tenancy, dict):
+        return None
+    raw = tenancy.get("permission_resolved_at")
+    if raw is None:
+        return None
+    if isinstance(raw, datetime):
+        return raw
+    try:
+        return datetime.fromisoformat(str(raw))
+    except (ValueError, TypeError):
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Error result helpers
 # ---------------------------------------------------------------------------
@@ -383,6 +441,48 @@ def _error_response(
 
 
 # ---------------------------------------------------------------------------
+# Shared search execution (single call site for tenancy parity — M-063)
+# ---------------------------------------------------------------------------
+
+
+def _execute_search(
+    *,
+    alias_str: str,
+    query_vector: list[float],
+    tenancy_filter: dict[str, Any],
+    search_top_k: int,
+    adapter: IndexAdapter,
+) -> list[SearchResult] | None:
+    """Execute the vector search through the adapter.
+
+    This is the single call site for all search paths (normal and explain).
+    Tenancy filter is ALWAYS inside the vector-search filter — explain mode
+    does not get a different filter path (§11.5: explain is not a bypass,
+    M-063: tenancy parity is structural).
+
+    Args:
+        alias_str: The alias to search.
+        query_vector: The embedded query vector.
+        tenancy_filter: The mandatory tenancy filter dict (always present).
+        search_top_k: Number of results to request from the adapter.
+        adapter: The IndexAdapter instance.
+
+    Returns:
+        List of SearchResult, or None if a recoverable IndexError occurred.
+        Callers must check for None and return VECTOR_DB_UNAVAILABLE.
+
+    Raises:
+        AliasNotFoundError, IndexError: Propagated to caller for error mapping.
+    """
+    return adapter.search(
+        alias=alias_str,
+        query_vector=query_vector,
+        top_k=search_top_k,
+        payload_filter=tenancy_filter,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Main query function (C-5 business logic)
 # ---------------------------------------------------------------------------
 
@@ -399,6 +499,8 @@ def query(
     cache: QueryEmbeddingCache | None = None,
     principal: Principal | None = None,
     auth_enabled: bool = False,
+    explain: bool = False,
+    break_glass_grant_id: str | None = None,
 ) -> RetrievalResponse:
     """Execute a dense retrieval query with optional auth enforcement.
 
@@ -426,6 +528,30 @@ def query(
     permission_principals).  The resulting filter is injected server-side into
     every query and CANNOT be overridden by client-supplied request body fields.
 
+    Explain mode (M-062/M-063, §11.5):
+    When explain=True the response includes ExplainBlock with:
+    - parsed_query: the query text as parsed (no expansion in Phase 4).
+    - candidates: every candidate from the over-fetched result set with raw
+      score, provenance, and permission_resolved_at (D-17).
+    - exclusions: candidates removed by non-tenancy filters with the exact
+      AppliedFilter that removed them. Tenancy exclusions are structurally
+      invisible (§11.5: explain is not a bypass — see module docstring).
+    - strategy: "dense" (Phase 4 is dense-only).
+    Note: explain uses the SAME _execute_search call site as normal queries
+    (M-063 tenancy parity is structural, not documented).
+
+    Break-glass read (§2.3, M-001..M-004, T-05):
+    When break_glass_grant_id is provided:
+    - The grant is validated (active, unexpired, matches kb and admin principal).
+    - The permission_principals clause is bypassed for this query (admin access).
+    - kb/workspace tenancy clauses REMAIN (break-glass is not cross-KB).
+    - An audit row (break_glass_read) is appended with chunk_ids + query context.
+    - break_glass_read_ref is set on the response.
+
+    Admin fail-closed:
+    Admin-role principals querying content MUST provide a break_glass_grant_id.
+    Without a valid grant, admin content reads return PERMISSION_DENIED.
+
     Args:
         kb_id: Knowledge-base ID (from the URL path).
         query_text: The query string.
@@ -441,6 +567,10 @@ def query(
         auth_enabled: True when the auth subsystem is active.  When False,
             the principal is ignored and no tenancy filters beyond kb_id
             are applied (Phase 1–3 compatibility).
+        explain: When True, populate ExplainBlock in the response (§11.5).
+        break_glass_grant_id: Optional break-glass grant ID for admin content
+            reads (§2.3).  When provided and valid, bypasses the
+            permission_principals clause (but not kb/workspace tenancy).
 
     Returns:
         RetrievalResponse per the retrieval-response contract.
@@ -541,6 +671,53 @@ def query(
                         retriable=False,
                     )
 
+    # ------------------------------------------------------------------
+    # Admin fail-closed: admin-role principals MUST supply a break-glass
+    # grant to read content.  Without a valid grant, content access is denied.
+    # This enforces §2.3: admin content reads require the grant, the grant
+    # requires a reason, every read is audited.
+    # ------------------------------------------------------------------
+    _is_break_glass_read = False
+    _bg_grant_record = None
+
+    if auth_enabled and principal is not None:
+        from finecorpus.control.auth import Role, ScopeKind
+
+        if principal.role == Role.admin:
+            # Admin must have a break-glass grant to read content.
+            if not break_glass_grant_id:
+                return _error_response(
+                    query_text,
+                    [],
+                    ErrorCode.PERMISSION_DENIED,
+                    (
+                        "Admin principals must supply a break-glass grant to read content (§2.3). "
+                        "Request a grant via POST /admin/break-glass/grant with a stated reason."
+                    ),
+                    retriable=False,
+                )
+
+            # Validate the grant.
+            from finecorpus.control.break_glass import BreakGlassRepository
+
+            bg_repo = BreakGlassRepository(session)
+            grant = bg_repo.active_grant_for(kb_id, principal.principal_id)
+            if grant is None or grant.grant_id != break_glass_grant_id:
+                return _error_response(
+                    query_text,
+                    [],
+                    ErrorCode.PERMISSION_DENIED,
+                    (
+                        f"Break-glass grant '{break_glass_grant_id}' is not active for "
+                        f"KB '{kb_id}' and admin '{principal.principal_id}'. "
+                        "The grant may have expired or been revoked."
+                    ),
+                    retriable=False,
+                )
+
+            _is_break_glass_read = True
+            _bg_grant_record = grant
+
     # Resolve tenancy scope from the authenticated principal (M-060):
     # workspace_id and permission_principals come from the principal, never
     # from client-supplied request body fields.
@@ -570,7 +747,11 @@ def query(
     else:
         scope = TenancyScope(kb_id=kb_id)
 
-    tenancy_filter = _build_tenancy_filter(scope)
+    # For break-glass reads, bypass permission_principals in the filter.
+    if _is_break_glass_read:
+        tenancy_filter = _build_break_glass_tenancy_filter(scope)
+    else:
+        tenancy_filter = _build_tenancy_filter(scope)
     tenancy_af = _tenancy_applied_filter(scope)
     filters_applied = [tenancy_af]
 
@@ -666,23 +847,24 @@ def query(
         logger.debug("Query embedding cache hit for model '%s'", caps.model_id)
 
     # -----------------------------------------------------------------------
-    # Step 4: search via alias (C-3)
+    # Step 4: search via alias (C-3) — single call site for tenancy parity
+    # (M-063: tenancy ALWAYS inside the vector-search filter for ALL paths).
     # -----------------------------------------------------------------------
-    # Fetch top_k candidates. If a score_threshold is in play, we request
-    # top_k from the adapter and filter after — the adapter doesn't know about
-    # score thresholds. This means filtered_to_zero is detected post-search.
-    search_top_k = top_k
-    if score_threshold is not None:
-        # Over-fetch slightly so we can report filtered_to_zero correctly.
-        # We can't fetch unlimited, so fetch top_k * 10 (capped at 1000).
-        search_top_k = min(top_k * 10, 1000)
+    # For explain mode we always over-fetch so we can show all candidates
+    # that were considered after tenancy filtering, before Python-level filters.
+    # For score_threshold we also over-fetch so filtered_to_zero is correct.
+    if explain or score_threshold is not None:
+        search_top_k = min(top_k * _OVER_FETCH_MULTIPLIER, _OVER_FETCH_CAP)
+    else:
+        search_top_k = top_k
 
     try:
-        raw_results = adapter.search(
-            alias=alias_str,
+        raw_results = _execute_search(
+            alias_str=alias_str,
             query_vector=query_vector,
-            top_k=search_top_k,
-            payload_filter=tenancy_filter,
+            tenancy_filter=tenancy_filter,
+            search_top_k=search_top_k,
+            adapter=adapter,
         )
     except (IndexError, AliasNotFoundError) as exc:
         logger.warning("Vector DB search failed for alias '%s': %s", alias_str, exc)
@@ -708,33 +890,91 @@ def query(
             ),
             result_status=ResultStatus.no_matches,
             results=[],
+            explain=_build_explain_block(
+                query_text=query_text,
+                raw_results=[],
+                candidates=[],
+                exclusions=[],
+            )
+            if explain
+            else None,
         )
+
+    # ------------------------------------------------------------------
+    # Apply non-tenancy filters (score_threshold) in Python over the
+    # over-fetched candidate set — so per-filter attribution is exact
+    # (explain mode requirement).  The tenancy filter stays in the vector
+    # search; its exclusions are structurally invisible (§11.5).
+    # ------------------------------------------------------------------
+
+    # Build ExplainCandidates for every tenancy-surviving candidate (before
+    # Python-level filters) when explain=True.
+    explain_candidates: list[ExplainCandidate] = []
+    explain_exclusions: list[ExplainExclusion] = []
+
+    if explain:
+        for sr in raw_results:
+            payload = sr.payload or {}
+            try:
+                prov = _provenance_from_payload(payload, chunk_id=sr.chunk_id)
+            except _PayloadCorruptError:
+                # Skip corrupt candidates in explain mode — don't abort the whole response.
+                continue
+            permission_resolved_at = _permission_resolved_at_from_payload(payload)
+            explain_candidates.append(
+                ExplainCandidate(
+                    chunk_id=sr.chunk_id,
+                    scores=Scores(raw=sr.score),
+                    provenance=prov,
+                    permission_resolved_at=permission_resolved_at,
+                )
+            )
 
     # Apply score threshold
     if score_threshold is not None:
-        above_threshold = [r for r in raw_results if r.score >= score_threshold]
-        if not above_threshold:
-            # Search found candidates but threshold eliminated ALL of them.
-            # This is filtered_to_zero, NOT no_matches.
-            threshold_filter = AppliedFilter(
-                expression=f"score >= {score_threshold}",
-                origin=FilterOrigin.request,
-            )
-            return RetrievalResponse(
-                schema_version=_SCHEMA_VERSION,
-                request_echo=RequestEcho(
-                    query=query_text,
-                    filters_applied=[*filters_applied, threshold_filter],
-                ),
-                result_status=ResultStatus.filtered_to_zero,
-                results=[],
-            )
-        # Keep only the first top_k from the survivors
-        kept = above_threshold[:top_k]
         threshold_filter = AppliedFilter(
             expression=f"score >= {score_threshold}",
             origin=FilterOrigin.request,
         )
+        above_threshold = [r for r in raw_results if r.score >= score_threshold]
+
+        if explain:
+            # Record which candidates were excluded by the score threshold.
+            surviving_ids = {r.chunk_id for r in above_threshold}
+            for sr in raw_results:
+                if sr.chunk_id not in surviving_ids:
+                    explain_exclusions.append(
+                        ExplainExclusion(
+                            chunk_id=sr.chunk_id,
+                            removed_by=threshold_filter,
+                        )
+                    )
+
+        if not above_threshold:
+            # Search found candidates but threshold eliminated ALL of them.
+            # This is filtered_to_zero, NOT no_matches.
+            # D-24: increment counter when filter alone empties the set.
+            increment_filtered_to_zero()
+            effective_filters = [*filters_applied, threshold_filter]
+            return RetrievalResponse(
+                schema_version=_SCHEMA_VERSION,
+                request_echo=RequestEcho(
+                    query=query_text,
+                    filters_applied=effective_filters,
+                ),
+                result_status=ResultStatus.filtered_to_zero,
+                results=[],
+                explain=_build_explain_block(
+                    query_text=query_text,
+                    raw_results=raw_results,
+                    candidates=explain_candidates,
+                    exclusions=explain_exclusions,
+                )
+                if explain
+                else None,
+            )
+        # Keep only the first top_k from the survivors
+        kept = above_threshold[:top_k]
         effective_filters = [*filters_applied, threshold_filter]
     else:
         kept = raw_results[:top_k]
@@ -777,6 +1017,41 @@ def query(
             )
         )
 
+    # -----------------------------------------------------------------------
+    # Break-glass audit row (T-05, M-003): append BEFORE returning the response.
+    # -----------------------------------------------------------------------
+    break_glass_ref: str | None = None
+    if _is_break_glass_read and _bg_grant_record is not None and principal is not None:
+        from finecorpus.control.audit import AuditAction, AuditLogRepository
+
+        audit_repo = AuditLogRepository(session)
+        chunk_ids_returned = [r.chunk_id for r in retrieval_results]
+        audit_record = audit_repo.append(
+            entry_type=AuditAction.break_glass_read,
+            actor_id=principal.principal_id,
+            target_kb_id=kb_id,
+            details={
+                "grant_id": _bg_grant_record.grant_id,
+                "query_text": query_text,
+                "chunk_ids_returned": chunk_ids_returned,
+                "top_k": top_k,
+                "score_threshold": score_threshold,
+            },
+        )
+        try:
+            session.flush()  # ensure entry_id is available
+        except Exception:
+            pass
+        break_glass_ref = audit_record.entry_id
+        logger.info(
+            "Break-glass read audited: grant=%s kb=%s admin=%s chunks=%d audit=%s",
+            _bg_grant_record.grant_id,
+            kb_id,
+            principal.principal_id,
+            len(chunk_ids_returned),
+            break_glass_ref,
+        )
+
     return RetrievalResponse(
         schema_version=_SCHEMA_VERSION,
         request_echo=RequestEcho(
@@ -785,6 +1060,41 @@ def query(
         ),
         result_status=ResultStatus.matches,
         results=retrieval_results,
+        explain=_build_explain_block(
+            query_text=query_text,
+            raw_results=raw_results,
+            candidates=explain_candidates,
+            exclusions=explain_exclusions,
+        )
+        if explain
+        else None,
+        break_glass_read_ref=break_glass_ref,
+    )
+
+
+def _build_explain_block(
+    *,
+    query_text: str,
+    raw_results: list[SearchResult],
+    candidates: list[ExplainCandidate],
+    exclusions: list[ExplainExclusion],
+) -> ExplainBlock:
+    """Build the ExplainBlock for an explain-mode response.
+
+    Args:
+        query_text: The query text (used as parsed_query; no expansion in Phase 4).
+        raw_results: Raw results from the adapter (unused here, kept for future).
+        candidates: Pre-built ExplainCandidate list (all tenancy survivors).
+        exclusions: Pre-built ExplainExclusion list (non-tenancy filter exclusions).
+
+    Returns:
+        ExplainBlock instance.
+    """
+    return ExplainBlock(
+        parsed_query=query_text,
+        candidates=candidates,
+        exclusions=exclusions,
+        strategy="dense",
     )
 
 

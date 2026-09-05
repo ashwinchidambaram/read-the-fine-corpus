@@ -566,10 +566,21 @@ def _cmd_config_import(args: argparse.Namespace) -> int:
 
 
 def _cmd_config_diff(args: argparse.Namespace) -> int:
-    """Wire corpus config diff → finecorpus.pipeline.plan.config_io.diff_configs."""
+    """Wire corpus config diff → finecorpus.pipeline.plan.config_io.diff_configs.
+
+    D-23: Detects confidence-floor and default_salience_filter weakenings.
+    A weakening means the incoming config (B) is LESS restrictive than the
+    current config (A) — lower confidence_floor or more salience tiers allowed.
+    Printed as a WARNING so operators can decide whether to proceed.
+    """
     import json as _json
 
-    from finecorpus.pipeline.plan.config_io import ConfigImportError, diff_configs, import_config
+    from finecorpus.pipeline.plan.config_io import (
+        ConfigImportError,
+        detect_confidence_floor_lowering,
+        diff_configs,
+        import_config,
+    )
 
     try:
         config_a = import_config(Path(args.a))
@@ -600,6 +611,28 @@ def _cmd_config_diff(args: argparse.Namespace) -> int:
             print(f"    {field}:")
             print(f"      A: {_json.dumps(diff['a'], separators=(',', ':'))[:120]}")
             print(f"      B: {_json.dumps(diff['b'], separators=(',', ':'))[:120]}")
+
+    # D-23: Confidence-floor lowering detection
+    weakenings = detect_confidence_floor_lowering(config_a, config_b)
+    if weakenings:
+        print(
+            "\nWARNING (D-23): Incoming config weakens retrieval filters "
+            "relative to the current config:",
+            file=sys.stderr,
+        )
+        for w in weakenings:
+            print(
+                f"  [{w['severity'].upper()}] class={w['class']} field={w['field']}: "
+                f"{w['old']!r} → {w['new']!r}  "
+                "(lower confidence_floor or broader salience tiers reduces filter strength)",
+                file=sys.stderr,
+            )
+        print(
+            "  An audit row (confidence_floor_lowered) should be recorded before promotion.\n"
+            "  Review the weakening before triggering a reindex.",
+            file=sys.stderr,
+        )
+
     return 1  # non-zero = configs differ (useful in scripts)
 
 

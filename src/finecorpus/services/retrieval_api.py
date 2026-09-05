@@ -34,7 +34,7 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, HTTPException, Path
+from fastapi import Depends, FastAPI, Header, HTTPException, Path
 from pydantic import BaseModel, Field
 
 import finecorpus
@@ -326,6 +326,17 @@ class QueryRequest(BaseModel):
             "When absent, all top_k results are returned regardless of score."
         ),
     )
+    explain: bool = Field(
+        default=False,
+        description=(
+            "When true, populate the explain block in the response (§11.5).  "
+            "The explain block contains the parsed query, every candidate considered "
+            "(with raw score, provenance, and permission_resolved_at), exclusions with "
+            "the exact filter that removed each candidate, and the retrieval strategy used.  "
+            "Explain mode respects the same tenancy and permission rules as ordinary "
+            "retrieval — it is NOT a bypass (§11.5)."
+        ),
+    )
 
 
 class KBStatusResponse(BaseModel):
@@ -512,6 +523,20 @@ def query_kb(
     kb_id: Annotated[str, Path(description="Knowledge-base UUID.")],
     body: QueryRequest,
     principal: Annotated[Principal | None, Depends(_require_query_access_dep)],
+    x_break_glass_grant_id: Annotated[
+        str | None,
+        Header(
+            alias="X-BreakGlass-Grant-ID",
+            description=(
+                "Break-glass grant ID for admin content reads (§2.3).  "
+                "Admin-role principals MUST supply this header to read content.  "
+                "When present and valid (active, unexpired, matches KB and admin), "
+                "bypasses the permission_principals clause for this query.  "
+                "kb/workspace tenancy clauses remain in effect.  "
+                "Every read under a grant is written to the immutable audit log."
+            ),
+        ),
+    ] = None,
 ) -> RetrievalResponse:
     """Query a knowledge base with dense vector retrieval.
 
@@ -570,6 +595,8 @@ def query_kb(
             cache=cache,
             principal=principal,
             auth_enabled=_auth_enabled,
+            explain=body.explain,
+            break_glass_grant_id=x_break_glass_grant_id,
         )
 
     http_status = _response_to_http_status(svc_response)
