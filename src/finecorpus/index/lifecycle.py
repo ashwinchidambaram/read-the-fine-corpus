@@ -11,6 +11,12 @@ Two-phase alias swap (§4):
   Failure between phases detected by startup_reconcile (OQ-L-1).
 
 Spec references: index-lifecycle.md §2–§5, §10.3, §15; §18.3 tests 1, 6.
+
+CLI / scheduling deferral (Ruling 6)
+--------------------------------------
+``snapshot_cold`` has no CLI command or scheduled wiring yet.  This is intentional:
+CLI and scheduling integration land with the reindex scheduling work (later phase).
+The function is fully implemented, tested, and callable from the lifecycle layer.
 """
 
 from __future__ import annotations
@@ -24,6 +30,9 @@ from typing import TYPE_CHECKING
 from sqlalchemy.orm import Session
 
 from finecorpus.control.metadata import AliasRepository
+from finecorpus.index.adapter import (
+    RESTORED_UNREPLAYED_MARKER_KEY as _RESTORED_UNREPLAYED_MARKER_KEY,
+)
 from finecorpus.index.adapter import (
     AliasSwapError,
     CollectionNotFoundError,
@@ -409,17 +418,16 @@ def promote(
     # -----------------------------------------------------------------------
     # M-087 precondition: refuse promotion of a restored-but-unreplayed collection
     # -----------------------------------------------------------------------
-    # ``restore_from_snapshot`` sets RESTORED_UNREPLAYED_MARKER_KEY="true" in the
+    # ``restore_from_snapshot`` sets _RESTORED_UNREPLAYED_MARKER_KEY="true" in the
     # collection metadata immediately after restore, before tombstone replay begins.
     # It clears the key after replay completes.  We check for it here to provide
     # a hard structural gate (not just a convention).
     #
-    # Import inside the function to avoid a circular import (pipeline.deletion
-    # imports from index.adapter; lifecycle imports from index.adapter only).
-    _marker_key = "restored_unreplayed_marker"
+    # _RESTORED_UNREPLAYED_MARKER_KEY is imported from index.adapter (the single
+    # canonical definition) — no local string literal here.
     try:
         _meta = adapter.get_collection_metadata(ctx.shadow_collection)
-        if _meta.get(_marker_key) == "true":
+        if _meta.get(_RESTORED_UNREPLAYED_MARKER_KEY) == "true":
             ctx.state = BuildState.VALIDATION_FAILED
             raise RestoredUnreplayedError(ctx.shadow_collection)
     except RestoredUnreplayedError:
@@ -824,13 +832,8 @@ def retire_previous_collection(
 # Cold snapshot lifecycle (§10.2, §17.1, D-05)
 # ---------------------------------------------------------------------------
 
-_RESTORED_UNREPLAYED_MARKER_KEY = "restored_unreplayed_marker"
-"""Metadata key set on a restored collection while tombstone replay is pending.
-
-Presence of this key with value ``"true"`` causes ``promote()`` to raise
-``RestoredUnreplayedError`` (M-087 structural precondition).
-``restore_from_snapshot`` sets it before replay and clears it after.
-"""
+# _RESTORED_UNREPLAYED_MARKER_KEY is imported from finecorpus.index.adapter above
+# (as an alias) — that module is the single canonical definition.  Do NOT redefine it here.
 
 
 @dataclass
@@ -906,7 +909,7 @@ def snapshot_cold(
         # Snapshots without a timestamp cannot be age-checked — skip them
         if snap.created_at is None:
             continue
-        if snap.created_at < cutoff:
+        if snap.created_at <= cutoff:
             try:
                 adapter.delete_snapshot(snap)
                 swept.append(snap.snapshot_id)

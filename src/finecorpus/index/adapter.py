@@ -769,6 +769,25 @@ def utc_now() -> datetime:
     return datetime.now(tz=UTC)
 
 
+# ---------------------------------------------------------------------------
+# Restore-guard marker constant (single source of truth — M-087)
+# ---------------------------------------------------------------------------
+
+RESTORED_UNREPLAYED_MARKER_KEY = "restored_unreplayed_marker"
+"""Metadata key set on a restored collection while tombstone replay is pending.
+
+Presence of this key with value ``"true"`` causes ``promote()`` in
+``index/lifecycle.py`` to raise ``RestoredUnreplayedError`` (M-087 structural
+precondition).  ``restore_from_snapshot`` sets it before replay and clears it
+after successful replay.
+
+This constant is the **single canonical definition** — both
+``pipeline/deletion.py`` and ``index/lifecycle.py`` import from here.  Any
+rename must be made in this one place only; tests import the public constant
+from this module.
+"""
+
+
 __all__ = [
     "AliasNotFoundError",
     "AliasRecord",
@@ -779,6 +798,7 @@ __all__ = [
     "IndexAdapter",
     "IndexError",
     "ModelIdentity",
+    "RESTORED_UNREPLAYED_MARKER_KEY",
     "SearchResult",
     "SnapshotError",
     "SnapshotRef",

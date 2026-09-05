@@ -12,6 +12,7 @@ delete_document() implements the canonical delete/purge sequence:
   5. purge=True additionally: enumerate all snapshots for every collection
      belonging to this KB, destroy them all (D-05 immediate), record in
      tombstone.
+  6. purge=True additionally: purge llm_cache.json (see LLM cache section).
 
 M-089 distinction: DeletionReport.summary verbatim carries "deleted from
 service" vs "purged from all copies".
@@ -28,6 +29,27 @@ Run-level artifacts (collect.json, decompose.json, plan.json, build.json, etc.)
 are NOT removed on document delete — they are build-level not document-level.
 A full KB deletion (not in scope here) would remove the entire artifacts root.
 
+LLM cache (llm_cache.json) — purge vs delete
+---------------------------------------------
+``build/llm_client.py`` maintains ``llm_cache.json`` in the KB run directory.
+It holds LLM-generated table descriptions derived from document content, keyed
+``content_hash|segment_path|model_id``.
+
+Non-purge delete: the cache is explicitly deferred.  Cold snapshots still
+contain the document, so removing cache entries would force re-billing on
+restore.  The file is NOT touched on non-purge delete.  This deferral is
+intentional and documented here.
+
+Purge (right-to-erasure): the cache MUST be addressed — §17 says every derived
+artifact must be erased or the deletion is a lie.
+  - Surgical path: if the document's content_hash can be resolved from the
+    inventory artifact (collect.json), remove all entries whose key starts with
+    ``"<content_hash>|"``.  Unrelated entries survive.
+  - Whole-file path: if the hash cannot be resolved (no inventory artifact),
+    delete the entire llm_cache.json.  Cache regenerates on next build;
+    re-billing for one KB is the honest cost of erasure.
+DeletionReport.llm_cache_action records which path was taken.
+
 Orphan scan
 -----------
 scan_orphans(adapter, alias, known_document_ids) scrolls the live collection and
@@ -40,10 +62,10 @@ restore_from_snapshot (in index/lifecycle.py) returns a collection name ONLY
 after full tombstone replay. The promote() function refuses to accept a collection
 flagged with the RESTORED_UNREPLAYED marker. We implement this via a structural
 marker stored in the adapter collection metadata: the key
-"restored_unreplayed_marker" is set to "true" on the new collection immediately
-after restore and before replay begins; it is cleared (deleted) after replay
-completes successfully. promote() checks for this key and raises
-RestoredUnreplayedError if it is present.
+RESTORED_UNREPLAYED_MARKER_KEY (defined ONCE in index/adapter.py, imported here)
+is set to "true" on the new collection immediately after restore and before
+replay begins; it is cleared (deleted) after replay completes successfully.
+promote() checks for this key and raises RestoredUnreplayedError if it is present.
 """
 
 from __future__ import annotations
@@ -60,6 +82,7 @@ from finecorpus.control.audit import AuditAction, AuditLogRepository
 from finecorpus.control.metadata import AliasRepository
 from finecorpus.control.tombstone import TombstoneRepository
 from finecorpus.index.adapter import (
+    RESTORED_UNREPLAYED_MARKER_KEY,
     IndexAdapter,
     SnapshotRef,
     alias_name,
@@ -67,16 +90,9 @@ from finecorpus.index.adapter import (
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Marker key written into collection metadata for restored-unreplayed guard
-# ---------------------------------------------------------------------------
-
-RESTORED_UNREPLAYED_MARKER_KEY = "restored_unreplayed_marker"
-"""Metadata key on a restored collection before tombstone replay completes.
-
-Presence of this key with value ``"true"`` blocks ``promote()`` (M-087).
-``restore_from_snapshot`` sets it before replay and clears it after.
-"""
+# RESTORED_UNREPLAYED_MARKER_KEY is imported from finecorpus.index.adapter —
+# the single canonical definition.  Do NOT redefine it here.
+# It is re-exported in __all__ so callers can import from pipeline.deletion as before.
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +134,9 @@ class DeletionReport:
         tombstone_entry_id: The appended tombstone entry_id (durable intent record).
         deleted_at: UTC timestamp of the operation.
         summary: Human-readable M-089 distinction string.
+        llm_cache_action: Description of llm_cache.json action taken (purge only).
+            One of: "surgical:<N>_entries_removed", "whole_file_deleted",
+            "no_cache_file", "deferred_non_purge", or "none".
     """
 
     kb_id: str
@@ -130,6 +149,7 @@ class DeletionReport:
     tombstone_entry_id: str = ""
     deleted_at: datetime = field(default_factory=lambda: datetime.now(tz=UTC))
     summary: str = ""
+    llm_cache_action: str = "none"
 
     def __post_init__(self) -> None:
         if not self.summary:
@@ -195,6 +215,137 @@ def _remove_document_artifacts(
                     exc,
                 )
     return removed
+
+
+# ---------------------------------------------------------------------------
+# LLM cache purge helpers (§17 — derived artifact erasure, Ruling 2)
+# ---------------------------------------------------------------------------
+
+
+def _resolve_content_hash(
+    document_id: str,
+    inventory_path: pathlib.Path | None,
+) -> str | None:
+    """Attempt to resolve document_id → content_hash from an inventory artifact.
+
+    The inventory artifact (collect.json) produced by the Collect stage contains
+    InventoryItem records keyed by document_id, each carrying the content_hash.
+    The llm_cache.json keys are prefixed with the content_hash, so we need it
+    to surgically remove matching cache entries.
+
+    Args:
+        document_id: Document whose content_hash to resolve.
+        inventory_path: Path to the collect.json inventory artifact, or None.
+
+    Returns:
+        The content_hash string, or None if resolution is impossible.
+    """
+    if inventory_path is None or not inventory_path.exists():
+        return None
+    try:
+        import json as _json
+
+        data = _json.loads(inventory_path.read_text(encoding="utf-8"))
+        items = data.get("items", [])
+        for item in items:
+            if item.get("document_id") == document_id:
+                return item.get("content_hash") or None
+    except Exception as exc:
+        logger.warning(
+            "_resolve_content_hash: failed to read inventory artifact '%s': %s",
+            inventory_path,
+            exc,
+        )
+    return None
+
+
+def _purge_llm_cache(
+    document_id: str,
+    llm_cache_path: pathlib.Path | None,
+    inventory_path: pathlib.Path | None,
+) -> str:
+    """Remove llm_cache.json entries for a purged document (§17, Ruling 2).
+
+    Policy:
+    - If the content_hash can be resolved from the inventory artifact, perform
+      SURGICAL removal: delete all cache entries whose key starts with
+      ``"<content_hash>|"``.  DeletionReport records ``"surgical:<N>_entries_removed"``.
+    - If the content_hash cannot be resolved, delete the WHOLE llm_cache.json
+      (cache regenerates; re-billing is the honest cost of erasure).
+      DeletionReport records ``"whole_file_deleted"``.
+    - If llm_cache_path is None or the file does not exist: ``"no_cache_file"``.
+
+    Non-purge delete: caller must not call this function (documented deferral).
+
+    Args:
+        document_id: Document being purged.
+        llm_cache_path: Path to the KB's llm_cache.json, or None.
+        inventory_path: Path to the collect.json inventory artifact, or None.
+
+    Returns:
+        llm_cache_action string for DeletionReport.
+    """
+    import json as _json
+
+    if llm_cache_path is None or not llm_cache_path.exists():
+        return "no_cache_file"
+
+    content_hash = _resolve_content_hash(document_id, inventory_path)
+
+    if content_hash is None:
+        # Cannot surgically identify entries — delete the whole file.
+        logger.warning(
+            "_purge_llm_cache: content_hash unresolvable for document '%s' "
+            "(no inventory artifact at '%s'); deleting whole llm_cache.json at '%s'. "
+            "This is the honest cost of erasure per §17.",
+            document_id,
+            inventory_path,
+            llm_cache_path,
+        )
+        try:
+            llm_cache_path.unlink()
+        except OSError as exc:
+            logger.error("_purge_llm_cache: failed to delete '%s': %s", llm_cache_path, exc)
+        return "whole_file_deleted"
+
+    # Surgical path: remove entries keyed by this content_hash.
+    prefix = f"{content_hash}|"
+    try:
+        data = _json.loads(llm_cache_path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            logger.warning("_purge_llm_cache: llm_cache.json is not a dict; deleting whole file.")
+            llm_cache_path.unlink()
+            return "whole_file_deleted"
+
+        before_count = len(data)
+        surviving = {k: v for k, v in data.items() if not k.startswith(prefix)}
+        removed_count = before_count - len(surviving)
+
+        llm_cache_path.write_text(
+            _json.dumps(surviving, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        logger.info(
+            "_purge_llm_cache: surgical purge of document '%s' (content_hash='%s'): "
+            "%d cache entries removed, %d surviving.",
+            document_id,
+            content_hash,
+            removed_count,
+            len(surviving),
+        )
+        return f"surgical:{removed_count}_entries_removed"
+    except Exception as exc:
+        logger.error(
+            "_purge_llm_cache: error during surgical purge of '%s': %s. "
+            "Deleting whole file for safety.",
+            llm_cache_path,
+            exc,
+        )
+        try:
+            llm_cache_path.unlink()
+        except OSError:
+            pass
+        return "whole_file_deleted"
 
 
 # ---------------------------------------------------------------------------
@@ -316,6 +467,8 @@ def delete_document(
     deleted_by: str,
     reason: str = "",
     deleted_at: datetime | None = None,
+    llm_cache_path: pathlib.Path | None = None,
+    inventory_path: pathlib.Path | None = None,
 ) -> DeletionReport:
     """Delete (or purge) a document from all live and N-1 index collections.
 
@@ -326,8 +479,22 @@ def delete_document(
     4. Append audit log row.
     5. (purge=True only) Enumerate all snapshots for every collection of this KB,
        destroy them all (D-05: immediate), record in tombstone.snapshots_destroyed.
+    6. (purge=True only) Purge llm_cache.json: remove entries keyed by the
+       document's content_hash (surgical path) or delete the whole file if the
+       hash cannot be resolved (honest cost of erasure per §17).
+       Non-purge delete: llm_cache.json is explicitly deferred (cold-storage
+       exclusion list — see module docstring).
 
     M-089 distinction is rendered verbatim in DeletionReport.summary.
+
+    LLM cache exclusion note (non-purge)
+    -------------------------------------
+    ``llm_cache.json`` holds LLM-generated table descriptions derived from
+    document content, keyed ``content_hash|segment_path|model_id``.  For a
+    non-purge delete the cache is explicitly deferred: snapshots still contain
+    the document, so deleting cache entries would force re-billing on the next
+    restore.  The deferral is intentional and documented here; the cache is
+    handled on purge (§17, Ruling 2).
 
     Args:
         kb_id: Knowledge-base UUID.
@@ -339,9 +506,16 @@ def delete_document(
         deleted_by: Actor performing the deletion (user ID or service name).
         reason: Human-readable reason for the deletion.
         deleted_at: Timestamp; defaults to UTC now.
+        llm_cache_path: Optional path to the KB's ``llm_cache.json``.  When
+            supplied and ``purge=True``, matching entries (or the whole file)
+            are removed.  Ignored when ``purge=False``.
+        inventory_path: Optional path to the collect-stage ``collect.json``
+            inventory artifact.  Used to resolve document_id → content_hash for
+            surgical llm_cache removal.  When None (and purge=True), the whole
+            llm_cache.json is deleted.
 
     Returns:
-        DeletionReport with counts, paths, and the M-089 summary.
+        DeletionReport with counts, paths, the M-089 summary, and llm_cache_action.
 
     Raises:
         DeletionError: If tombstone append or index mutation fails.
@@ -457,6 +631,21 @@ def delete_document(
     logger.debug("delete_document: eval-question removal stub (Phase 5) — doc '%s'", document_id)
 
     # ------------------------------------------------------------------
+    # Step 3b (purge only): Purge llm_cache.json (§17, Ruling 2)
+    # ------------------------------------------------------------------
+    # Non-purge deferral: llm_cache.json holds LLM-generated table descriptions
+    # keyed content_hash|segment_path|model_id.  For a non-purge delete, cold
+    # snapshots still contain the document, so removing cache entries would force
+    # re-billing on restore.  The cache is deferred to purge time only.
+    llm_cache_action = "deferred_non_purge"
+    if purge:
+        llm_cache_action = _purge_llm_cache(
+            document_id=document_id,
+            llm_cache_path=llm_cache_path,
+            inventory_path=inventory_path,
+        )
+
+    # ------------------------------------------------------------------
     # Step 4: Audit log row
     # ------------------------------------------------------------------
     try:
@@ -473,6 +662,7 @@ def delete_document(
                 "n1_chunks_removed": n1_removed,
                 "artifacts_removed": artifacts_removed,
                 "reason": reason,
+                "llm_cache_action": llm_cache_action,
             },
             created_at=deleted_at,
         )
@@ -566,6 +756,7 @@ def delete_document(
         snapshots_destroyed=snapshots_destroyed,
         tombstone_entry_id=tombstone_entry_id,
         deleted_at=deleted_at,
+        llm_cache_action=llm_cache_action,
     )
     return report
 
