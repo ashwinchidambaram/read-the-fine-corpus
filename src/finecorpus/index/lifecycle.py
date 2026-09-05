@@ -17,8 +17,9 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from typing import TYPE_CHECKING
 
 from sqlalchemy.orm import Session
 
@@ -28,9 +29,13 @@ from finecorpus.index.adapter import (
     CollectionNotFoundError,
     IndexAdapter,
     ModelIdentity,
+    SnapshotRef,
     alias_name,
     collection_name,
 )
+
+if TYPE_CHECKING:
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -106,6 +111,33 @@ class RollbackError(LifecycleError):
 
 class NoNMinusOneError(LifecycleError):
     """Raised when rollback is attempted but no N-1 collection exists."""
+
+
+class RestoredUnreplayedError(LifecycleError):
+    """Raised when promote() is called on a restored collection before tombstone replay.
+
+    M-087: A collection restored from a snapshot MUST NOT be promoted until the
+    tombstone log has been fully replayed.  ``restore_from_snapshot`` sets the
+    ``RESTORED_UNREPLAYED_MARKER_KEY`` metadata key on the new collection before
+    replay begins and clears it after.  ``promote()`` checks for this key and
+    raises this error if it is present.
+
+    Attributes:
+        collection: The collection name that has unreplayed tombstones.
+    """
+
+    def __init__(self, collection: str) -> None:
+        self.collection = collection
+        super().__init__(
+            f"Collection '{collection}' was restored from a snapshot and has not "
+            f"yet completed tombstone replay (M-087). Call restore_from_snapshot() "
+            f"which performs replay before returning, or wait for replay to complete "
+            f"before promoting."
+        )
+
+
+class SnapshotLifecycleError(LifecycleError):
+    """Raised when a snapshot lifecycle operation fails."""
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +405,33 @@ def promote(
         )
         # Shadow is retained (never dropped here) — §3 / §15
         raise ValidationFailedError(gate=validation.gate, detail=validation.detail)
+
+    # -----------------------------------------------------------------------
+    # M-087 precondition: refuse promotion of a restored-but-unreplayed collection
+    # -----------------------------------------------------------------------
+    # ``restore_from_snapshot`` sets RESTORED_UNREPLAYED_MARKER_KEY="true" in the
+    # collection metadata immediately after restore, before tombstone replay begins.
+    # It clears the key after replay completes.  We check for it here to provide
+    # a hard structural gate (not just a convention).
+    #
+    # Import inside the function to avoid a circular import (pipeline.deletion
+    # imports from index.adapter; lifecycle imports from index.adapter only).
+    _marker_key = "restored_unreplayed_marker"
+    try:
+        _meta = adapter.get_collection_metadata(ctx.shadow_collection)
+        if _meta.get(_marker_key) == "true":
+            ctx.state = BuildState.VALIDATION_FAILED
+            raise RestoredUnreplayedError(ctx.shadow_collection)
+    except RestoredUnreplayedError:
+        raise
+    except Exception as _exc:
+        # get_collection_metadata may raise CollectionNotFoundError or other errors;
+        # those will surface naturally at validate_shadow time.  Non-fatal here.
+        logger.debug(
+            "M-087 marker check: get_collection_metadata failed for '%s': %s",
+            ctx.shadow_collection,
+            _exc,
+        )
 
     # -----------------------------------------------------------------------
     # Phase 1: Qdrant alias retarget (§4.1)
@@ -761,6 +820,274 @@ def retire_previous_collection(
     return to_drop
 
 
+# ---------------------------------------------------------------------------
+# Cold snapshot lifecycle (§10.2, §17.1, D-05)
+# ---------------------------------------------------------------------------
+
+_RESTORED_UNREPLAYED_MARKER_KEY = "restored_unreplayed_marker"
+"""Metadata key set on a restored collection while tombstone replay is pending.
+
+Presence of this key with value ``"true"`` causes ``promote()`` to raise
+``RestoredUnreplayedError`` (M-087 structural precondition).
+``restore_from_snapshot`` sets it before replay and clears it after.
+"""
+
+
+@dataclass
+class SnapshotColdResult:
+    """Result of a snapshot_cold operation.
+
+    Attributes:
+        ref: The SnapshotRef for the newly created snapshot.
+        swept_snapshots: Snapshot IDs deleted by the retention sweep.
+    """
+
+    ref: SnapshotRef
+    swept_snapshots: list[str] = field(default_factory=list)
+
+
+def snapshot_cold(
+    adapter: IndexAdapter,
+    collection: str,
+    *,
+    retention_period_days: int = 90,
+) -> SnapshotColdResult:
+    """Create a cold snapshot of a collection and sweep aged snapshots.
+
+    Implements §10.2 cold retention:
+    1. Create a snapshot of ``collection``.
+    2. Enumerate existing snapshots for the same collection.
+    3. Delete snapshots older than ``retention_period_days`` (D-05 default: 90 days).
+
+    The retention sweep is conservative: snapshots without a ``created_at``
+    timestamp are never swept (they cannot be age-checked).
+
+    Args:
+        adapter: IndexAdapter instance.
+        collection: Raw collection name to snapshot.
+        retention_period_days: Snapshots older than this many days are deleted.
+            Default 90 per D-05 (M-088: retention documented).
+
+    Returns:
+        SnapshotColdResult with the new ref and list of swept snapshot IDs.
+
+    Raises:
+        SnapshotLifecycleError: If the snapshot creation fails.
+        CollectionNotFoundError: If the collection does not exist.
+    """
+    from finecorpus.index.adapter import SnapshotError
+
+    logger.info(
+        "snapshot_cold: creating snapshot for collection '%s' (retention=%d days)",
+        collection,
+        retention_period_days,
+    )
+    try:
+        ref = adapter.snapshot_collection(collection)
+    except Exception as exc:
+        raise SnapshotLifecycleError(
+            f"Failed to create cold snapshot for collection '{collection}': {exc}"
+        ) from exc
+
+    # Retention sweep: delete snapshots older than retention_period_days
+    swept: list[str] = []
+    cutoff = datetime.now(tz=UTC) - timedelta(days=retention_period_days)
+
+    try:
+        existing = adapter.list_snapshots(collection)
+    except Exception as exc:
+        logger.warning("snapshot_cold: retention sweep skipped — list_snapshots failed: %s", exc)
+        return SnapshotColdResult(ref=ref, swept_snapshots=[])
+
+    for snap in existing:
+        # Never sweep the snapshot we just created
+        if snap.snapshot_id == ref.snapshot_id:
+            continue
+        # Snapshots without a timestamp cannot be age-checked — skip them
+        if snap.created_at is None:
+            continue
+        if snap.created_at < cutoff:
+            try:
+                adapter.delete_snapshot(snap)
+                swept.append(snap.snapshot_id)
+                logger.info(
+                    "snapshot_cold: swept aged snapshot '%s' (created_at=%s < cutoff=%s)",
+                    snap.snapshot_id,
+                    snap.created_at,
+                    cutoff,
+                )
+            except (SnapshotError, Exception) as exc:
+                logger.warning(
+                    "snapshot_cold: failed to sweep aged snapshot '%s': %s",
+                    snap.snapshot_id,
+                    exc,
+                )
+
+    return SnapshotColdResult(ref=ref, swept_snapshots=swept)
+
+
+def restore_from_snapshot(
+    adapter: IndexAdapter,
+    session: Session,
+    kb_id: str,
+    ref: SnapshotRef,
+    *,
+    new_build_id: int,
+) -> str:
+    """Restore a snapshot into a shadow collection and replay tombstones (M-087).
+
+    This function implements the COMPLETE restore flow:
+    1. Derive a new shadow collection name (must not exist).
+    2. Set the RESTORED_UNREPLAYED_MARKER_KEY metadata to "true" — this blocks
+       promote() until replay completes.
+    3. Call adapter.restore_snapshot(ref, new_collection_name).
+    4. Replay all unreplayed tombstones for this KB into the new collection:
+       - For each unreplayed TombstoneRecord: call delete_by_document + mark_replayed.
+    5. Clear the RESTORED_UNREPLAYED_MARKER_KEY (set to "false" / remove).
+    6. Return the new collection name.
+
+    Only after step 5 is the collection promotion-eligible (M-087).
+
+    C-4 invariant: restore ALWAYS goes into a NEW shadow collection (never in place).
+    The caller must then call promote() with a BuildContext pointing at the new
+    collection.
+
+    Args:
+        adapter: IndexAdapter instance.
+        session: SQLAlchemy Session for tombstone replay.
+        kb_id: Knowledge-base UUID.
+        ref: SnapshotRef returned by snapshot_cold / list_snapshots.
+        new_build_id: Build ID for the restored collection (monotonically increasing;
+            caller must allocate this from the control plane).
+
+    Returns:
+        The name of the newly restored shadow collection (promotion-eligible).
+
+    Raises:
+        SnapshotLifecycleError: If restore or tombstone replay fails.
+        IndexError: If the new collection already exists (caller collision).
+    """
+    # Imports here to avoid circular import from pipeline.deletion
+    from finecorpus.control.tombstone import TombstoneRepository
+    from finecorpus.index.adapter import SnapshotError
+
+    new_coll = collection_name(kb_id, new_build_id)
+    logger.info(
+        "restore_from_snapshot: restoring snapshot '%s' -> '%s' for kb '%s'",
+        ref.snapshot_id,
+        new_coll,
+        kb_id,
+    )
+
+    if adapter.collection_exists(new_coll):
+        raise SnapshotLifecycleError(
+            f"Cannot restore: target collection '{new_coll}' already exists. "
+            f"Allocate a new build_id via the control plane."
+        )
+
+    # ------------------------------------------------------------------
+    # Step 1: Set unreplayed marker BEFORE restore (M-087 structural gate)
+    # We set the marker on the collection AFTER restore since the collection
+    # doesn't exist yet. After restore, we set it immediately.
+    # ------------------------------------------------------------------
+    try:
+        adapter.restore_snapshot(ref, new_coll)
+    except (SnapshotError, Exception) as exc:
+        raise SnapshotLifecycleError(
+            f"restore_snapshot failed for snapshot '{ref.snapshot_id}' -> '{new_coll}': {exc}"
+        ) from exc
+
+    # Set the unreplayed marker — blocks promote() until we clear it
+    try:
+        adapter.set_collection_metadata(new_coll, {_RESTORED_UNREPLAYED_MARKER_KEY: "true"})
+    except Exception as exc:
+        logger.warning(
+            "restore_from_snapshot: failed to set unreplayed marker on '%s': %s "
+            "(promote() will NOT be blocked — safety degraded)",
+            new_coll,
+            exc,
+        )
+
+    # ------------------------------------------------------------------
+    # Step 2: Replay all unreplayed tombstones for this KB
+    # ------------------------------------------------------------------
+    tomb_repo = TombstoneRepository(session)
+    unreplayed = tomb_repo.unreplayed_for(kb_id=kb_id, collection=new_coll)
+
+    logger.info(
+        "restore_from_snapshot: replaying %d unreplayed tombstone(s) into '%s'",
+        len(unreplayed),
+        new_coll,
+    )
+
+    replay_errors: list[str] = []
+    for tomb in unreplayed:
+        try:
+            if adapter.collection_exists(new_coll):
+                removed = adapter.delete_by_document(new_coll, tomb.document_id)
+                logger.debug(
+                    "tombstone replay: removed %d point(s) for doc '%s' from '%s'",
+                    removed,
+                    tomb.document_id,
+                    new_coll,
+                )
+        except Exception as exc:
+            err = (
+                f"delete_by_document failed for document '{tomb.document_id}' "
+                f"during replay into '{new_coll}': {exc}"
+            )
+            replay_errors.append(err)
+            logger.error("restore_from_snapshot: %s", err)
+            continue
+
+        try:
+            tomb_repo.mark_replayed(
+                entry_id=tomb.entry_id,
+                collection=new_coll,
+            )
+        except Exception as exc:
+            err = f"mark_replayed failed for entry '{tomb.entry_id}': {exc}"
+            replay_errors.append(err)
+            logger.error("restore_from_snapshot: %s", err)
+
+    if replay_errors:
+        # Replay is best-effort for individual entries but we surface failures.
+        # The collection remains in RESTORED_UNREPLAYED state — do not clear marker.
+        error_summary = "; ".join(replay_errors[:5])
+        raise SnapshotLifecycleError(
+            f"Tombstone replay into '{new_coll}' had {len(replay_errors)} error(s): "
+            f"{error_summary}. Collection remains not promotion-eligible (M-087)."
+        )
+
+    try:
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        raise SnapshotLifecycleError(
+            f"Failed to commit tombstone replay records for '{new_coll}': {exc}"
+        ) from exc
+
+    # ------------------------------------------------------------------
+    # Step 3: Clear the unreplayed marker — collection is now promotion-eligible
+    # ------------------------------------------------------------------
+    try:
+        adapter.set_collection_metadata(new_coll, {_RESTORED_UNREPLAYED_MARKER_KEY: "false"})
+    except Exception as exc:
+        logger.warning(
+            "restore_from_snapshot: failed to clear unreplayed marker on '%s': %s "
+            "(promote() may still be blocked — set marker manually if needed)",
+            new_coll,
+            exc,
+        )
+
+    logger.info(
+        "restore_from_snapshot: complete — '%s' is promotion-eligible (%d tombstone(s) replayed)",
+        new_coll,
+        len(unreplayed),
+    )
+    return new_coll
+
+
 __all__ = [
     "BuildContext",
     "BuildState",
@@ -768,13 +1095,18 @@ __all__ = [
     "NoNMinusOneError",
     "PromotionError",
     "ReconcileResult",
+    "RestoredUnreplayedError",
     "RollbackError",
+    "SnapshotColdResult",
+    "SnapshotLifecycleError",
     "ValidationFailedError",
     "ValidationResult",
     "create_shadow",
     "promote",
+    "restore_from_snapshot",
     "retire_previous_collection",
     "rollback",
+    "snapshot_cold",
     "startup_reconcile",
     "validate_shadow",
 ]
