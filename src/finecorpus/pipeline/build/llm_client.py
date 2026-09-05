@@ -103,13 +103,35 @@ class LLMBuildClient:
         return self._shared_call_count[0]
 
     def _load_persistent_cache(self) -> None:
-        """Load the persistent cache from disk into _mem_cache."""
+        """Load the persistent cache from disk into _mem_cache.
+
+        M-067: cached LLM output is still LLM output — validate on read.
+        Only entries where BOTH key AND value are plain ``str`` are accepted.
+        Non-conforming entries are dropped with a logged warning.
+        """
         if self._cache_path is None or not self._cache_path.exists():
             return
         try:
             data = json.loads(self._cache_path.read_text(encoding="utf-8"))
             if isinstance(data, dict):
-                self._mem_cache.update(data)
+                dropped = 0
+                for k, v in data.items():
+                    if isinstance(k, str) and isinstance(v, str):
+                        self._mem_cache[k] = v
+                    else:
+                        dropped += 1
+                        logger.warning(
+                            "M-067: LLM cache entry dropped — key or value is not a string "
+                            "(key type=%s, value type=%s); re-calling LLM for this entry.",
+                            type(k).__name__,
+                            type(v).__name__,
+                        )
+                if dropped:
+                    logger.warning(
+                        "M-067: LLM cache: %d non-conforming entries dropped on read from %s",
+                        dropped,
+                        self._cache_path,
+                    )
         except Exception as exc:
             logger.warning("LLM cache read failed (%s); starting with empty cache", exc)
 

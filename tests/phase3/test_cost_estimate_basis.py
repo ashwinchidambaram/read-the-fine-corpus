@@ -568,3 +568,289 @@ class TestTableLLMCallEstimate:
             f"Expected 0 table LLM calls without table_description op, "
             f"got {estimate.llm_table_call_count}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Ruling 1: per-class chunking config must be used, not default_rule config
+# ---------------------------------------------------------------------------
+
+
+class TestPerClassChunkingInEstimate:
+    """estimate_ingestion_cost must use per-class chunking config, not default_rule."""
+
+    def test_table_rule_tiny_max_tokens_produces_more_chunks_than_default(self) -> None:
+        """A table class rule with tiny max_tokens must produce more chunks than the default.
+
+        This is the Ruling 1 regression test.  Before the fix, max_tokens was read
+        from default_rule BEFORE the segment loop so every segment used the same
+        (wrong) chunking config regardless of its class.
+
+        Setup:
+        - default_rule.chunking.max_tokens = 512  (large — most text fits in one chunk)
+        - table_rule.chunking.max_tokens = 3       (tiny — forces many small chunks)
+        - Provide a table segment with 30+ words so it needs multiple chunks under tiny limit.
+
+        Expected: chunk count differs from the count that would result from using
+        default_rule's max_tokens (i.e. per-class rule IS honoured in the estimate).
+        """
+        import hashlib as _hl
+
+        from finecorpus.contracts.ingestion_config import (
+            ChunkingConfig,
+            ChunkingStrategy,
+            ClassRule,
+            EmbeddingConfig,
+            IngestionConfig,
+            LanguageDecision,
+            LanguageSupportDecision,
+            NaiveBaselineRef,
+            RecommendationBasis,
+            RecommendationProvenance,
+            RetrievalStrategy,
+            RetrievalTreatment,
+            TransformationSettings,
+        )
+        from finecorpus.contracts.segment_set import (
+            ReassemblyMethod,
+            ReassemblyRecord,
+            Segment,
+            SegmentSet,
+        )
+        from finecorpus.contracts.segment_set_batch import BATCH_SCHEMA_VERSION, SegmentSetBatch
+        from finecorpus.contracts.shared.blocks import (
+            LocatorKind,
+            PermissionFidelity,
+            PermissionMode,
+            PermissionSource,
+            SalienceSignal,
+            SalienceSignalKind,
+            SalienceTier,
+            SegmentType,
+            SourceLocation,
+            TenancyBlock,
+        )
+        from finecorpus.contracts.versions import INGESTION_CONFIG_SCHEMA_VERSION
+        from finecorpus.embedding.fake import FakeProvider
+        from finecorpus.pipeline.costing import estimate_ingestion_cost
+
+        # Table segment text: > 30 words so it definitely produces multiple chunks
+        # when max_tokens = 3 but only 1 chunk when max_tokens = 512.
+        table_text = (
+            "| Col1 | Col2 | Col3 |\n"
+            "|------|------|------|\n"
+            "| aaa  | bbb  | ccc  |\n"
+            "| ddd  | eee  | fff  |\n"
+            "| ggg  | hhh  | iii  |\n"
+            "| jjj  | kkk  | lll  |\n"
+            "| mmm  | nnn  | ooo  |\n"
+        )
+        # Verify text is large enough (> 3 words for tiny, < 512 for default)
+        word_count = len(table_text.split())
+        assert word_count > 5, f"Table text too short ({word_count} words) for this test"
+
+        tenancy = TenancyBlock(
+            workspace_id="ws-ruling1",
+            kb_id="kb-ruling1",
+            permission_mode=PermissionMode.public_to_kb,
+            permission_principals=[],
+            permission_source=PermissionSource.platform,
+            permission_fidelity=PermissionFidelity.authoritative,
+            permission_resolved_at=None,
+        )
+        seg = Segment(
+            segment_id="seg-ruling1-table",
+            document_order=0,
+            segment_type=SegmentType.table,
+            salience_tier=SalienceTier.primary,
+            structural_path=[],
+            segment_path="sec/table/0",
+            location=SourceLocation(
+                locator_kind=LocatorKind.char_range,
+                char_start=0,
+                char_end=len(table_text),
+            ),
+            source_region_ids=["region_0"],
+            language="en",
+            ocr_confidence=None,
+            injection_suspicion=0.0,
+            invisible_content_flags=[],
+            sensitivity_flags=[],
+            salience_signals=[
+                SalienceSignal(
+                    kind=SalienceSignalKind.segment_type_prior,
+                    implied_tier=SalienceTier.primary,
+                    won=True,
+                    detail=None,
+                )
+            ],
+            salience_basis=SalienceSignalKind.segment_type_prior,
+            text=table_text,
+        )
+
+        # --- Config with DIFFERENT chunking for table vs default ---
+        default_chunking = ChunkingConfig(
+            strategy=ChunkingStrategy.recursive_char,
+            max_tokens=512,  # large: whole table fits in 1 chunk, overlap=0
+            overlap_tokens=0,
+            respect_headings=False,
+        )
+        tiny_table_chunking = ChunkingConfig(
+            strategy=ChunkingStrategy.recursive_char,
+            max_tokens=5,  # tiny: forces many chunks; overlap=2 inflates token count
+            overlap_tokens=2,
+            respect_headings=False,
+        )
+
+        embedding = EmbeddingConfig(
+            provider="fake",
+            model="fake-embed-v1",
+            dimensions=64,
+            normalize=True,
+            supports_languages=["*"],
+        )
+
+        table_rule = ClassRule(
+            segment_class=SegmentType.table,
+            transformation=TransformationSettings(
+                tier1_enabled=False,
+                tier1_operations=[],
+                tier2_enabled=False,
+                tier2_operations=[],
+                tier3_enabled=False,
+            ),
+            chunking=tiny_table_chunking,
+            embedding_override=None,
+            metadata_schema=[],
+            retrieval_treatment=RetrievalTreatment(
+                default_salience_filter=[SalienceTier.primary, SalienceTier.supporting],
+                salience_weights=None,
+                rerank_eligible=False,
+                strategy=RetrievalStrategy.dense,
+            ),
+        )
+        default_rule = ClassRule(
+            segment_class=SegmentType.prose,
+            transformation=TransformationSettings(
+                tier1_enabled=False,
+                tier1_operations=[],
+                tier2_enabled=False,
+                tier2_operations=[],
+                tier3_enabled=False,
+            ),
+            chunking=default_chunking,
+            embedding_override=None,
+            metadata_schema=[],
+            retrieval_treatment=RetrievalTreatment(
+                default_salience_filter=[SalienceTier.primary, SalienceTier.supporting],
+                salience_weights=None,
+                rerank_eligible=False,
+                strategy=RetrievalStrategy.dense,
+            ),
+        )
+
+        config_version = _hl.sha256(b"ruling1-per-class").hexdigest()
+        config = IngestionConfig(
+            schema_version=INGESTION_CONFIG_SCHEMA_VERSION,
+            tenancy=tenancy,
+            config_version=config_version,
+            created_at=__import__("datetime").datetime.now(tz=__import__("datetime").timezone.utc),
+            naive_baseline=NaiveBaselineRef(
+                reference_id="naive-baseline-v0",
+                description="Ruling 1 regression test.",
+            ),
+            class_rules=[table_rule],
+            default_rule=default_rule,
+            embedding=embedding,
+            retrieval_defaults=RetrievalTreatment(
+                default_salience_filter=[SalienceTier.primary, SalienceTier.supporting],
+                salience_weights=None,
+                rerank_eligible=False,
+                strategy=RetrievalStrategy.dense,
+            ),
+            language_support=LanguageSupportDecision(
+                detected_languages=[],
+                unsupported_languages=[],
+                decision=LanguageDecision.proceed,
+            ),
+            spreadsheet_triage=[],
+            exclusions_confirmed=[],
+            provenance=[
+                RecommendationProvenance(
+                    target="/default_rule",
+                    basis=RecommendationBasis.heuristic,
+                    rationale="Ruling 1 test.",
+                )
+            ],
+            class_descriptions=[],
+            secret_free_attestation=True,
+        )
+
+        # Build a minimal SegmentSetBatch
+        content_hash = _hl.sha256(b"doc-ruling1").hexdigest()
+        reassembly_digest = _hl.sha256(table_text.encode()).hexdigest()
+        ss = SegmentSet(
+            schema_version="1.1.0",
+            tenancy=tenancy,
+            document_id="doc-ruling1",
+            content_hash=content_hash,
+            segments=[seg],
+            reassembly=ReassemblyRecord(
+                method=ReassemblyMethod.document_order_concat,
+                covered_region_ids=["region_0"],
+                reassembly_digest=reassembly_digest,
+            ),
+            exclusions=[],
+            cross_references=[],
+            decomposed_at=__import__("datetime").datetime.now(
+                tz=__import__("datetime").timezone.utc
+            ),
+        )
+        batch = SegmentSetBatch(
+            schema_version=BATCH_SCHEMA_VERSION,
+            contract="segment_set_batch",
+            run_id="ruling1-test",
+            produced_at=__import__("datetime").datetime.now(tz=__import__("datetime").timezone.utc),
+            skeleton=None,
+            segment_sets=[ss.model_dump(mode="json")],
+        )
+
+        fake_embed = FakeProvider()
+
+        # --- Estimate using the per-class config (tiny_table_chunking for table) ---
+        estimate_per_class = estimate_ingestion_cost(
+            segment_set_batch=batch,
+            ingestion_config=config,
+            embedding_provider=fake_embed,
+            llm_provider_or_none=None,
+        )
+
+        # --- Compute what the token counts would be for each chunking config ---
+        from finecorpus.pipeline.costing import _estimate_chunk_texts as _etc
+
+        # tiny: max_tokens=5, overlap=2 → multiple overlapping chunks → inflated token count
+        chunks_with_table_chunking = _etc(table_text, max_tokens=5, overlap_tokens=2)
+        # default: max_tokens=512, overlap=0 → 1 chunk, token count = word_count exactly
+        chunks_with_default_chunking = _etc(table_text, max_tokens=512, overlap_tokens=0)
+
+        expected_tokens_table = sum(len(t.split()) for t in chunks_with_table_chunking)
+        expected_tokens_default = sum(len(t.split()) for t in chunks_with_default_chunking)
+
+        # Sanity: the tiny+overlap config must produce more total tokens (due to overlapping chunks)
+        assert expected_tokens_table > expected_tokens_default, (
+            f"Test setup error: max_tokens=5+overlap=2 should produce more total tokens than "
+            f"max_tokens=512+overlap=0 due to repeated overlap words. "
+            f"Got {expected_tokens_table} vs {expected_tokens_default} for {word_count} words."
+        )
+
+        # The estimate MUST use the per-class table rule's chunking (max_tokens=5, overlap=2),
+        # NOT the default_rule's chunking (max_tokens=512, overlap=0).
+        # Bug: before fix, max_tokens/overlap_tokens are read from default_rule before the loop,
+        # so ALL segments use the default chunking regardless of class — the table segment
+        # produces expected_tokens_default instead of expected_tokens_table.
+        assert estimate_per_class.embedding_token_count == expected_tokens_table, (
+            f"estimate_ingestion_cost used default_rule chunking (max_tokens=512, overlap=0) "
+            f"instead of the per-class table rule's chunking (max_tokens=5, overlap=2). "
+            f"Got token count {estimate_per_class.embedding_token_count}, "
+            f"expected {expected_tokens_table} (per-class) vs {expected_tokens_default} (default). "
+            "Ruling 1: per-class chunking config must be honoured in estimate."
+        )

@@ -72,16 +72,15 @@ def _cmd_pipeline_run(args: argparse.Namespace) -> int:
         cost_estimate = _try_load_cost_estimate(args)
         if cost_estimate is not None:
             _print_cost_estimate(cost_estimate)
-            if not getattr(args, "yes", False):
-                # Interactive confirmation (skip if --yes was passed)
-                try:
-                    answer = input("Proceed with ingestion? [y/N] ").strip().lower()
-                except (EOFError, KeyboardInterrupt):
-                    print("\nAborted.", file=sys.stderr)
-                    return 1
-                if answer not in ("y", "yes"):
-                    print("Ingestion cancelled by user.", file=sys.stderr)
-                    return 1
+            # Interactive confirmation (skip if --yes was passed)
+            try:
+                answer = input("Proceed with ingestion? [y/N] ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print("\nAborted.", file=sys.stderr)
+                return 1
+            if answer not in ("y", "yes"):
+                print("Ingestion cancelled by user.", file=sys.stderr)
+                return 1
 
     try:
         artifact_paths = run_pipeline(
@@ -113,15 +112,31 @@ def _cmd_pipeline_run(args: argparse.Namespace) -> int:
 def _try_load_cost_estimate(args: argparse.Namespace) -> Any | None:
     """Attempt to load plan + decompose artifacts and compute a cost estimate.
 
-    Returns the IngestionCostEstimate or None if artifacts are not available.
+    Returns one of:
+    - ``IngestionCostEstimate`` — honest estimate for a resolved provider.
+    - ``CostEstimateUnavailable`` — when a declared non-local provider cannot be
+      constructed (e.g. openai declared but no API key in env).  The CLI must
+      print an explicit "unavailable" message rather than fabricating $0.00.
+    - ``None`` — artifacts not yet available; skip the gate entirely.
+
+    Policy (Ruling 2):
+    - Resolve the real embedding provider declared by the IngestionConfig via
+      ``resolve_costing_providers`` — never hardcode FakeProvider.
+    - If the declared provider is non-local and unavailable (no key), return
+      ``CostEstimateUnavailable`` — do NOT fabricate $0.00.
+    - Local/fake providers are always constructible; they get the zero-marginal-cost label.
+    - All provider resolution logic lives in ``pipeline/costing.py`` (C-5).
     """
     import pathlib
 
     try:
         from finecorpus.contracts.ingestion_config import IngestionConfig
         from finecorpus.contracts.segment_set_batch import SegmentSetBatch
-        from finecorpus.embedding.fake import FakeProvider as FakeEmbeddingProvider
-        from finecorpus.pipeline.costing import estimate_ingestion_cost
+        from finecorpus.pipeline.costing import (
+            CostEstimateUnavailable,
+            estimate_ingestion_cost,
+            resolve_costing_providers,
+        )
     except ImportError:
         return None
 
@@ -146,23 +161,48 @@ def _try_load_cost_estimate(args: argparse.Namespace) -> Any | None:
     except Exception:  # noqa: BLE001
         return None
 
-    # Use a fake embedding provider for cost estimation (no live calls)
-    embedding_provider = FakeEmbeddingProvider()
+    # Resolve real providers from the ingestion config (Ruling 2: honest cost gate)
+    costing_providers = resolve_costing_providers(ingestion_config)
+
+    if costing_providers.embedding_unavailable:
+        # Non-local provider declared but cannot be constructed (e.g. no API key).
+        # Return unavailable sentinel — the CLI will print an explicit message.
+        return CostEstimateUnavailable(
+            provider_name=ingestion_config.embedding.provider,
+            reason=costing_providers.embedding_unavailable_reason or "unknown reason",
+        )
 
     return estimate_ingestion_cost(
         segment_set_batch=segment_batch,
         ingestion_config=ingestion_config,
-        embedding_provider=embedding_provider,
-        llm_provider_or_none=None,
+        embedding_provider=costing_providers.embedding_provider,
+        llm_provider_or_none=costing_providers.llm_provider,
     )
 
 
 def _print_cost_estimate(estimate: Any) -> None:
-    """Print the cost estimate in a human-readable format."""
+    """Print the cost estimate in a human-readable format.
+
+    Handles both ``IngestionCostEstimate`` and ``CostEstimateUnavailable``
+    sentinels (Ruling 2: honest cost gate).
+    """
+    from finecorpus.pipeline.costing import CostEstimateUnavailable
+
     print()
     print("=" * 60)
     print("  INGESTION COST ESTIMATE (pre-Build)")
     print("=" * 60)
+
+    if isinstance(estimate, CostEstimateUnavailable):
+        # Honest unavailable message — never fabricate $0.00 (Ruling 2)
+        print(f"  Cost estimate unavailable for declared provider '{estimate.provider_name}'")
+        print(f"  Reason: {estimate.reason}")
+        print()
+        print("  You must still confirm before Build proceeds.")
+        print("=" * 60)
+        print()
+        return
+
     print(f"  Tokenizer         : {estimate.tokenizer_name}")
     print()
     print("  Embedding:")

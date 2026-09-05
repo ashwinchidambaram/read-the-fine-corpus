@@ -366,7 +366,6 @@ def _process_segment_set(
     doc_build_id: int,
     llm_client_factory: Any | None,
     dry_run: bool,
-    llm_call_counter: list[int],
 ) -> tuple[int, list[dict[str, Any]], list[dict[str, Any]]]:
     """Process one SegmentSet: tier1 + chunk + tier2 + embed + upsert.
 
@@ -380,7 +379,6 @@ def _process_segment_set(
         llm_client_factory: Callable(content_hash, segment_path) -> AugmentationClient | None.
             None means no tier2 augmentation.
         dry_run: When True, skip embedding and upsert; return chunks inline.
-        llm_call_counter: Mutable list[int] of length 1 accumulating LLM call counts.
 
     Returns:
         (chunk_count, skipped_info_list, inline_chunks)
@@ -593,6 +591,11 @@ def _process_segment_set(
                         "token_count": span.token_count,
                         "document_id": document_id,
                         "segment_path": seg.segment_path,
+                        # Position offsets within canonical text (for T-04 position-exact check)
+                        "char_start": span.char_start,
+                        "char_end": span.char_end,
+                        # Canonical text (tier-1 output) for T-04 position-exact comparison
+                        "canonical_text": canonical_text,
                     }
                 )
             else:
@@ -621,10 +624,6 @@ def _process_segment_set(
         texts_buffer.clear()
         chunk_meta_buffer.clear()
         points_buffer.clear()
-
-    # Accumulate LLM call counts from the factory if it tracks them
-    if llm_client_factory is not None and hasattr(llm_client_factory, "total_call_count"):
-        llm_call_counter[0] += llm_client_factory.total_call_count
 
     return chunk_count, skipped_segments, inline_chunks
 
@@ -846,9 +845,6 @@ class BuildStage(Stage):
                 run_dir=run_dir,
             )
 
-        # Mutable counter for LLM calls (passed through to _process_segment_set)
-        llm_call_counter = [0]
-
         for seg_set_dict in segment_batch.segment_sets:
             doc_id = seg_set_dict.get("document_id", "")
 
@@ -867,7 +863,6 @@ class BuildStage(Stage):
                 doc_build_id=self._build_id,
                 llm_client_factory=llm_factory,
                 dry_run=self._dry_run,
-                llm_call_counter=llm_call_counter,
             )
 
             if chunk_count == 0:

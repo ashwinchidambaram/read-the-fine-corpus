@@ -48,6 +48,7 @@ IngestionCostEstimate fields
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
@@ -223,9 +224,6 @@ def estimate_ingestion_cost(
             seg_set = seg_set_raw
 
         content_hash = seg_set.content_hash
-        chunking_cfg = ingestion_config.default_rule.chunking
-        max_tokens = chunking_cfg.max_tokens
-        overlap_tokens = chunking_cfg.overlap_tokens
 
         for seg in seg_set.segments:
             # Skip excluded segments (they aren't indexed)
@@ -237,6 +235,11 @@ def estimate_ingestion_cost(
             # Get the applicable rule
             rule = _get_rule_for_segment(seg.segment_type.value, ingestion_config)
 
+            # Resolve chunking config from the per-segment rule (Ruling 1: per-class chunking)
+            chunking_cfg = rule.chunking
+            max_tokens = chunking_cfg.max_tokens
+            overlap_tokens = chunking_cfg.overlap_tokens
+
             # Apply Tier 1 to get canonical text for token counting
             tier1_text = seg.text
             if rule.transformation.tier1_enabled and rule.transformation.tier1_operations:
@@ -244,7 +247,7 @@ def estimate_ingestion_cost(
 
                 tier1_text, _ = apply_tier1(seg.text, rule.transformation.tier1_operations)
 
-            # Estimate chunk texts from this segment
+            # Estimate chunk texts from this segment using per-class chunking config
             chunk_texts = _estimate_chunk_texts(tier1_text, max_tokens, overlap_tokens)
             all_chunk_texts.extend(chunk_texts)
 
@@ -396,7 +399,256 @@ def _estimate_chunk_texts(text: str, max_tokens: int, overlap_tokens: int) -> li
     return chunks if chunks else [text]
 
 
+# ---------------------------------------------------------------------------
+# Unavailable sentinel (Ruling 2: honest cost gate — never fabricate $0.00)
+# ---------------------------------------------------------------------------
+
+
+class CostEstimateUnavailable:
+    """Sentinel returned when cost cannot be honestly estimated.
+
+    Returned by ``_try_load_cost_estimate`` (CLI) when a declared non-local
+    provider cannot be constructed (e.g. openai declared but no API key).
+
+    The CLI MUST print "cost estimate unavailable for declared provider '<name>'
+    (<reason>)" and still require confirmation — it MUST NOT fabricate $0.00.
+
+    Attributes
+    ----------
+    provider_name:
+        The declared provider name (e.g. ``"openai"``).
+    reason:
+        Human-readable reason for unavailability.  MUST NOT contain credential
+        material (§6.2, §14.2).
+    unavailable:
+        Always ``True`` (type guard for CLI dispatch).
+    """
+
+    def __init__(self, provider_name: str, reason: str) -> None:
+        self.provider_name = provider_name
+        self.reason = reason
+        self.unavailable = True
+
+    def __repr__(self) -> str:
+        return f"CostEstimateUnavailable(provider={self.provider_name!r})"
+
+
+# ---------------------------------------------------------------------------
+# Provider resolution helper (Ruling 2: honest cost gate — never fabricate $0.00)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class CostingProviders:
+    """Named result from ``resolve_costing_providers``.
+
+    Attributes
+    ----------
+    embedding_provider:
+        Constructed embedding provider instance, or ``None`` when unavailable.
+    embedding_unavailable:
+        ``True`` when the declared embedding provider could not be constructed
+        (e.g. declared 'openai' but no API key in env).  When ``True``,
+        ``embedding_provider`` is ``None``.
+    embedding_unavailable_reason:
+        Human-readable reason for unavailability (e.g. 'no API key found').
+        ``None`` when ``embedding_unavailable`` is ``False``.
+    llm_provider:
+        Constructed LLM provider instance, or ``None`` (no tier-2 or unavailable).
+    llm_unavailable:
+        ``True`` when the declared LLM provider could not be constructed.
+    llm_unavailable_reason:
+        Human-readable reason for LLM unavailability.  ``None`` when not unavailable.
+    """
+
+    embedding_provider: Any | None
+    embedding_unavailable: bool
+    embedding_unavailable_reason: str | None
+    llm_provider: Any | None
+    llm_unavailable: bool
+    llm_unavailable_reason: str | None
+
+
+# Known local / fake provider names (never require an API key)
+_EMBEDDING_LOCAL_PROVIDERS: frozenset[str] = frozenset({"ollama", "local", "fake"})
+_EMBEDDING_CLOUD_PROVIDERS: frozenset[str] = frozenset({"openai", "cloud"})
+
+
+def resolve_costing_providers(
+    ingestion_config: Any,
+    platform_config: Any | None = None,
+) -> CostingProviders:
+    """Resolve real embedding + LLM providers for cost estimation.
+
+    This is the library-side provider resolution for the pre-Build cost gate
+    (Ruling 2: honest cost gate — never fabricate $0.00 for declared paid providers).
+
+    Policy
+    ------
+    - ``fake`` / ``ollama`` / ``local`` embedding → construct a local provider;
+      always succeeds; zero-marginal-cost label is honest.
+    - ``openai`` / ``cloud`` embedding → try to construct the real OpenAI provider;
+      if the API key is absent from the environment, mark ``embedding_unavailable=True``
+      (the caller MUST print "cost estimate unavailable" and NOT $0.00).
+    - LLM providers: resolved only when tier-2 is enabled in *any* class rule.
+      If no tier-2 rule references an LLM operation, ``llm_provider=None``.
+
+    Args:
+        ingestion_config: IngestionConfig (parsed).
+        platform_config: Optional full Config for more precise provider construction
+            (e.g. Ollama endpoint).  If ``None``, defaults are used for local providers.
+
+    Returns:
+        CostingProviders with resolved or unavailable-flagged providers.
+    """
+    from finecorpus.contracts.ingestion_config import Tier2Operation
+
+    # -- Embedding provider --
+    embed_provider_name = ingestion_config.embedding.provider.lower()
+    embed_model = ingestion_config.embedding.model
+    embed_dims = ingestion_config.embedding.dimensions
+
+    embedding_provider: Any | None = None
+    embedding_unavailable = False
+    embedding_unavailable_reason: str | None = None
+
+    if embed_provider_name in _EMBEDDING_LOCAL_PROVIDERS:
+        # Local / fake — always constructible, zero marginal cost
+        if embed_provider_name == "fake":
+            from finecorpus.embedding.fake import FakeProvider
+
+            embedding_provider = FakeProvider(
+                dimensions=embed_dims,
+                model_id=embed_model,
+            )
+        else:
+            # Ollama — use platform config endpoint if available, else default
+            try:
+                from finecorpus.embedding.ollama_provider import OllamaProvider
+
+                ollama_endpoint = "http://localhost:11434"
+                if platform_config is not None:
+                    try:
+                        ollama_endpoint = platform_config.providers.embedding.local.endpoint
+                    except AttributeError:
+                        pass
+                embedding_provider = OllamaProvider(
+                    base_url=ollama_endpoint,
+                    model_id=embed_model,
+                    dimensions=embed_dims,
+                )
+            except Exception as exc:
+                # Ollama provider import or construction failure — treat as local unavailable
+                # (rare; typically means a missing optional dependency)
+                embedding_unavailable = True
+                embedding_unavailable_reason = (
+                    f"local ollama provider could not be constructed: {type(exc).__name__}"
+                )
+
+    elif embed_provider_name in _EMBEDDING_CLOUD_PROVIDERS:
+        # Cloud (OpenAI) — requires API key from environment
+        import os
+
+        api_key: str | None = None
+        for env_var in ("FINECORPUS_OPENAI_API_KEY", "OPENAI_API_KEY"):
+            val = os.environ.get(env_var, "").strip()
+            if val:
+                api_key = val
+                break
+
+        if api_key is None:
+            embedding_unavailable = True
+            embedding_unavailable_reason = (
+                f"no API key found in env for declared provider '{embed_provider_name}' "
+                f"(set OPENAI_API_KEY or FINECORPUS_OPENAI_API_KEY)"
+            )
+        else:
+            try:
+                from finecorpus.embedding.openai_provider import OpenAIProvider
+
+                # Pricing: use platform config if available, else None (unknown pricing)
+                cost_per_1k: Any | None = None
+                pricing_as_of: str | None = None
+                if platform_config is not None:
+                    try:
+                        cloud_cfg = platform_config.providers.embedding.cloud
+                        cost_per_1k = getattr(cloud_cfg, "cost_per_1k_tokens", None)
+                        pricing_as_of = getattr(cloud_cfg, "pricing_as_of", None)
+                    except AttributeError:
+                        pass
+
+                embedding_provider = OpenAIProvider(
+                    api_key=api_key,
+                    model_id=embed_model,
+                    dimensions=embed_dims,
+                    cost_per_1k_tokens=cost_per_1k,
+                    pricing_as_of=pricing_as_of,
+                )
+            except Exception as exc:
+                embedding_unavailable = True
+                embedding_unavailable_reason = (
+                    f"openai provider construction failed: {type(exc).__name__}"
+                )
+    else:
+        # Unknown provider name — mark unavailable
+        embedding_unavailable = True
+        embedding_unavailable_reason = (
+            f"unknown embedding provider '{embed_provider_name}' in IngestionConfig"
+        )
+
+    # -- LLM provider --
+    # Resolve only if tier-2 is enabled with LLM operations in any class rule
+    llm_provider: Any | None = None
+    llm_unavailable = False
+    llm_unavailable_reason: str | None = None
+
+    # Check whether any rule demands an LLM operation
+    all_rules = list(ingestion_config.class_rules) + [ingestion_config.default_rule]
+    needs_llm = False
+    for rule in all_rules:
+        if rule.transformation.tier2_enabled:
+            ops = set(rule.transformation.tier2_operations)
+            if Tier2Operation.table_description in ops or Tier2Operation.class_context in ops:
+                needs_llm = True
+                break
+
+    if needs_llm and platform_config is not None:
+        # Try to resolve LLM provider from platform config
+        try:
+            from finecorpus.llm.registry import build_llm_provider_from_config
+
+            resolved = build_llm_provider_from_config(platform_config, "augmentation")
+            llm_provider = resolved.provider
+        except ValueError as exc:
+            # Missing key or unknown provider
+            reason = str(exc)
+            # Never include credential material in the reason (strip key-ish text)
+            if "key" in reason.lower() or "api" in reason.lower():
+                reason = (
+                    f"LLM provider construction failed — check API key configuration "
+                    f"({type(exc).__name__})"
+                )
+            llm_unavailable = True
+            llm_unavailable_reason = reason
+        except Exception as exc:
+            llm_unavailable = True
+            llm_unavailable_reason = f"LLM provider construction failed: {type(exc).__name__}"
+    # When needs_llm is True but platform_config is None, LLM remains None (no penalty).
+
+    return CostingProviders(
+        embedding_provider=embedding_provider,
+        embedding_unavailable=embedding_unavailable,
+        embedding_unavailable_reason=embedding_unavailable_reason,
+        llm_provider=llm_provider,
+        llm_unavailable=llm_unavailable,
+        llm_unavailable_reason=llm_unavailable_reason,
+    )
+
+
 __all__ = [
+    "CostEstimateUnavailable",
+    "CostingProviders",
     "IngestionCostEstimate",
     "estimate_ingestion_cost",
+    "resolve_costing_providers",
 ]

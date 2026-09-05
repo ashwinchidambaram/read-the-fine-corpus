@@ -16,6 +16,8 @@ import pathlib
 import uuid
 from datetime import UTC, datetime
 
+import pytest
+
 from finecorpus.contracts.ingestion_config import (
     ChunkingConfig,
     ChunkingStrategy,
@@ -602,3 +604,131 @@ class TestDoubleRecordRegression:
             assert len(ttm_records) == 0, (
                 f"Prose chunk should not have any 'table_to_markdown' records, got: {ttm_records}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Ruling 6: cache validation on read (M-067)
+# ---------------------------------------------------------------------------
+
+
+class TestLLMCacheValidationOnRead:
+    """Ruling 6: LLM cache entries with non-str values must be dropped with a warning.
+
+    M-067: cached LLM output is still LLM output — validate on read.
+    A hand-written cache file with int values must result in:
+    - The invalid entry being dropped (not loaded into _mem_cache).
+    - A warning being logged.
+    - The LLM being re-called for the dropped entry.
+    """
+
+    def test_int_value_dropped_and_llm_recalled(
+        self, tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Cache entry with int value → dropped + warning logged + LLM re-called."""
+        import logging
+
+        from finecorpus.llm.fake import FakeLLMProvider
+        from finecorpus.llm.operations import ResolvedOpConfig
+        from finecorpus.pipeline.build.llm_client import LLMBuildClient, _cache_key
+
+        fake_llm = FakeLLMProvider()
+        op_cfg = ResolvedOpConfig(
+            provider_id="fake",
+            model_id="fake-llm-v1",
+            temperature=0.0,
+            max_output_tokens=128,
+            max_retries=1,
+        )
+
+        content_hash = "abc123deadbeef"
+        segment_path = "sec/table/0"
+        model_id = op_cfg.model_id
+
+        # Write a cache file with an INVALID int value for the target key,
+        # and a valid str value for a different key.
+        cache_key_bad = _cache_key(content_hash, segment_path, model_id)
+        cache_key_good = _cache_key("other_hash", "other/path", model_id)
+        hand_written_cache = {
+            cache_key_bad: 42,  # int — invalid (must be str)
+            cache_key_good: "valid description here",  # str — valid
+        }
+        cache_path = tmp_path / "llm_cache.json"
+        cache_path.write_text(__import__("json").dumps(hand_written_cache), encoding="utf-8")
+
+        # Load the cache via LLMBuildClient — should drop the int entry
+        with caplog.at_level(logging.WARNING, logger="finecorpus.pipeline.build.llm_client"):
+            client = LLMBuildClient(
+                provider=fake_llm,
+                op_config=op_cfg,
+                run_dir=tmp_path,
+                content_hash=content_hash,
+                segment_path=segment_path,
+            )
+
+        # The bad int entry must NOT be in the mem cache
+        assert cache_key_bad not in client._mem_cache, (
+            f"Int-valued cache entry was loaded into _mem_cache — should have been dropped. "
+            f"Cache: {client._mem_cache}"
+        )
+
+        # The good str entry MUST be in the mem cache
+        assert cache_key_good in client._mem_cache, (
+            "Valid str-valued cache entry was incorrectly dropped from _mem_cache."
+        )
+        assert client._mem_cache[cache_key_good] == "valid description here"
+
+        # A warning must have been logged about the dropped entry
+        warning_messages = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+        warning_text = " ".join(str(m) for m in warning_messages).lower()
+        assert "m-067" in warning_text or "dropped" in warning_text, (
+            f"Expected M-067 warning about dropped cache entry. Got warnings: {warning_messages}"
+        )
+
+        # The LLM must be re-called for the dropped entry (call_count goes from 0 to 1)
+        assert client.call_count == 0, "No LLM calls yet"
+        desc = client.describe_table(shape=(3, 2), sample="| A | B |\n| 1 | 2 |")
+        assert client.call_count == 1, (
+            f"LLM should have been re-called for the dropped int-valued cache entry. "
+            f"call_count={client.call_count}"
+        )
+        assert isinstance(desc, str) and len(desc) > 0, "describe_table must return a non-empty str"
+
+    def test_valid_cache_entry_loaded_no_llm_call(self, tmp_path: pathlib.Path) -> None:
+        """Valid str-valued cache entry → loaded, no LLM call made."""
+        from finecorpus.llm.fake import FakeLLMProvider
+        from finecorpus.llm.operations import ResolvedOpConfig
+        from finecorpus.pipeline.build.llm_client import LLMBuildClient, _cache_key
+
+        fake_llm = FakeLLMProvider()
+        op_cfg = ResolvedOpConfig(
+            provider_id="fake",
+            model_id="fake-llm-v1",
+            temperature=0.0,
+            max_output_tokens=128,
+            max_retries=1,
+        )
+
+        content_hash = "validhash123"
+        segment_path = "sec/table/valid"
+        model_id = op_cfg.model_id
+
+        expected_desc = "A table with revenue data for Q3."
+        cache_key_good = _cache_key(content_hash, segment_path, model_id)
+        hand_written_cache = {cache_key_good: expected_desc}
+
+        cache_path = tmp_path / "llm_cache.json"
+        cache_path.write_text(__import__("json").dumps(hand_written_cache), encoding="utf-8")
+
+        client = LLMBuildClient(
+            provider=fake_llm,
+            op_config=op_cfg,
+            run_dir=tmp_path,
+            content_hash=content_hash,
+            segment_path=segment_path,
+        )
+
+        # Valid entry should be loaded — no LLM call needed
+        assert cache_key_good in client._mem_cache
+        desc = client.describe_table(shape=(2, 3), sample="sample")
+        assert client.call_count == 0, "Valid cache hit should require no LLM call"
+        assert desc == expected_desc
