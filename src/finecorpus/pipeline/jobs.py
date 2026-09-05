@@ -273,6 +273,17 @@ class JobRunner:
         )
         build_result_dict = build.run(input_data=ingestion_config, store=store)
 
+        # Structural guard: queue-mode NEVER legitimately produces a skeleton result.
+        # skeleton=True means the Build stage fell back to Phase 0 behaviour because
+        # no real provider/adapter was injected.  Allowing a skeleton result to
+        # complete the job silently would mask provider construction bugs (RULING 1c).
+        if isinstance(build_result_dict, dict) and build_result_dict.get("skeleton") is True:
+            raise RuntimeError(
+                "Build stage returned skeleton=True (no-op result) in queue mode. "
+                "This indicates the embedding provider or index adapter was not injected. "
+                "Check _build_runner construction — provider and adapter are required."
+            )
+
         # Extract actual costs from token_accounting
         token_accounting: dict[str, int] = {}
         if isinstance(build_result_dict, dict):
@@ -294,7 +305,13 @@ class JobRunner:
         prior = Decimal(str(job.cost_accrued_usd or 0))
         job.cost_accrued_usd = prior + Decimal(str(actual_cost))
 
-        # Checkpoint and heartbeat
+        # Checkpoint and heartbeat.
+        # NOTE (same-object-reference assumption): we read job.checkpoint directly
+        # from the in-memory JobRecord object.  This is safe because the worker
+        # uses a single Session per job execution, so the ORM object is the same
+        # instance that received each prior checkpoint() call.  In a hypothetical
+        # session-per-stage architecture a DB re-read via self._queue.get(job.job_id)
+        # would be necessary here to pick up checkpoint data written by prior stages.
         checkpoint_data = job.checkpoint or {}
         stages_completed = list(checkpoint_data.get("stages_completed", []))
         stages_completed.append("build")

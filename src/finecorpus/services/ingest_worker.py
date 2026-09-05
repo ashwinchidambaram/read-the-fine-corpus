@@ -125,24 +125,18 @@ def _build_runner(
     except AttributeError:
         pass
 
-    # Attempt to resolve embedding provider from config
-    embedding_provider = None
-    index_adapter = None
-    try:
-        from finecorpus.embedding.factory import build_embedding_provider_from_config
+    # Resolve embedding provider and index adapter from config.
+    # Both are REQUIRED for queue-mode execution.  Any construction failure is
+    # re-raised here so the caller (_run_one_job_isolated) marks the job failed
+    # with a diagnostic error_msg — silent swallowing is intentionally removed.
+    from finecorpus.embedding.registry import build_provider_from_config
+    from finecorpus.index.qdrant import QdrantAdapter
 
-        embedding_provider = build_embedding_provider_from_config(config)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("ingest-worker: could not build embedding provider: %s", exc)
+    embedding_provider = build_provider_from_config(config)
 
-    try:
-        from finecorpus.index.qdrant import QdrantAdapter
-
-        qdrant_url = config.storage.qdrant.url
-        qdrant_api_key = config.storage.qdrant.api_key
-        index_adapter = QdrantAdapter(url=qdrant_url, api_key=qdrant_api_key)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("ingest-worker: could not build index adapter: %s", exc)
+    qdrant_url = config.storage.qdrant.url
+    qdrant_api_key = config.storage.qdrant.api_key
+    index_adapter = QdrantAdapter(url=qdrant_url, api_key=qdrant_api_key)
 
     worker_id = os.environ.get("RTFC_WORKER_ID", "ingest-worker")
 
@@ -278,7 +272,30 @@ def run() -> None:
                         job.job_type,
                         job.kb_id,
                     )
-                    runner = _build_runner(session, queue_repo, config)
+                    try:
+                        runner = _build_runner(session, queue_repo, config)
+                    except Exception as build_exc:  # noqa: BLE001
+                        # Provider/adapter construction failure → fail the job
+                        # immediately with a descriptive error so it is not lost
+                        # silently.  The worker loop itself continues.
+                        error_msg = f"{type(build_exc).__name__}: {build_exc}"
+                        logger.error(
+                            "ingest-worker: job %s failed — could not build runner: %s",
+                            job.job_id,
+                            error_msg,
+                            exc_info=True,
+                        )
+                        try:
+                            queue_repo.start(job.job_id)
+                            queue_repo.fail(job.job_id, error_msg=error_msg)
+                            session.commit()
+                        except Exception as mark_exc:  # noqa: BLE001
+                            logger.error(
+                                "ingest-worker: could not mark job %s failed: %s",
+                                job.job_id,
+                                mark_exc,
+                            )
+                        continue
                     _run_one_job_isolated(job, runner)
                     # Don't sleep if we found a job — drain the queue
                     continue

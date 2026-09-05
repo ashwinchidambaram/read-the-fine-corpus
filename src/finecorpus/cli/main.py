@@ -186,8 +186,12 @@ def _requires_confirmation(cost_estimate: Any, args: argparse.Namespace) -> bool
     from config (§16).  If the estimate is above the threshold, confirmation is
     required regardless of whether a control-plane DSN is configured.
 
+    Note: this function does NOT check the ``--yes`` flag itself.  The caller
+    (``_cmd_pipeline_run``) is responsible for gating the call with
+    ``if not getattr(args, "yes", False)``.  This function returns a policy
+    decision based solely on the cost estimate and the threshold config.
+
     Policy:
-      - --yes flag always skips confirmation.
       - CostEstimateUnavailable (declared non-local, unavailable) → always confirm.
       - Estimate above ingestion_confirmation_threshold_usd → confirm.
       - Estimate below threshold → skip (proceed without prompt).
