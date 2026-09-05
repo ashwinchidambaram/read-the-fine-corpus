@@ -186,3 +186,101 @@ print(r.raw_json)
         )
 
         assert result1.stdout.strip() == result2.stdout.strip()
+
+
+# ---------------------------------------------------------------------------
+# RULING 6: Pricing staleness warning
+# ---------------------------------------------------------------------------
+
+
+class TestPricingStalenessWarning:
+    """estimate_cost emits a warning when pricing_as_of is >90 days stale.
+
+    Date comparisons are pinned via patch to keep tests deterministic
+    (no nondeterministic time in assertions per repo discipline).
+    """
+
+    def test_stale_pricing_emits_warning(self) -> None:
+        """RULING 6: When pricing_as_of is >90 days ago, a warning is logged."""
+        import datetime
+        from unittest.mock import patch
+
+        from finecorpus.llm.openai_provider import OpenAILLMProvider
+
+        stale_date = "2020-01-01"  # definitely >90 days before any real run date
+        pinned_today = datetime.date(2026, 9, 4)
+
+        provider = OpenAILLMProvider(
+            api_key="sk-test-not-real",
+            model_id="gpt-4o-mini",
+            pricing_as_of=stale_date,
+            _openai_client=object(),  # dummy — estimate_cost makes no network calls
+        )
+
+        # Patch datetime.date.today in the module under test so the date comparison
+        # is deterministic regardless of when this test runs.
+        with patch("finecorpus.llm.openai_provider.datetime") as mock_dt:
+            mock_dt.date.today.return_value = pinned_today
+            mock_dt.date.fromisoformat.side_effect = datetime.date.fromisoformat
+
+            with patch("finecorpus.llm.openai_provider.logger") as mock_logger:
+                provider.estimate_cost([{"system": "s", "user": "u"}])
+                assert mock_logger.warning.called
+                call_str = str(mock_logger.warning.call_args)
+                assert "stale" in call_str.lower() or "pricing_as_of" in call_str
+
+    def test_fresh_pricing_does_not_emit_warning(self) -> None:
+        """RULING 6: When pricing_as_of is <=90 days ago, no staleness warning."""
+        import datetime
+        from unittest.mock import patch
+
+        from finecorpus.llm.openai_provider import OpenAILLMProvider
+
+        pinned_today = datetime.date(2026, 9, 4)
+        fresh_date = (pinned_today - datetime.timedelta(days=89)).isoformat()
+
+        provider = OpenAILLMProvider(
+            api_key="sk-test-not-real",
+            model_id="gpt-4o-mini",
+            pricing_as_of=fresh_date,
+            _openai_client=object(),
+        )
+
+        with patch("finecorpus.llm.openai_provider.datetime") as mock_dt:
+            mock_dt.date.today.return_value = pinned_today
+            mock_dt.date.fromisoformat.side_effect = datetime.date.fromisoformat
+
+            with patch("finecorpus.llm.openai_provider.logger") as mock_logger:
+                provider.estimate_cost([{"system": "s", "user": "u"}])
+                stale_calls = [
+                    c for c in mock_logger.warning.call_args_list if "stale" in str(c).lower()
+                ]
+                assert len(stale_calls) == 0
+
+    def test_pricing_exactly_90_days_old_does_not_warn(self) -> None:
+        """RULING 6: Exactly 90 days old is NOT stale (threshold is >90)."""
+        import datetime
+        from unittest.mock import patch
+
+        from finecorpus.llm.openai_provider import OpenAILLMProvider
+
+        pinned_today = datetime.date(2026, 9, 4)
+        boundary_date = (pinned_today - datetime.timedelta(days=90)).isoformat()
+
+        provider = OpenAILLMProvider(
+            api_key="sk-test-not-real",
+            model_id="gpt-4o-mini",
+            pricing_as_of=boundary_date,
+            _openai_client=object(),
+        )
+
+        with patch("finecorpus.llm.openai_provider.datetime") as mock_dt:
+            mock_dt.date.today.return_value = pinned_today
+            mock_dt.date.fromisoformat.side_effect = datetime.date.fromisoformat
+
+            with patch("finecorpus.llm.openai_provider.logger") as mock_logger:
+                provider.estimate_cost([{"system": "s", "user": "u"}])
+                stale_calls = [
+                    c for c in mock_logger.warning.call_args_list if "stale" in str(c).lower()
+                ]
+                assert len(stale_calls) == 0

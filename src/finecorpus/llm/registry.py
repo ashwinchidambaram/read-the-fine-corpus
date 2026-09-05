@@ -29,12 +29,39 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import dataclass
 from typing import Any
 
 from finecorpus.llm.base import LLMProvider
 from finecorpus.llm.operations import ResolvedOpConfig
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Named result type (RULING 4: replaces bare 2-tuple return)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ResolvedProvider:
+    """Named result from ``build_llm_provider_from_config``.
+
+    Using a frozen dataclass instead of a bare 2-tuple prevents element
+    transposition bugs (provider/op_config swapped silently) and makes
+    call-site intent explicit.
+
+    Attributes
+    ----------
+    provider:
+        Constructed ``LLMProvider`` instance ready for ``run_operation`` calls.
+    op_config:
+        Fully-resolved ``ResolvedOpConfig`` for the requested operation.
+    """
+
+    provider: LLMProvider
+    op_config: ResolvedOpConfig
+
 
 # ---------------------------------------------------------------------------
 # Environment variable names for secrets (§6.1, §14.2)
@@ -169,7 +196,7 @@ def resolve_op_config(config: Any, operation: str) -> ResolvedOpConfig:
 def build_llm_provider_from_config(
     config: Any,
     operation: str,
-) -> tuple[LLMProvider, ResolvedOpConfig]:
+) -> ResolvedProvider:
     """Build an internal LLM provider from *config* for *operation*.
 
     Parameters
@@ -182,9 +209,11 @@ def build_llm_provider_from_config(
 
     Returns
     -------
-    (LLMProvider, ResolvedOpConfig)
-        The constructed provider and the fully-resolved op config for this
-        operation (temperature, max_output_tokens, max_retries).
+    ResolvedProvider
+        Named structure containing the constructed provider and the
+        fully-resolved op config for this operation (temperature,
+        max_output_tokens, max_retries).  Using a named structure instead
+        of a bare 2-tuple prevents element transposition bugs (RULING 4).
 
     Raises
     ------
@@ -217,7 +246,7 @@ def build_llm_provider_from_config(
             f"Expected 'openai' (cloud), 'ollama' (local), or 'fake' (test)."
         )
 
-    return provider, op_config
+    return ResolvedProvider(provider=provider, op_config=op_config)
 
 
 def _build_openai(op_config: ResolvedOpConfig) -> LLMProvider:

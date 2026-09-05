@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import logging
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Any, Literal, TypeVar
 
 from pydantic import BaseModel, Field
 
@@ -178,6 +178,26 @@ class AugmentationOutput(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class QuestionGenSegment(BaseModel):
+    """A single segment passed to the question-generation operation (§4.3).
+
+    Typed replacement for ``dict[str, Any]`` — field names match the segment
+    contract defined in provider-abstraction.md §4.3.  The operation remains
+    a loud Phase-5 stub; this model exists so the interface is fully typed.
+    """
+
+    segment_text: str = Field(description="Raw text of the segment.")
+    segment_type: SegmentType | None = Field(
+        default=None,
+        description="Segment type from the classification operation.",
+    )
+    structural_path: list[str] = Field(
+        default_factory=list,
+        description="Ordered heading breadcrumb (§4.3).",
+    )
+    source_document_id: str = Field(description="Stable document ID for provenance.")
+
+
 class _QuestionItem(BaseModel):
     question_text: str
     question_type: QuestionType
@@ -189,7 +209,7 @@ class _QuestionItem(BaseModel):
 class QuestionGenInput(BaseModel):
     """Input schema for the question generation operation (§4.3)."""
 
-    segments: list[dict[str, Any]]
+    segments: list[QuestionGenSegment]
     class_description: str | None = None
     question_types: list[QuestionType]
     count_per_type: int
@@ -354,7 +374,8 @@ def _run_classification(
         document_context=inp.document_context,
         class_description=inp.class_description,
     )
-    raw_result = _call_with_retry(
+    # _call_with_retry validates exactly once and returns the validated model.
+    output = _call_with_retry(
         provider=provider,
         op_config=op_config,
         system=system,
@@ -362,7 +383,6 @@ def _run_classification(
         schema=ClassificationOutput,
         operation_name="classification",
     )
-    output = ClassificationOutput.model_validate_json(raw_result.raw_json)
 
     # §14.1: check reasoning for injection-shaped content; log but never act.
     if check_for_injection_suspicion(output.reasoning):
@@ -393,7 +413,8 @@ def _run_augmentation(
         class_description=inp.class_description,
         content_type=inp.content_type.value,
     )
-    raw_result = _call_with_retry(
+    # _call_with_retry validates exactly once and returns the validated model.
+    output = _call_with_retry(
         provider=provider,
         op_config=op_config,
         system=system,
@@ -401,7 +422,6 @@ def _run_augmentation(
         schema=AugmentationOutput,
         operation_name="augmentation",
     )
-    output = AugmentationOutput.model_validate_json(raw_result.raw_json)
 
     # §14.1: check free-text fields for injection suspicion; log only.
     for field_name, field_val in [
@@ -427,15 +447,22 @@ def _run_augmentation(
 # ---------------------------------------------------------------------------
 
 
-def _call_with_retry(
+_M = TypeVar("_M", bound=BaseModel)  # noqa: PYI018
+
+
+def _call_with_retry(  # noqa: UP047
     provider: LLMProvider,
     op_config: ResolvedOpConfig,
     system: str,
     user: str,
-    schema: type[BaseModel],
+    schema: type[_M],
     operation_name: str,
-) -> Any:
-    """Call provider.generate_json with bounded retry on schema-validation failure.
+) -> _M:
+    """Call provider.generate_json with bounded retry, returning the validated model.
+
+    Validation happens exactly once per successful call — here, inside this
+    function.  The validated model instance is returned directly to callers;
+    callers MUST NOT re-validate (RULING 3).
 
     Schema-validation failure is treated as a provider error (§4.3): "a response
     that does not conform to the output schema is treated as a provider error;
@@ -455,9 +482,9 @@ def _call_with_retry(
                 temperature=op_config.temperature,
                 max_output_tokens=op_config.max_output_tokens,
             )
-            # Validate schema — failure counts as provider error per §4.3.
+            # Validate schema exactly once — failure counts as provider error per §4.3.
             try:
-                schema.model_validate_json(result.raw_json)
+                validated = schema.model_validate_json(result.raw_json)
             except Exception as validation_err:
                 logger.warning(
                     "LLM output schema-validation failure on attempt %d/%d "
@@ -478,7 +505,7 @@ def _call_with_retry(
                 )
                 continue  # retry
 
-            return result
+            return validated
 
         except (LLMProviderError, LLMProviderUnavailableError) as exc:
             last_error = exc

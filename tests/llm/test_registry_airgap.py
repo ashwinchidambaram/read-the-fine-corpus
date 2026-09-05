@@ -22,6 +22,7 @@ from finecorpus.config.models import (
 )
 from finecorpus.llm.operations import ResolvedOpConfig
 from finecorpus.llm.registry import (
+    ResolvedProvider,
     _get_openai_api_key,
     build_llm_provider_from_config,
     resolve_op_config,
@@ -101,13 +102,15 @@ class TestAirgapEnforcement:
 
     def test_airgap_allows_fake_provider(self) -> None:
         config = _make_config(provider="fake", model="fake-llm-v1", airgap=True)
-        provider, op_config = build_llm_provider_from_config(config, "augmentation")
-        assert provider.capabilities.is_local is True
+        resolved = build_llm_provider_from_config(config, "augmentation")
+        assert isinstance(resolved, ResolvedProvider)
+        assert resolved.provider.capabilities.is_local is True
 
     def test_airgap_allows_ollama_provider(self) -> None:
         config = _make_config(provider="ollama", model="llama3.1", airgap=True)
-        provider, op_config = build_llm_provider_from_config(config, "augmentation")
-        assert provider.capabilities.is_local is True
+        resolved = build_llm_provider_from_config(config, "augmentation")
+        assert isinstance(resolved, ResolvedProvider)
+        assert resolved.provider.capabilities.is_local is True
 
     def test_no_airgap_openai_blocked_when_no_key(self) -> None:
         """Without airgap but also without API key → clear actionable error."""
@@ -272,3 +275,134 @@ class TestSecretSafety:
         repr_str = repr(provider)
         assert "sk-" not in repr_str
         assert "api_key" not in repr_str.lower()
+
+    def test_exception_chain_contains_no_secret_material_non_retryable(self) -> None:
+        """RULING 1 (F1): LLMProviderError raised for non-retryable status must have
+        no secret material anywhere in __context__/__cause__ chain, at any depth.
+
+        This test exercises the non-retryable path in _backoff.llm_retry_with_backoff:
+        the inner _LLMRetryableException (which carried the original provider exc that
+        may contain auth data in its __context__) must not be reachable from the
+        LLMProviderError that is raised to callers.
+        """
+        from finecorpus.llm._backoff import (
+            LLMBackoffConfig,
+            _LLMRetryableException,
+            llm_retry_with_backoff,
+        )
+        from finecorpus.llm.base import LLMProviderError
+
+        SECRET = "sk-SUPERSECRET-API-KEY-abc123"
+
+        def _call_that_leaks():
+            # Simulate what OpenAI provider does: catch a raw exc that contains
+            # the secret (e.g. HTTP 401 response body or headers), build a
+            # _LLMRetryableException with a safe message, but the raw exc is
+            # attached as __context__ before raise ... from None.
+            raw_provider_exc = RuntimeError(SECRET)
+            try:
+                raise raw_provider_exc
+            except RuntimeError:
+                retryable = _LLMRetryableException(
+                    "HTTP 401 (redacted)",
+                    http_status=401,
+                    retry_after_seconds=None,
+                )
+                retryable.__context__ = None  # attempted clearance (pre-fix pattern)
+                raise retryable from None
+
+        # 401 is NOT in the retryable set → non-retryable path → LLMProviderError
+        retryable_codes: frozenset[int] = frozenset({429, 500, 502, 503, 504})
+        raised: LLMProviderError | None = None
+        try:
+            llm_retry_with_backoff(
+                operation="test_op",
+                provider_id="openai",
+                model_id="gpt-4o-mini",
+                call=_call_that_leaks,
+                config=LLMBackoffConfig(max_attempts=1),
+                retryable_status_codes=retryable_codes,
+                sleep_fn=lambda _: None,
+            )
+        except LLMProviderError as exc:
+            raised = exc
+
+        assert raised is not None, "Expected LLMProviderError to be raised"
+
+        # Walk the FULL __context__ / __cause__ chain recursively
+        def _walk_chain(exc, visited=None):
+            if visited is None:
+                visited = set()
+            if exc is None or id(exc) in visited:
+                return
+            visited.add(id(exc))
+            yield exc
+            yield from _walk_chain(exc.__context__, visited)
+            yield from _walk_chain(exc.__cause__, visited)
+
+        for chained_exc in _walk_chain(raised):
+            for representation in (str(chained_exc), repr(chained_exc)):
+                assert SECRET not in representation, (
+                    f"Secret found in {type(chained_exc).__name__} chain: {representation!r}"
+                )
+
+    def test_exception_chain_contains_no_secret_material_exhausted(self) -> None:
+        """RULING 1 (F1): LLMProviderUnavailableError raised after retries exhausted
+        must have no secret material anywhere in __context__/__cause__ chain.
+
+        This test exercises the exhausted-retries path.
+        """
+        from finecorpus.llm._backoff import (
+            LLMBackoffConfig,
+            _LLMRetryableException,
+            llm_retry_with_backoff,
+        )
+        from finecorpus.llm.base import LLMProviderUnavailableError
+
+        SECRET = "sk-SUPERSECRET-API-KEY-xyz789"
+
+        def _call_that_leaks():
+            raw_provider_exc = RuntimeError(SECRET)
+            try:
+                raise raw_provider_exc
+            except RuntimeError:
+                retryable = _LLMRetryableException(
+                    "HTTP 503 (redacted)",
+                    http_status=503,
+                    retry_after_seconds=None,
+                )
+                retryable.__context__ = None
+                raise retryable from None
+
+        retryable_codes: frozenset[int] = frozenset({503})
+        raised: LLMProviderUnavailableError | None = None
+        try:
+            llm_retry_with_backoff(
+                operation="test_op",
+                provider_id="openai",
+                model_id="gpt-4o-mini",
+                call=_call_that_leaks,
+                config=LLMBackoffConfig(max_attempts=2),
+                retryable_status_codes=retryable_codes,
+                sleep_fn=lambda _: None,
+            )
+        except LLMProviderUnavailableError as exc:
+            raised = exc
+
+        assert raised is not None, "Expected LLMProviderUnavailableError to be raised"
+
+        def _walk_chain(exc, visited=None):
+            if visited is None:
+                visited = set()
+            if exc is None or id(exc) in visited:
+                return
+            visited.add(id(exc))
+            yield exc
+            yield from _walk_chain(exc.__context__, visited)
+            yield from _walk_chain(exc.__cause__, visited)
+
+        for chained_exc in _walk_chain(raised):
+            for representation in (str(chained_exc), repr(chained_exc)):
+                assert SECRET not in representation, (
+                    f"Secret found in {type(chained_exc).__name__} chain: {representation!r}"
+                )

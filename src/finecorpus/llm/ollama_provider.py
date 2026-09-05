@@ -180,6 +180,12 @@ class OllamaLLMProvider(LLMProvider):
         """Internal: call Ollama /api/chat with backoff retry."""
 
         def _attempt() -> LLMRawResult:
+            # Sentinel pattern: collect error info inside the except block, then
+            # raise OUTSIDE it so Python does not re-attach the original httpx
+            # exception (which may contain the URL including any auth token) as
+            # __context__ on the _LLMRetryableException (§6.2, §14.2).
+            _conn_err_type: str | None = None
+
             try:
                 payload: dict[str, Any] = {
                     "model": self._model_id,
@@ -196,13 +202,15 @@ class OllamaLLMProvider(LLMProvider):
                 }
                 resp = self._http.post("/api/chat", json=payload)
             except (httpx.ConnectError, httpx.TimeoutException) as exc:
-                err = _LLMRetryableException(
-                    f"Ollama connection error during generate_json (type={type(exc).__name__}).",
+                _conn_err_type = type(exc).__name__
+
+            # Raise OUTSIDE the except block — exception chain is clean.
+            if _conn_err_type is not None:
+                raise _LLMRetryableException(
+                    f"Ollama connection error during generate_json (type={_conn_err_type}).",
                     http_status=503,
                     retry_after_seconds=None,
                 )
-                err.__context__ = None  # sever chain — exc may contain URL with auth
-                raise err from None
 
             if resp.status_code != 200:
                 retry_after = parse_retry_after(resp.headers.get("Retry-After"))

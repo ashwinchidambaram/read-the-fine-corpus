@@ -21,6 +21,7 @@ Design
 
 from __future__ import annotations
 
+import datetime
 import logging
 import os
 import time
@@ -207,6 +208,13 @@ class OpenAILLMProvider(LLMProvider):
         """Internal: call OpenAI with backoff retry."""
 
         def _attempt() -> LLMRawResult:
+            # Sentinel pattern: collect error info inside the except block, then
+            # raise OUTSIDE it so Python does not re-attach the original OpenAI
+            # exception (which may contain auth headers/body) as __context__ on
+            # the _LLMRetryableException raised to the retry loop (§6.2, §14.2).
+            _err_status: int | None = None
+            _err_retry_after: float | None = None
+
             try:
                 resp = self._client.chat.completions.create(  # type: ignore[attr-defined]
                     model=self._model_id,
@@ -219,17 +227,18 @@ class OpenAILLMProvider(LLMProvider):
                     max_tokens=max_output_tokens,
                 )
             except Exception as exc:
-                status, retry_after = _classify_openai_error(exc)
-                err = _LLMRetryableException(
-                    f"OpenAI API error HTTP {status} (redacted for secret safety).",
-                    http_status=status,
-                    retry_after_seconds=retry_after,
-                )
-                err.__context__ = None  # sever chain — exc may contain auth data
-                raise err from None
+                _err_status, _err_retry_after = _classify_openai_error(exc)
 
-            raw_json = resp.choices[0].message.content or "{}"
-            usage = resp.usage
+            # Raise OUTSIDE the except block — exception chain is clean.
+            if _err_status is not None:
+                raise _LLMRetryableException(
+                    f"OpenAI API error HTTP {_err_status} (redacted for secret safety).",
+                    http_status=_err_status,
+                    retry_after_seconds=_err_retry_after,
+                )
+
+            raw_json = resp.choices[0].message.content or "{}"  # type: ignore[possibly-undefined]
+            usage = resp.usage  # type: ignore[possibly-undefined]
             input_tokens = usage.prompt_tokens if usage else 0
             output_tokens = usage.completion_tokens if usage else 0
 
@@ -291,7 +300,13 @@ class OpenAILLMProvider(LLMProvider):
             )
 
     def estimate_cost(self, requests: list[dict[str, Any]]) -> LLMCostEstimate:
-        """Estimate cost using chars/4 token approximation."""
+        """Estimate cost using chars/4 token approximation.
+
+        Emits a logged warning when ``pricing_as_of`` is more than 90 days
+        older than the current date (provider-abstraction.md §4.2).
+        """
+        self._warn_if_pricing_stale()
+
         total_input_chars = sum(len(r.get("system", "")) + len(r.get("user", "")) for r in requests)
         input_tokens = max(0, total_input_chars // _CHARS_PER_TOKEN_APPROX)
         output_tokens = input_tokens // 4  # rough estimate
@@ -313,6 +328,37 @@ class OpenAILLMProvider(LLMProvider):
             ),
             is_exact=False,
         )
+
+    def _warn_if_pricing_stale(self) -> None:
+        """Emit a warning log if pricing_as_of is more than 90 days in the past.
+
+        Uses ``datetime.date.today()`` for the current date (can be patched in
+        tests via ``unittest.mock.patch``).  No network calls are made.
+        """
+        if not self._pricing_as_of:
+            return
+        try:
+            pricing_date = datetime.date.fromisoformat(self._pricing_as_of)
+        except ValueError:
+            logger.warning(
+                "OpenAILLMProvider: could not parse pricing_as_of=%r as ISO-8601 date; "
+                "staleness check skipped.",
+                self._pricing_as_of,
+            )
+            return
+
+        today = datetime.date.today()
+        age_days = (today - pricing_date).days
+        if age_days > 90:
+            logger.warning(
+                "OpenAILLMProvider: pricing data for model '%s' may be stale — "
+                "pricing_as_of=%s is %d days old (>90 days threshold). "
+                "Verify current pricing at https://openai.com/api/pricing and update "
+                "_DEFAULT_PRICING_AS_OF in openai_provider.py.",
+                self._model_id,
+                self._pricing_as_of,
+                age_days,
+            )
 
 
 # ---------------------------------------------------------------------------

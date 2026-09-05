@@ -118,20 +118,41 @@ def llm_retry_with_backoff[T](  # noqa: UP047
     last_retry_after: float | None = None
 
     for attempt in range(cfg.max_attempts):
+        # Sentinel variables: collect state from the except block, then act
+        # OUTSIDE it.  This severs the exception chain so that the original
+        # provider exception (which may carry auth data in str/repr) is not
+        # reachable via __context__/__cause__ on any error raised to callers.
+        _non_retryable_status: int | None = None
+        _retryable_status: int | None = None
+        _retryable_retry_after: float | None = None
+
         try:
             return call()  # type: ignore[return-value]
         except _LLMRetryableException as exc:
             if exc.http_status not in retryable_status_codes:
-                raise LLMProviderError(
-                    f"Provider '{provider_id}' model '{model_id}' returned "
-                    f"non-retryable HTTP {exc.http_status} during '{operation}' "
-                    f"(redacted for secret safety).",
-                    provider_id=provider_id,
-                    model_id=model_id,
-                ) from None
+                # Non-retryable: record status, exit the except block, then raise.
+                _non_retryable_status = exc.http_status
+            else:
+                # Retryable: record state for delay calculation outside the block.
+                _retryable_status = exc.http_status
+                _retryable_retry_after = exc.retry_after_seconds
 
-            last_status = exc.http_status
-            last_retry_after = exc.retry_after_seconds
+        # ── Non-retryable path ──────────────────────────────────────────────
+        # Raised OUTSIDE the except block so Python does NOT attach the captured
+        # _LLMRetryableException as __context__ on the new LLMProviderError.
+        if _non_retryable_status is not None:
+            raise LLMProviderError(
+                f"Provider '{provider_id}' model '{model_id}' returned "
+                f"non-retryable HTTP {_non_retryable_status} during '{operation}' "
+                f"(redacted for secret safety).",
+                provider_id=provider_id,
+                model_id=model_id,
+            )
+
+        # ── Retryable path ──────────────────────────────────────────────────
+        if _retryable_status is not None:
+            last_status = _retryable_status
+            last_retry_after = _retryable_retry_after
 
             if attempt + 1 >= cfg.max_attempts:
                 break
@@ -139,7 +160,7 @@ def llm_retry_with_backoff[T](  # noqa: UP047
             cap = min(cfg.cap_delay_seconds, cfg.base_delay_seconds * (2**attempt))
             jitter_delay = random.uniform(0, cap)
 
-            retry_after = exc.retry_after_seconds or 0.0
+            retry_after = _retryable_retry_after or 0.0
             if retry_after > cfg.cap_delay_seconds:
                 logger.warning(
                     "LLM provider '%s' model '%s': Retry-After %.1fs exceeds "
@@ -162,7 +183,7 @@ def llm_retry_with_backoff[T](  # noqa: UP047
                 attempt + 1,
                 cfg.max_attempts,
                 operation,
-                exc.http_status,
+                _retryable_status,
                 delay,
             )
             _sleep(delay)
