@@ -17,8 +17,6 @@ Phase 2+ replaces _produce with real per-class planning.
 
 from __future__ import annotations
 
-import hashlib
-import json
 from datetime import UTC, datetime
 from typing import Any
 
@@ -46,10 +44,12 @@ from finecorpus.contracts.shared.blocks import (
     SegmentType,
     TenancyBlock,
 )
-from finecorpus.contracts.versions import SUPPORTED_SEGMENT_SET_BATCH
+from finecorpus.contracts.versions import (
+    INGESTION_CONFIG_SCHEMA_VERSION,
+    SUPPORTED_SEGMENT_SET_BATCH,
+)
+from finecorpus.pipeline.plan.config_version import derive_config_version
 from finecorpus.pipeline.stage import Stage
-
-_INGESTION_CONFIG_SCHEMA_VERSION = "1.1.0"
 
 # Fixed naive baseline reference (§9.3).
 _NAIVE_BASELINE = NaiveBaselineRef(
@@ -102,18 +102,6 @@ def _make_default_embedding() -> EmbeddingConfig:
     )
 
 
-def _derive_config_version(default_rule: ClassRule, embedding: EmbeddingConfig) -> str:
-    """Derive a deterministic config_version from build-affecting fields (§10.5)."""
-    # Serialize only the build-affecting fields (not retrieval-time-only fields).
-    build_affecting = {
-        "default_rule_chunking": default_rule.chunking.model_dump(mode="json"),
-        "default_rule_transformation": default_rule.transformation.model_dump(mode="json"),
-        "embedding": embedding.model_dump(mode="json"),
-    }
-    canonical = json.dumps(build_affecting, sort_keys=True)
-    return hashlib.sha256(canonical.encode()).hexdigest()
-
-
 class PlanStage(Stage):
     """Stage 4 — Plan (skeleton; D-26: now version-checks SegmentSetBatch).
 
@@ -162,10 +150,52 @@ class PlanStage(Stage):
 
         default_rule = _make_default_rule()
         embedding = _make_default_embedding()
-        config_version = _derive_config_version(default_rule, embedding)
+
+        # Build a partial config first to pass to derive_config_version.
+        # config_version is derived from the build-affecting fields (§10.5).
+        partial_config = IngestionConfig(
+            schema_version=INGESTION_CONFIG_SCHEMA_VERSION,
+            tenancy=tenancy,
+            config_version="0" * 64,  # placeholder; will be replaced below
+            created_at=self._run_started_at,
+            naive_baseline=_NAIVE_BASELINE,
+            class_rules=[],
+            default_rule=default_rule,
+            embedding=embedding,
+            retrieval_defaults=RetrievalTreatment(
+                default_salience_filter=[SalienceTier.primary, SalienceTier.supporting],
+                salience_weights=None,
+                rerank_eligible=False,
+                strategy=RetrievalStrategy.dense,
+                confidence_floor=None,
+            ),
+            language_support=LanguageSupportDecision(
+                detected_languages=[],
+                unsupported_languages=[],
+                decision=LanguageDecision.proceed,
+                cross_lingual_supported=None,
+            ),
+            spreadsheet_triage=[],
+            exclusions_confirmed=[],
+            provenance=[
+                RecommendationProvenance(
+                    target="/default_rule",
+                    basis=RecommendationBasis.heuristic,
+                    sweep_run_id=None,
+                    rationale=(
+                        "Phase 0 skeleton: default rule is a heuristic baseline "
+                        "(recursive_char chunking, dense retrieval). "
+                        "No configuration sweep has run yet."
+                    ),
+                )
+            ],
+            class_descriptions=[],
+            secret_free_attestation=True,
+        )
+        config_version = derive_config_version(partial_config)
 
         config = IngestionConfig(
-            schema_version=_INGESTION_CONFIG_SCHEMA_VERSION,
+            schema_version=INGESTION_CONFIG_SCHEMA_VERSION,
             tenancy=tenancy,
             config_version=config_version,
             created_at=self._run_started_at,
@@ -200,6 +230,7 @@ class PlanStage(Stage):
                     ),
                 )
             ],
+            class_descriptions=[],
             secret_free_attestation=True,
         )
         return config.model_dump(mode="json")

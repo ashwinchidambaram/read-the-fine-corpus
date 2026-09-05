@@ -124,7 +124,19 @@ History:
 SUPPORTED_SEGMENT_SET_BATCH = SpecRange(major=1, min_minor=0)
 """Decompose → Plan batch envelope (D-26: promoted to official contract)."""
 SUPPORTED_INGESTION_CONFIG = SpecRange(major=1, min_minor=1)
-"""Ingestion-config consumer range — bumped to 1.1 with addition of ChunkingConfig.tokenizer."""
+"""Ingestion-config consumer range.
+
+History:
+- 1.1: added ChunkingConfig.tokenizer.
+- 1.2: added ClassDescription/class_descriptions, M-032/M-033/M-034 flag fields,
+  extra="forbid" on all models, Tier-3 structural validators (M-031/M-035),
+  to_canonical_json(), and config_version derivation module.
+  SpecRange stays at min_minor=1 (MINOR: backward-compatible addition); consumers
+  built for 1.1.0+ accept 1.2.0.
+"""
+
+INGESTION_CONFIG_SCHEMA_VERSION = "1.2.0"
+"""Producer stamp for IngestionConfig. Bump here when the contract MINOR/MAJOR changes."""
 SUPPORTED_CHUNK = SpecRange(major=1, min_minor=0)
 SUPPORTED_EVAL_SET = SpecRange(major=1, min_minor=0)
 SUPPORTED_RETRIEVAL_RESPONSE = SpecRange(major=1, min_minor=1)
@@ -156,6 +168,7 @@ __all__ = [
     "SUPPORTED_SEGMENT_SET",
     "SUPPORTED_SEGMENT_SET_BATCH",
     "SUPPORTED_INGESTION_CONFIG",
+    "INGESTION_CONFIG_SCHEMA_VERSION",
     "SUPPORTED_CHUNK",
     "SUPPORTED_EVAL_SET",
     "SUPPORTED_RETRIEVAL_RESPONSE",

@@ -1,5 +1,11 @@
 # Contract 4 — Ingestion config
 
+**Schema version:** `1.2.0` (MINOR bump over 1.1.0 — backward-compatible; consumer range stays at
+`>=1.1`). Changes in 1.2.0: `ClassDescription` model + `class_descriptions` field (M-005/M-026);
+M-031/M-035 Tier-3 structural validators; M-032/M-033/M-034 flag fields; `extra="forbid"` on all
+submodels (M-071 secret-free by construction); `to_canonical_json()` canonicalization helper;
+`config_version` derivation moved to `pipeline.plan.config_version`.
+
 Stage boundary: **Plan → Build**. Governing spec: §6.4, §12 (Ingestion config invariants),
 §14.2 (secrets), §6.4 (recommendation provenance), §10.5 (config version in chunk identity).
 
@@ -32,6 +38,7 @@ Root model: `IngestionConfig`, one per KB build.
 | `spreadsheet_triage` | `list[SpreadsheetTriage]` | yes (may be empty) | Per-spreadsheet report/database/model classification and disposition (§6.4). Visible and overridable. |
 | `exclusions_confirmed` | `list[ExclusionDecision]` | yes (may be empty) | Confirmed unservable/excluded content, feeding the exclusion report (§7.5). |
 | `provenance` | `list[RecommendationProvenance]` | yes | For each recommendation in this config: heuristic vs sweep-backed, with evidence pointer (§6.4). |
+| `class_descriptions` | `list[ClassDescription]` | yes (may be empty) | Per-class description text for Tier 2 `class_context` augmentation and §4.1 LLM salience classification. Description text is a **build-affecting hashed input** (attack 8, S-R14). Added in 1.2.0. |
 | `secret_free_attestation` | `bool` (const `true`) | yes | Structural guarantee no secrets are present (§14.2); the model forbids secret-bearing fields by construction. |
 
 ## `ClassRule`
@@ -56,8 +63,11 @@ treatment (§6.4). Complete — no field is optional-with-implicit-build-default
 | `tier1_operations` | `list[enum]` | yes | Which Tier 1 ops (`ocr_cleanup`, `table_to_markdown`, `whitespace_repair`, `header_inference`). Explicit — no implicit set. There is **no** `boilerplate_strip` op: boilerplate is handled structurally (a `boilerplate`-typed segment tier-filtered at retrieval), never by removing bytes from another chunk's `text` (R6, C-R1/C-R10). See segment-taxonomy.md boilerplate row. |
 | `tier2_enabled` | `bool` | yes | Contextual augmentation (default on, §7.2). Augmentation goes in separate fields, never merged into chunk text. |
 | `tier2_operations` | `list[enum]` | yes | breadcrumb_augment, table_description, class_context. |
-| `tier3_enabled` | `bool` | yes | Full rewriting (default off, §7.2). Per-class opt-in only. |
-| `tier3_settings` | `Tier3Settings` | no | Required when `tier3_enabled`; carries the opt-in acknowledgement and model ref. Absent when off. |
+| `tier3_enabled` | `bool` | yes | Full rewriting (default off, §7.2). Per-class opt-in only (M-035: `default_rule` **must not** have `tier3_enabled=True` — enforced structurally). |
+| `tier3_settings` | `Tier3Settings` | no | Required when `tier3_enabled` (M-031); carries the opt-in acknowledgement and model ref. Absent when off. Setting `tier3_settings` while `tier3_enabled=False` is a validation error. |
+| `retain_original_ref` | `bool` | no (default `false`) | M-032: whether the original-retained reference is preserved for Tier 3 chunks. Contract field only — behavior Phase 7. |
+| `diff_preview_required` | `bool` | no (default `false`) | M-033: whether a diff preview must be confirmed before accepting Tier 3 output. Contract field only — behavior Phase 7. |
+| `mark_rewritten_chunks` | `bool` | no (default `false`) | M-034: whether rewritten chunks carry a provenance flag in their payload. Contract field only — behavior Phase 7. |
 
 ## `ChunkingConfig`
 
@@ -130,11 +140,32 @@ Carries "why this value" for each recommendation (§6.4, §1.4 principle 2).
 | `sweep_run_id` | `str` | no | The §9.3 sweep that backs it, when `sweep_backed`. |
 | `rationale` | `str` | yes | Plain-language why (the "why" affordance, §3.1). |
 
+## `ClassDescription` (1.2.0)
+
+| Field | Type | Required | Semantics |
+|---|---|---|---|
+| `segment_class` | `enum` (segment type) | yes | The segment class this description covers. |
+| `class_id` | `str` | yes | Stable class identifier (matches the `segment_class` enum value). Included in the `config_version` hash so class-identity changes rotate the version. |
+| `description` | `str` | yes | Human-readable description consumed by Tier 2 `class_context` augmentation and the §4.1 LLM salience classifier. **Build-affecting hashed input** (attack 8, S-R14): editing it changes `embedding_input` and produced vectors → rotates `config_version` → full rebuild required. |
+
 ## `MetadataField`, `Tier3Settings`, `NaiveBaselineRef`
 
 - `MetadataField`: `{name: str, type: enum, filterable: bool, source: enum{provenance, source_metadata, derived}}` — declares extra payload fields; provenance fields are always present regardless.
-- `Tier3Settings`: `{model_ref: str, opt_in_ack: bool (required true), diff_preview_required: bool}` — §7.2 Tier 3 MUSTs. `model_ref` is a name, never a secret.
+- `Tier3Settings`: `{model_ref: str, opt_in_ack: Literal[True], diff_preview_required: bool}` — §7.2 Tier 3 MUSTs. `model_ref` is a name, never a secret. `opt_in_ack` is `Literal[True]` — `False` is structurally rejected by Pydantic.
 - `NaiveBaselineRef`: `{reference_id: str, description: str}` — pins the fixed §9.3 reference config; if it ever changes, prior baselines are marked against the old reference (§9.3).
+
+## Model constraints (1.2.0)
+
+All submodels use `model_config = ConfigDict(extra="forbid")`: unknown keys are rejected on parse (M-071 secret-free by construction — hand-edited files with secret-bearing extra keys are rejected at import time). See `import_config()` in `pipeline.plan.config_io`.
+
+## `config_io` module (1.2.0)
+
+`src/finecorpus/pipeline/plan/config_io.py` provides:
+- `export_config(config, path)` — writes canonical JSON; D-21 runtime denylist secret scan (patterns: `sk-`, `AKIA`, `-----BEGIN`, `Bearer ` + high-entropy heuristic) hard-fails before writing.
+- `import_config(path)` — version-checks via `SUPPORTED_INGESTION_CONFIG`, parses (extra-forbidden), re-derives `config_version` and hard-errors on mismatch (tamper detection, M-015).
+- `diff_configs(a, b)` — structural diff over canonical JSON.
+
+CLI wiring: `corpus config export|import|diff` (thin wrappers, no logic in CLI per C-5).
 
 ---
 
@@ -192,9 +223,12 @@ rebuild (above).
 - **Fully determines Build:** every value Build reads is present; `default_rule` guarantees
   totality so no implicit default is resolved at build time (§12).
 - **Secret-free by construction:** no field holds a credential; providers/models are referenced by
-  name only (§14.2). Verified by the secret-hygiene test (§18.3.10).
+  name only (§14.2). `extra="forbid"` on all models rejects unknown keys on import. D-21 runtime
+  denylist scan in `export_config()` catches injected secrets in free-text fields. Verified by the
+  secret-hygiene test (§18.3.10) and `tests/phase3/test_secret_free_export.py`.
 - **Diffable/re-importable:** canonical JSON serialization; round-trips exactly (§6.4). Phase 3
-  acceptance test asserts round-trip.
+  acceptance test `tests/phase3/test_config_roundtrip.py` asserts byte-identical re-export and
+  tamper detection.
 - **Recommendation provenance:** every recommender-set value has a `RecommendationProvenance`
   entry; heuristic values are labelled `heuristic` (§6.4).
 - **Config version:** `config_version` is derived deterministically from every input that affects
@@ -202,6 +236,10 @@ rebuild (above).
   identity, **and class-description text** — and participates in chunk identity (§10.5). A
   retrieval-treatment-only change (weights/filters) does not alter it; a salience-tier *mapping*
   change is payload-only (metadata-only update path), not a `config_version` bump (R3, attack 8).
+  Derivation is in `pipeline.plan.config_version.derive_config_version()`.
+- **Tier 3 never global (M-035):** `default_rule.transformation.tier3_enabled` must be `False` —
+  enforced by a Pydantic `model_validator` on `IngestionConfig`. Per-class rules in `class_rules`
+  may enable Tier 3 with `opt_in_ack=True` (M-031).
 - One config object, not two pipelines (§3.3): Easy-mode approval and Proficient edits produce the
   same shape.
 - `tenancy` present (Phase 0 MUST).

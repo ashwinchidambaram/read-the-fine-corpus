@@ -117,7 +117,7 @@ class TestAllArtifactsExistAndValidate:
     def test_plan_loads_as_ingestion_config(self, pipeline_run):
         store: ArtifactStore = pipeline_run["store"]
         config = store.load_with_model_validation("plan", IngestionConfig)
-        assert config.schema_version == "1.1.0"
+        assert config.schema_version == "1.2.0"  # bumped in Phase 3 (M-026/M-031/M-071)
         assert config.secret_free_attestation is True
 
     def test_build_loads_as_build_result(self, pipeline_run):

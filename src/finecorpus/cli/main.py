@@ -87,6 +87,94 @@ def _cmd_pipeline_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_config_export(args: argparse.Namespace) -> int:
+    """Wire corpus config export → finecorpus.pipeline.plan.config_io.export_config."""
+    from finecorpus.pipeline.plan.config_io import ConfigExportError, export_config
+    from finecorpus.pipeline.plan.config_io import import_config as _load
+
+    try:
+        # Load the existing config artifact from an artifact store path or direct JSON file.
+        config = _load(Path(args.input))
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: Could not load config — {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        export_config(config, Path(args.output))
+    except ConfigExportError as exc:
+        print(f"ERROR: Export refused — {exc}", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        print(f"ERROR: Could not write — {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Config exported to {args.output}")
+    return 0
+
+
+def _cmd_config_import(args: argparse.Namespace) -> int:
+    """Wire corpus config import → finecorpus.pipeline.plan.config_io.import_config."""
+    from pydantic import ValidationError
+
+    from finecorpus.pipeline.plan.config_io import ConfigImportError, import_config
+
+    try:
+        config = import_config(Path(args.input))
+    except ConfigImportError as exc:
+        print(f"ERROR: Import rejected — {exc}", file=sys.stderr)
+        return 2
+    except ValidationError as exc:
+        print(f"ERROR: Schema validation failed — {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+    print("Config imported successfully.")
+    print(f"  schema_version : {config.schema_version}")
+    print(f"  config_version : {config.config_version}")
+    print(f"  created_at     : {config.created_at}")
+    return 0
+
+
+def _cmd_config_diff(args: argparse.Namespace) -> int:
+    """Wire corpus config diff → finecorpus.pipeline.plan.config_io.diff_configs."""
+    import json as _json
+
+    from finecorpus.pipeline.plan.config_io import ConfigImportError, diff_configs, import_config
+
+    try:
+        config_a = import_config(Path(args.a))
+        config_b = import_config(Path(args.b))
+    except ConfigImportError as exc:
+        print(f"ERROR: Import rejected — {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+
+    result = diff_configs(config_a, config_b)
+
+    if result["same"]:
+        print("Configs are identical.")
+        return 0
+
+    print("Configs differ:")
+    if result["config_version_changed"]:
+        print("  config_version changed (build-affecting difference)")
+    if result["a_only"]:
+        print(f"  Only in A: {result['a_only']}")
+    if result["b_only"]:
+        print(f"  Only in B: {result['b_only']}")
+    if result["changed"]:
+        print("  Changed fields:")
+        for field, diff in result["changed"].items():
+            print(f"    {field}:")
+            print(f"      A: {_json.dumps(diff['a'], separators=(',', ':'))[:120]}")
+            print(f"      B: {_json.dumps(diff['b'], separators=(',', ':'))[:120]}")
+    return 1  # non-zero = configs differ (useful in scripts)
+
+
 def _cmd_report(args: argparse.Namespace) -> int:
     """Wire corpus report → finecorpus.pipeline.report.generate_report."""
     from pathlib import Path
@@ -269,6 +357,59 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Path to corpus.yaml configuration file",
     )
 
+    # --- config subcommand (Phase 3: export/import/diff) ---
+    config_parser = sub.add_parser(
+        "config",
+        help="Ingestion config management — export, import, diff (M-026, M-071)",
+    )
+    config_sub = config_parser.add_subparsers(dest="config_command", metavar="<subcommand>")
+
+    export_parser = config_sub.add_parser(
+        "export",
+        help="Export an IngestionConfig artifact as canonical JSON (secret-scanned, M-071)",
+    )
+    export_parser.add_argument(
+        "--input",
+        required=True,
+        metavar="FILE",
+        help="Path to the source IngestionConfig JSON (e.g. artifact from pipeline run)",
+    )
+    export_parser.add_argument(
+        "--output",
+        required=True,
+        metavar="FILE",
+        help="Destination path for the exported canonical JSON",
+    )
+
+    import_parser = config_sub.add_parser(
+        "import",
+        help=(
+            "Import and validate an IngestionConfig JSON — "
+            "version-checks and re-derives config_version for tamper detection (M-015)"
+        ),
+    )
+    import_parser.add_argument(
+        "--input",
+        required=True,
+        metavar="FILE",
+        help="Path to the IngestionConfig JSON to import",
+    )
+
+    diff_parser = config_sub.add_parser(
+        "diff",
+        help="Show structural differences between two IngestionConfig JSON files",
+    )
+    diff_parser.add_argument(
+        "a",
+        metavar="FILE_A",
+        help="First config file",
+    )
+    diff_parser.add_argument(
+        "b",
+        metavar="FILE_B",
+        help="Second config file",
+    )
+
     # --- report subcommand (Phase 2: findings + exclusion reports) ---
     report_parser = sub.add_parser(
         "report",
@@ -320,6 +461,16 @@ def main() -> None:
             sys.exit(1)
     elif args.command == "preflight":
         sys.exit(_cmd_preflight(args))
+    elif args.command == "config":
+        if args.config_command == "export":
+            sys.exit(_cmd_config_export(args))
+        elif args.config_command == "import":
+            sys.exit(_cmd_config_import(args))
+        elif args.config_command == "diff":
+            sys.exit(_cmd_config_diff(args))
+        else:
+            parser.print_help()
+            sys.exit(1)
     elif args.command == "report":
         sys.exit(_cmd_report(args))
     else:
