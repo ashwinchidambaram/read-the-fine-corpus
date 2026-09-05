@@ -39,8 +39,8 @@ class TombstoneRecord(Base):
     __tablename__ = "tombstone_log"
 
     entry_id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    kb_id: Mapped[str] = mapped_column(String(64), nullable=False, index=False)
-    document_id: Mapped[str] = mapped_column(String(255), nullable=False, index=False)
+    kb_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    document_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     kind: Mapped[str] = mapped_column(String(16), nullable=False)  # 'delete' | 'purge'
     deleted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     reason: Mapped[str] = mapped_column(Text(), nullable=False)

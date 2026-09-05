@@ -65,7 +65,7 @@ class BreakGlassGrantRecord(Base):
     __tablename__ = "break_glass_grants"
 
     grant_id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    target_kb_id: Mapped[str] = mapped_column(String(64), nullable=False, index=False)
+    target_kb_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     granting_admin_id: Mapped[str] = mapped_column(String(255), nullable=False)
     reason: Mapped[str] = mapped_column(Text(), nullable=False)
     granted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

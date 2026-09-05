@@ -29,7 +29,7 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, Integer, Numeric, String, Text, select
+from sqlalchemy import JSON, DateTime, Index, Integer, Numeric, String, Text, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
@@ -90,6 +90,22 @@ class JobRecord(Base):
     """ORM model for the ``job_queue`` table (§6.6)."""
 
     __tablename__ = "job_queue"
+    # Index parity with migration 0002: create_all must emit the same
+    # enforcement Alembic does, or dedupe silently vanishes on the
+    # create_tables() path (PR #30 review finding 1). The dedupe index is
+    # partial (active states only) on both PG and SQLite so completed jobs
+    # never block re-enqueue.
+    __table_args__ = (
+        Index("ix_job_queue_kb_id", "kb_id"),
+        Index(
+            "ix_job_queue_dedupe",
+            "kb_id",
+            "dedupe_key",
+            unique=True,
+            postgresql_where=text("state IN ('queued','claimed','running','paused_budget')"),
+            sqlite_where=text("state IN ('queued','claimed','running','paused_budget')"),
+        ),
+    )
 
     job_id: Mapped[str] = mapped_column(String(32), primary_key=True)
     kb_id: Mapped[str] = mapped_column(String(64), nullable=False, index=False)
@@ -169,6 +185,20 @@ class JobQueueRepository:
         """
         if created_at is None:
             created_at = datetime.now(tz=UTC)
+
+        # App-level dedupe pre-check (works on every backend); the partial
+        # unique index remains the backstop for concurrent racers on PG.
+        if dedupe_key is not None:
+            existing_stmt = (
+                select(JobRecord)
+                .where(JobRecord.kb_id == kb_id)
+                .where(JobRecord.dedupe_key == dedupe_key)
+                .where(JobRecord.state.in_(list(ACTIVE_STATES)))
+                .limit(1)
+            )
+            existing = self._session.execute(existing_stmt).scalar_one_or_none()
+            if existing is not None:
+                return existing
 
         job_id = _new_job_id()
         record = JobRecord(

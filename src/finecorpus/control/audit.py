@@ -61,10 +61,12 @@ class AuditLogRecord(Base):
     entry_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     entry_type: Mapped[str] = mapped_column(String(64), nullable=False)
     actor_id: Mapped[str] = mapped_column(String(255), nullable=False)
-    target_kb_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    target_workspace_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    target_kb_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    target_workspace_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     details: Mapped[Any] = mapped_column(JSON, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
 
     def __repr__(self) -> str:
         return (

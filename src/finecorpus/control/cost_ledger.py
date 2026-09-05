@@ -35,12 +35,14 @@ class CostLedgerRecord(Base):
     __tablename__ = "cost_ledger"
 
     ledger_id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    kb_id: Mapped[str] = mapped_column(String(64), nullable=False, index=False)
-    workspace_id: Mapped[str] = mapped_column(String(64), nullable=False, index=False)
+    kb_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    workspace_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     operation_type: Mapped[str] = mapped_column(String(64), nullable=False)
     cost_usd: Mapped[Any] = mapped_column(Numeric(precision=18, scale=8), nullable=False)
     tokens_consumed: Mapped[int] = mapped_column(Integer(), nullable=False)
-    recorded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
 
     def __repr__(self) -> str:
         return (

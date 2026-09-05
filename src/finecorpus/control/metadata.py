@@ -271,8 +271,15 @@ def _attach_immutability_triggers(engine: Engine) -> None:
             try:
                 conn.execute(ddl)
                 conn.commit()
-            except Exception:
+            except Exception as exc:
                 conn.rollback()
+                # Idempotency: only "already exists" is skippable. Anything
+                # else (e.g. insufficient privileges) would silently drop the
+                # DB-level append-only enforcement — that must surface.
+                if "already exists" in str(exc).lower():
+                    logger.debug("immutability trigger already present: %s", exc)
+                    continue
+                raise
 
 
 # ---------------------------------------------------------------------------

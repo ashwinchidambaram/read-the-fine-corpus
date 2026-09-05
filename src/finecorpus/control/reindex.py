@@ -27,7 +27,7 @@ class ReindexTriggerRecord(Base):
     __tablename__ = "reindex_triggers"
 
     trigger_id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    kb_id: Mapped[str] = mapped_column(String(64), nullable=False, index=False)
+    kb_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     trigger_type: Mapped[str] = mapped_column(String(64), nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean(), nullable=False, default=True)
     cron_expr: Mapped[str | None] = mapped_column(String(128), nullable=True)

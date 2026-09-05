@@ -51,7 +51,15 @@ _LAST_USED_THROTTLE_S: Final[int] = 60  # max one last_used write per key per 60
 
 
 class Role(StrEnum):
-    """RBAC roles for service principals."""
+    """Principal roles.
+
+    Mapping to the spec §2.2 role names:
+    - ``admin``   → Platform Admin (operational control everywhere; content
+      reads only under an active break-glass grant, §2.3)
+    - ``editor``  → KB Editor / Workspace Owner depending on scope_kind
+    - ``viewer``  → KB Viewer
+    - ``service`` → Service Principal (query-only API key, §14.2)
+    """
 
     admin = "admin"
     editor = "editor"
@@ -90,7 +98,7 @@ class ServicePrincipalKeyRecord(Base):
     __tablename__ = "service_principal_keys"
 
     key_id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    key_prefix: Mapped[str] = mapped_column(String(32), nullable=False, index=False)
+    key_prefix: Mapped[str] = mapped_column(String(32), nullable=False, unique=True, index=True)
     key_hash: Mapped[str] = mapped_column(String(64), nullable=False)  # sha256 hex
     principal_name: Mapped[str] = mapped_column(String(255), nullable=False)
     role: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -218,6 +226,11 @@ class ApiKeyRepository:
         Returns:
             Tuple of (plaintext_key, ServicePrincipalKeyRecord).
         """
+        # Runtime validation: type hints do not bind at runtime, and a bogus
+        # role/scope stored now would crash validate() later (PR #30 finding 2).
+        role = Role(role)
+        scope_kind = ScopeKind(scope_kind)
+
         full_key, stored_prefix, key_hash = _generate_raw_key()
         key_id = secrets.token_hex(16)
         now = datetime.now(tz=UTC)
@@ -295,11 +308,19 @@ class ApiKeyRepository:
         # Throttled last_used update
         self._update_last_used(record, now)
 
+        try:
+            role = Role(record.role)
+            scope_kind = ScopeKind(record.scope_kind)
+        except ValueError:
+            # Corrupt stored value must surface as a typed auth failure, not
+            # an unhandled crash (PR #30 finding 2). No key material included.
+            raise AuthError("key record is corrupt (invalid role/scope)") from None
+
         return Principal(
             principal_id=record.key_id,
             name=record.principal_name,
-            role=Role(record.role),
-            scope_kind=ScopeKind(record.scope_kind),
+            role=role,
+            scope_kind=scope_kind,
             workspace_id=record.workspace_id,
             kb_id=record.kb_id,
         )
