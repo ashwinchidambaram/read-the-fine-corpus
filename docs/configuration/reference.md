@@ -173,7 +173,7 @@ These govern the Assess (Stage 2) and Decompose (Stage 3) stages. They are platf
 | `index_lifecycle.scheduled_reindex_cron` | string | — | §10.3 | Default cron expression for scheduled reindex trigger. Per-KB override available via the UI/API. Empty string disables scheduled reindex at platform level. | index-lifecycle.md §7.3 |
 | `index_lifecycle.config_distribution_poll_interval_seconds` | int | `30` **(proposed)** | ADR-0005 | (Aliases `platform.config_distribution_poll_interval_seconds` — same setting.) | ADR-0005 Consequences |
 | `index_lifecycle.break_glass_grant_window_hours` | int | — | §2.3 | Default time-bound window for a Platform Admin break-glass content-read grant. Value is executor-proposed (Open Decision #4). Must be finite. **(pending Open Decision #4)** | spec §2.3, Open Decision #4 |
-| `index_lifecycle.snapshot_retention_period_days` | int | — | §17.1 | Maximum age of a cold snapshot before it is eligible for automatic purge (bounds deleted-content persistence). Value is executor-proposed (Open Decision #5). **(pending Open Decision #5)** | spec §17.1, Open Decision #5 |
+| `index_lifecycle.snapshot_retention_period_days` | int | `90` | §17.1, D-05 | Maximum age of a cold snapshot before it is eligible for automatic purge (bounds deleted-content persistence). **Default 90 days per D-05 ruling.** This is the erasure-SLA bound (M-088): a document deleted (not purged) may remain in cold snapshots up to this many days after deletion. Use `corpus kb purge-doc` for immediate erasure across all copies (M-089). OQ-C-3 closed. | spec §17.1, D-05 |
 
 ### 2.7 Query embedding cache
 

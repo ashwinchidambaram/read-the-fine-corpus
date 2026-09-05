@@ -711,6 +711,205 @@ def _cmd_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_kb_delete_doc(args: argparse.Namespace) -> int:
+    """Wire corpus kb delete-doc → pipeline.deletion.delete_document (purge=False).
+
+    Thin wrapper: deletes the document from the live and N-1 index collections and
+    appends a tombstone + audit record.  Cold snapshots are NOT destroyed; they will
+    age out per snapshot_retention_period_days (M-089: deleted from service).
+    """
+    from finecorpus.pipeline.deletion import DeletionError, delete_document
+
+    # Session and adapter construction is beyond the CLI's scope in Phase 4
+    # (the full wiring lives in the ingest_worker service).  The CLI wrapper
+    # prints an honest error if the required dependencies are absent.
+    try:
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+
+        from finecorpus.config.loader import load_config
+        from finecorpus.index.qdrant.backend import QdrantAdapter
+
+        config_path = getattr(args, "config", None)
+        config = load_config(config_path)
+        engine = create_engine(config.storage.postgres.url or "sqlite:///:memory:")
+        SessionLocal = sessionmaker(bind=engine)
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: Could not initialize control-plane connection — {exc}", file=sys.stderr)
+        print("Ensure POSTGRES_URL is set and Qdrant is reachable.", file=sys.stderr)
+        return 1
+
+    try:
+        adapter = QdrantAdapter(url=config.storage.qdrant.url)
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: Could not connect to Qdrant — {exc}", file=sys.stderr)
+        return 1
+
+    with SessionLocal() as session:
+        try:
+            report = delete_document(
+                kb_id=args.kb_id,
+                document_id=args.doc_id,
+                purge=False,
+                session=session,
+                adapter=adapter,
+                artifacts_root=getattr(args, "artifacts", None),
+                deleted_by=getattr(args, "actor", "cli"),
+            )
+        except DeletionError as exc:
+            print(f"ERROR: Deletion failed — {exc}", file=sys.stderr)
+            return 1
+        except Exception as exc:  # noqa: BLE001
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 1
+
+    print(report.summary)
+    print(f"  tombstone entry_id : {report.tombstone_entry_id}")
+    print(f"  live chunks removed: {report.live_chunks_removed}")
+    print(f"  N-1 chunks removed : {report.n1_chunks_removed}")
+    print(f"  artifacts removed  : {len(report.artifacts_removed)}")
+    return 0
+
+
+def _cmd_kb_purge_doc(args: argparse.Namespace) -> int:
+    """Wire corpus kb purge-doc → pipeline.deletion.delete_document (purge=True).
+
+    Requires --confirm to prevent accidental use.  Destroys all snapshots
+    immediately (D-05).  M-089: purged from all copies.
+    """
+    if not getattr(args, "confirm", False):
+        print(
+            "ERROR: purge requires --confirm. "
+            "M-089: purge destroys ALL copies including cold snapshots IMMEDIATELY.",
+            file=sys.stderr,
+        )
+        print(
+            "Re-run with --confirm to proceed. "
+            "Use 'corpus kb delete-doc' if you only want to remove from service "
+            "(cold snapshots will age out per snapshot_retention_period_days).",
+            file=sys.stderr,
+        )
+        return 2
+
+    from finecorpus.pipeline.deletion import DeletionError, delete_document
+
+    try:
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+
+        from finecorpus.config.loader import load_config
+        from finecorpus.index.qdrant.backend import QdrantAdapter
+
+        config_path = getattr(args, "config", None)
+        config = load_config(config_path)
+        engine = create_engine(config.storage.postgres.url or "sqlite:///:memory:")
+        SessionLocal = sessionmaker(bind=engine)
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: Could not initialize control-plane connection — {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        adapter = QdrantAdapter(url=config.storage.qdrant.url)
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: Could not connect to Qdrant — {exc}", file=sys.stderr)
+        return 1
+
+    with SessionLocal() as session:
+        try:
+            report = delete_document(
+                kb_id=args.kb_id,
+                document_id=args.doc_id,
+                purge=True,
+                session=session,
+                adapter=adapter,
+                artifacts_root=getattr(args, "artifacts", None),
+                deleted_by=getattr(args, "actor", "cli"),
+            )
+        except DeletionError as exc:
+            print(f"ERROR: Purge failed — {exc}", file=sys.stderr)
+            return 1
+        except Exception as exc:  # noqa: BLE001
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 1
+
+    print(report.summary)
+    print(f"  tombstone entry_id     : {report.tombstone_entry_id}")
+    print(f"  live chunks removed    : {report.live_chunks_removed}")
+    print(f"  N-1 chunks removed     : {report.n1_chunks_removed}")
+    print(f"  artifacts removed      : {len(report.artifacts_removed)}")
+    print(f"  snapshots destroyed    : {len(report.snapshots_destroyed)}")
+    if report.snapshots_destroyed:
+        for sid in report.snapshots_destroyed:
+            print(f"    - {sid}")
+    return 0
+
+
+def _cmd_kb_snapshots(args: argparse.Namespace) -> int:
+    """Wire corpus kb snapshots → adapter.list_snapshots for KB collections.
+
+    Lists all snapshots for the KB's live and N-1 collections.
+    """
+    try:
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+
+        from finecorpus.config.loader import load_config
+        from finecorpus.control.metadata import AliasRepository
+        from finecorpus.index.adapter import alias_name
+        from finecorpus.index.qdrant.backend import QdrantAdapter
+
+        config_path = getattr(args, "config", None)
+        config = load_config(config_path)
+        engine = create_engine(config.storage.postgres.url or "sqlite:///:memory:")
+        SessionLocal = sessionmaker(bind=engine)
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: Could not initialize control-plane connection — {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        adapter = QdrantAdapter(url=config.storage.qdrant.url)
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: Could not connect to Qdrant — {exc}", file=sys.stderr)
+        return 1
+
+    als = alias_name(args.kb_id)
+    with SessionLocal() as session:
+        alias_repo = AliasRepository(session)
+        record = alias_repo.get(als)
+
+    if record is None:
+        print(f"No alias record found for kb '{args.kb_id}'.", file=sys.stderr)
+        return 1
+
+    collections: list[str] = []
+    if record.collection_name:
+        collections.append(record.collection_name)
+    if record.previous_collection:
+        collections.append(record.previous_collection)
+
+    if not collections:
+        print(f"KB '{args.kb_id}' has no promoted collections yet.")
+        return 0
+
+    total = 0
+    for coll in collections:
+        try:
+            snaps = adapter.list_snapshots(coll)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  [{coll}] ERROR listing snapshots: {exc}", file=sys.stderr)
+            continue
+        print(f"[{coll}] — {len(snaps)} snapshot(s)")
+        for snap in snaps:
+            created = snap.created_at.isoformat() if snap.created_at else "unknown"
+            print(f"  snapshot_id: {snap.snapshot_id}")
+            print(f"    created_at : {created}")
+            print(f"    location   : {snap.location}")
+        total += len(snaps)
+
+    print(f"\nTotal: {total} snapshot(s) across {len(collections)} collection(s)")
+    return 0
+
+
 def _cmd_report(args: argparse.Namespace) -> int:
     """Wire corpus report → finecorpus.pipeline.report.generate_report."""
     from pathlib import Path
@@ -1307,6 +1506,95 @@ def _build_parser() -> argparse.ArgumentParser:
     cancel_parser = jobs_sub.add_parser("cancel", help="Cancel a queued or paused job")
     cancel_parser.add_argument("job_id", metavar="JOB_ID", help="Job ID")
 
+    # --- kb subcommand (Phase 4: deletion, purge, snapshots) ---
+    # Self-contained additive block to make rebase with jobs sibling trivial.
+    kb_parser = sub.add_parser(
+        "kb",
+        help="Knowledge-base document lifecycle — delete, purge, snapshot list (Phase 4)",
+    )
+    kb_sub = kb_parser.add_subparsers(dest="kb_command", metavar="<subcommand>")
+
+    # corpus kb delete-doc <kb_id> <doc_id>
+    del_doc_parser = kb_sub.add_parser(
+        "delete-doc",
+        help=(
+            "Remove a document from service (live + N-1 collections). "
+            "M-089: 'deleted from service' — cold snapshots age out per "
+            "snapshot_retention_period_days."
+        ),
+    )
+    del_doc_parser.add_argument("kb_id", metavar="KB_ID", help="Knowledge-base identifier")
+    del_doc_parser.add_argument("doc_id", metavar="DOC_ID", help="Document identifier to delete")
+    del_doc_parser.add_argument(
+        "--config",
+        metavar="FILE",
+        default=None,
+        help="Path to corpus.yaml (default: ./corpus.yaml)",
+    )
+    del_doc_parser.add_argument(
+        "--actor",
+        metavar="ACTOR",
+        default="cli",
+        help="Actor performing the deletion (logged in audit trail)",
+    )
+    del_doc_parser.add_argument(
+        "--artifacts",
+        metavar="DIR",
+        default=None,
+        help="Artifacts root for derived-artifact removal (optional)",
+    )
+
+    # corpus kb purge-doc <kb_id> <doc_id> --confirm
+    purge_doc_parser = kb_sub.add_parser(
+        "purge-doc",
+        help=(
+            "Purge a document from ALL copies including cold snapshots (D-05: immediate). "
+            "Requires --confirm. M-089: 'purged from all copies'."
+        ),
+    )
+    purge_doc_parser.add_argument("kb_id", metavar="KB_ID", help="Knowledge-base identifier")
+    purge_doc_parser.add_argument("doc_id", metavar="DOC_ID", help="Document identifier to purge")
+    purge_doc_parser.add_argument(
+        "--confirm",
+        action="store_true",
+        default=False,
+        help=(
+            "REQUIRED. Confirms that you understand this destroys ALL copies "
+            "including cold snapshots immediately (right-to-erasure semantics)."
+        ),
+    )
+    purge_doc_parser.add_argument(
+        "--config",
+        metavar="FILE",
+        default=None,
+        help="Path to corpus.yaml (default: ./corpus.yaml)",
+    )
+    purge_doc_parser.add_argument(
+        "--actor",
+        metavar="ACTOR",
+        default="cli",
+        help="Actor performing the purge (logged in audit trail)",
+    )
+    purge_doc_parser.add_argument(
+        "--artifacts",
+        metavar="DIR",
+        default=None,
+        help="Artifacts root for derived-artifact removal (optional)",
+    )
+
+    # corpus kb snapshots <kb_id>
+    snaps_parser = kb_sub.add_parser(
+        "snapshots",
+        help="List cold snapshots for a knowledge base's collections.",
+    )
+    snaps_parser.add_argument("kb_id", metavar="KB_ID", help="Knowledge-base identifier")
+    snaps_parser.add_argument(
+        "--config",
+        metavar="FILE",
+        default=None,
+        help="Path to corpus.yaml (default: ./corpus.yaml)",
+    )
+
     # --- report subcommand (Phase 2: findings + exclusion reports) ---
     report_parser = sub.add_parser(
         "report",
@@ -1372,6 +1660,16 @@ def main() -> None:
             sys.exit(1)
     elif args.command == "plan":
         sys.exit(_cmd_plan(args))
+    elif args.command == "kb":
+        if args.kb_command == "delete-doc":
+            sys.exit(_cmd_kb_delete_doc(args))
+        elif args.kb_command == "purge-doc":
+            sys.exit(_cmd_kb_purge_doc(args))
+        elif args.kb_command == "snapshots":
+            sys.exit(_cmd_kb_snapshots(args))
+        else:
+            parser.print_help()
+            sys.exit(1)
     elif args.command == "report":
         sys.exit(_cmd_report(args))
     elif args.command == "jobs":

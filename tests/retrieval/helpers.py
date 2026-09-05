@@ -206,7 +206,11 @@ class FakeAdapter:
         return before - len(self.collections[collection]["points"])
 
     def set_collection_metadata(self, collection: str, metadata: dict[str, Any]) -> None:
-        self.collections.setdefault(collection, {}).update({"metadata": metadata})
+        # MERGE into existing metadata (matches QdrantAdapter behaviour — Ruling 5).
+        coll = self.collections.setdefault(collection, {})
+        existing = coll.get("metadata", {})
+        existing.update(metadata)
+        coll["metadata"] = existing
 
     def get_collection_metadata(self, collection: str) -> dict[str, Any]:
         return dict(self.collections.get(collection, {}).get("metadata", {}))
@@ -216,7 +220,12 @@ class FakeAdapter:
 
     def retarget_alias(self, alias: str, new_collection: str) -> None:
         if new_collection not in self.collections:
-            raise CollectionInfo
+            from finecorpus.index.adapter import CollectionNotFoundError
+
+            raise CollectionNotFoundError(
+                f"FakeAdapter: cannot retarget alias '{alias}' — collection "
+                f"'{new_collection}' does not exist."
+            )
         self.aliases[alias] = new_collection
 
     def resolve_alias(self, alias: str) -> str | None:

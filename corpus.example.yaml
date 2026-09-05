@@ -356,9 +356,10 @@ index_lifecycle:
   break_glass_grant_window_hours:
 
   # Maximum age of a cold snapshot before it is eligible for automatic purge.
-  # (§17.1)  PENDING Open Decision #5 (OQ-C-3)
-  # Default: (none — pending Open Decision #5)
-  snapshot_retention_period_days:
+  # (§17.1, D-05)  Default: 90 days.  OQ-C-3 closed by D-05 ruling.
+  # This is the erasure-SLA bound (M-088): deleted documents may persist in cold
+  # snapshots up to this many days. Use purge-doc for immediate erasure (M-089).
+  snapshot_retention_period_days: 90
 
 # ---------------------------------------------------------------------------
 # §2.7 Query embedding cache

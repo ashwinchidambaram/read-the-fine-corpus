@@ -662,12 +662,16 @@ class IndexLifecycleConfig(BaseModel):
             "**(pending Open Decision #4 — OQ-C-2)**"
         ),
     )
-    snapshot_retention_period_days: int | None = Field(
-        default=None,
+    snapshot_retention_period_days: int = Field(
+        default=90,
         description=(
-            "§17.1 — Maximum age of a cold snapshot before it is eligible for "
+            "§17.1, D-05 — Maximum age of a cold snapshot before it is eligible for "
             "automatic purge (bounds deleted-content persistence). "
-            "**(pending Open Decision #5 — OQ-C-3)**"
+            "Default 90 days per D-05 ruling. This value bounds the erasure SLA: "
+            "a document deleted (not purged) may still appear in cold snapshots up to "
+            "this many days after deletion. Use purge=True for immediate erasure. "
+            "M-088: this field is the documented retention bound. "
+            "OQ-C-3 closed by D-05 ruling."
         ),
     )
 
