@@ -1,9 +1,12 @@
-"""Recursive character chunker — Phase 1 naive baseline (§9.3).
+"""Recursive character chunker — Phase 1 naive baseline (§9.3) + code dispatch (M-099).
 
 Implements the **fixed reference configuration** from spec §9.3:
   - Recursive character splitting at 512 tokens with 50-token overlap.
   - A chunk NEVER spans segments — the segment is the routing unit (§7.1).
   - Splitting is deterministic (no randomness, no wall-clock).
+
+Phase 3 addition: ``chunk_segment_dispatch`` dispatches on ``ChunkingStrategy`` and
+routes ``code_syntax`` segments to the syntax-aware code splitter (M-099).
 
 Token counting
 --------------
@@ -40,6 +43,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from finecorpus.contracts.ingestion_config import ChunkingStrategy
+
 # ---------------------------------------------------------------------------
 # Token-count proxy
 # ---------------------------------------------------------------------------
@@ -72,9 +77,14 @@ def _count_tokens(text: str) -> int:
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(frozen=True)
 class ChunkSpan:
     """A single chunk produced from one segment.
+
+    Immutable by design (frozen=True): once constructed, no field may be
+    reassigned.  This enforces the T-04 guarantee that augmentation code
+    cannot accidentally mutate span.text.  Use ``dataclasses.replace(span,
+    field=new_value)`` to create a modified copy.
 
     Attributes:
         text: The exact text of this chunk (a substring of the segment text).
@@ -310,9 +320,72 @@ def chunk_segment(
     return chunks
 
 
+def chunk_segment_dispatch(
+    segment_text: str,
+    strategy: ChunkingStrategy,
+    max_tokens: int = 512,
+    overlap_tokens: int = 50,
+    split_boundaries: list[str] | None = None,
+    language_hint: str = "unknown",
+) -> list[ChunkSpan]:
+    """Route to the appropriate splitter based on ``strategy`` (M-099).
+
+    Dispatches:
+    - ``code_syntax``: routes to ``split_code`` in ``code_splitter.py``.
+      ``language_hint`` selects the boundary-detection heuristic; ``split_boundaries``
+      is accepted but ignored (boundaries are detected automatically).
+    - All other strategies: fall through to ``chunk_segment`` (recursive-char).
+      This includes ``recursive_char``, ``structure_aware``, ``table_atomic``, and
+      ``semantic``, all of which use the existing recursive-char logic in Phase 3
+      (Phase 4 will wire the remaining strategies).
+
+    Finding (for the orchestrator): ``ChunkingStrategy.code_syntax`` EXISTS in the
+    contracts enum (ingestion_config.py line 38).  No contracts edit was required.
+
+    Args:
+        segment_text: The segment's text content.
+        strategy: The chunking strategy from the ingestion config.
+        max_tokens: Target chunk size (whitespace-word proxy).
+        overlap_tokens: Overlap between consecutive chunks (whitespace-word proxy).
+            Ignored for ``code_syntax`` (overlap is internal to the code splitter).
+        split_boundaries: Accepted but unused — code boundaries are auto-detected.
+        language_hint: Language identifier passed to ``split_code`` when strategy
+            is ``code_syntax``.  E.g. ``"python"``, ``"javascript"``, ``"go"``.
+            Default is ``"unknown"``, which triggers full recursive-char fallback
+            inside ``split_code``.
+
+    Returns:
+        Non-empty list of ChunkSpan objects.
+
+    Raises:
+        ValueError: Same conditions as ``chunk_segment``.
+    """
+    _ = split_boundaries  # accepted; auto-detection makes this unnecessary
+
+    if strategy == ChunkingStrategy.code_syntax:
+        # Lazy import to avoid circular dependency at module load time
+        from finecorpus.pipeline.build.code_splitter import split_code  # noqa: PLC0415
+
+        if not segment_text:
+            return [
+                ChunkSpan(
+                    text=segment_text,
+                    chunk_index=0,
+                    char_start=0,
+                    char_end=0,
+                    token_count=0,
+                )
+            ]
+        return split_code(segment_text, max_tokens, language_hint)
+
+    # All other strategies: recursive-char baseline.
+    return chunk_segment(segment_text, max_tokens, overlap_tokens)
+
+
 __all__ = [
     "ChunkSpan",
     "chunk_segment",
+    "chunk_segment_dispatch",
     "split_text",
     "_count_tokens",
 ]
