@@ -1,81 +1,85 @@
-"""Stage 5 — Build (Phase 1 real implementation).
+"""Stage 5 — Build (Phase 3: tier wiring, preview/dry_run, augmentation).
 
 Consumes SegmentSetBatch (version-checked) + IngestionConfig; for each included
-segment produces Chunks via the recursive-char chunker with COMPLETE provenance (§8);
-embeds chunks via an injected EmbeddingProvider (batched); writes to a SHADOW
-collection via the IndexAdapter (C-4); runs lifecycle validation; makes the shadow
-ELIGIBLE for promotion.
+segment produces Chunks via the transformation pipeline:
+
+  1. Tier 1 (apply_tier1): structure normalisation → canonical text
+  2. Chunker (chunk_segment_dispatch): split canonical text into ChunkSpans
+  3. Tier 2 (augment_chunk + compose_embedding_input): contextual augmentation
+     in SEPARATE fields (never merged into chunk text — T-04 invariant)
+  4. Embed + upsert (skipped in dry_run mode)
+
+T-04 byte-identity invariant
+-----------------------------
+``chunk.text`` is ALWAYS a pure contiguous slice of the segment's Tier-1
+canonical text.  Tier 2 augmentation goes into dedicated augmentation fields
+(``table_description``, ``parent_breadcrumb``, ``class_context``).  The
+embedding input (``embedding_input``) may frame augmentation context around
+the chunk text but the chunk text itself is never modified.
+
+``ChunkSpan`` is a frozen dataclass — ``augment_chunk`` structurally cannot
+mutate it.
+
+Double-record fix (Phase 3)
+----------------------------
+Prior versions emitted a ``table_to_markdown`` TransformationRecord from both
+``_build_table_to_markdown_record()`` (independent) AND from ``apply_tier1``
+when ``Tier1Operation.table_to_markdown`` appeared in the class rule.  This
+created a double-recording defect.
+
+Phase 3 resolution: ``_build_table_to_markdown_record()`` is REMOVED.
+Provenance now flows EXCLUSIVELY through ``apply_tier1``'s records.  The
+class rule must include ``table_to_markdown`` in its ``tier1_operations`` for
+the provenance record to appear.
+
+Tier toggles
+------------
+- ``tier1_enabled=False``: ``apply_tier1`` is skipped; no Tier 1 records;
+  chunk text = raw segment text.
+- ``tier2_enabled=False``: ``augment_chunk`` is skipped; no LLM construction;
+  all augmentation fields are ``None``.
+
+Dry-run mode (M-038 preview)
+-----------------------------
+``BuildStage(dry_run=True)`` runs the full Tier 1 + chunk + Tier 2 path but
+SKIPS embedding and Qdrant upsert.  The resulting chunks (with augmentation +
+provenance) are emitted inline in the BuildResult ``chunks`` field so the
+preview path can display them without a live Qdrant instance.
 
 Resumability (§6.6)
 -------------------
 Build checkpoints progress per document in the artifact store as a JSON sidecar
 (``build_checkpoint.json`` in the same run directory). On re-run with the same
-run_id, completed documents are skipped — their chunks are already written and,
-because chunk IDs are deterministic, idempotent upserts would make re-writing safe
-too, but the checkpoint avoids redundant embedding API calls. The checkpoint file
-contains a list of ``documents_completed`` by document_id.
+run_id, completed documents are skipped — their chunks are already written.
 
-Promote flag
-------------
-When ``promote=True`` is passed to ``run_pipeline``, the orchestrator calls
-``lifecycle.promote()`` after Build completes. Build itself does not promote;
-it only makes the shadow eligible (by running validation). This preserves the
-spec's requirement that promote is a separate orchestrator call (§6.6, §10).
-
-Provenance (§8)
----------------
-Every chunk carries the FULL provenance block inherited from its segment:
-- source_document_id / source_document_version from the SegmentSet.
-- source_location from the Segment (the segment-level location, not a per-chunk
-  refinement; chunk's char_start/char_end are stored in extra payload fields for
-  explain mode but the spec §8 location is the segment's source location).
-- structural_path, segment_type, salience_tier, salience_basis, salience_signals,
-  language, injection_suspicion, invisible_content_flags, sensitivity_flags from
-  the Segment.
-- transformations: empty list in Phase 1 — extraction is not a recorded Tier
-  transformation (no Tier 1/2/3 applied in Phase 1); Tier 2 augmentation arrives
-  in Phase 3.
-- confidence: from segment.ocr_confidence if present, else 1.0 (native text).
-- trust_level: always untrusted_ingested (§14.1).
-- tenancy: from the SegmentSet's tenancy block.
-
-Chunk text byte-identity (§12)
--------------------------------
-The chunk text is a contiguous substring of the segment text (T-04 invariant).
-No transformation is applied to the text in Phase 1 — it is exactly what the
-segment carries.
-
-Cost accrual seed (§16)
+LLM augmentation cache
 -----------------------
-BuildResult.cost_accrual accumulates input_tokens_used from each embed_batch
-call. This is a seed only — cost attribution to a KB/workspace is Phase 4+.
-
-Skipped / excluded documents
------------------------------
-A segment is excluded if its salience_tier is 'excluded'. The segment is still
-iterated (we record it in skipped_segments); it is never silently dropped (§1.4).
-Documents are excluded if ALL their segments are excluded.
+Table descriptions are cached per ``(content_hash, segment_path, model_id)``
+in ``llm_cache.json`` in the run directory.  Resumed builds get cache hits
+for previously described tables — no re-billing.
 
 Schema
 ------
-BuildResult (Phase 1) carries:
+BuildResult (Phase 3) carries:
   {
     "schema_version": "1.0.0",
     "contract": "build_result",
-    "skeleton": None,             # Phase 1 real run
+    "skeleton": None,
     "chunk_count": <int>,
     "chunks_by_document": { doc_id: count, ... },
     "skipped_documents": [{ "document_id": ..., "reason": ... }, ...],
     "token_accounting": {
         "total_input_tokens": int,
         "total_embed_calls": int,
+        "llm_call_count": int,
     },
     "shadow_collection": "<str>",
     "validation_passed": <bool>,
     "promoted": <bool>,
     "report": "<str>",
     "built_at": "<ISO 8601>",
-    "chunks": []    # not stored inline (stored in Qdrant)
+    "dry_run": <bool>,
+    "chunks": [...]   # non-empty only in dry_run mode
   }
 """
 
@@ -90,16 +94,13 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from finecorpus.contracts.chunk_id import derive_chunk_id, derive_point_id
-from finecorpus.contracts.ingestion_config import IngestionConfig
+from finecorpus.contracts.ingestion_config import IngestionConfig, Tier2Operation
 from finecorpus.contracts.segment_set import Segment, SegmentSet
 from finecorpus.contracts.segment_set_batch import SegmentSetBatch
 from finecorpus.contracts.shared.blocks import (
-    AppliedBy,
     SalienceTier,
-    SegmentType,
     SourceLocation,
     TransformationRecord,
-    TransformationTier,
     TrustLevel,
 )
 from finecorpus.contracts.versions import SUPPORTED_INGESTION_CONFIG
@@ -123,7 +124,14 @@ from finecorpus.index.lifecycle import (
     create_shadow,
     validate_shadow,
 )
-from finecorpus.pipeline.build.chunker import ChunkSpan, chunk_segment
+from finecorpus.pipeline.build.augment import (
+    Augmentation,
+    AugmentationClient,
+    augment_chunk,
+    compose_embedding_input,
+)
+from finecorpus.pipeline.build.chunker import ChunkSpan
+from finecorpus.pipeline.build.transform import apply_tier1
 from finecorpus.pipeline.stage import Stage
 
 logger = logging.getLogger(__name__)
@@ -147,10 +155,11 @@ _CHUNK_SCHEMA_VERSION = "1.0.0"
 
 
 class BuildResult(BaseModel):
-    """Envelope for the Build stage artifact (Phase 1 real).
+    """Envelope for the Build stage artifact (Phase 3 real).
 
-    Phase 1 real runs have skeleton=None. Phase 0 had skeleton=True.
-    The ``chunks`` field is intentionally empty (chunks live in Qdrant).
+    Phase 1/3 real runs have skeleton=None. Phase 0 had skeleton=True.
+    The ``chunks`` field is empty for normal (non-dry_run) runs — chunks live
+    in Qdrant.  In dry_run mode, ``chunks`` contains the preview payload.
     """
 
     schema_version: str = Field(description="Envelope schema version (semver).")
@@ -170,7 +179,9 @@ class BuildResult(BaseModel):
         )
     )
     token_accounting: dict[str, int] = Field(
-        description="Cost-accrual seed (§16): total input tokens + embed call count."
+        description=(
+            "Cost-accrual seed (§16): total input tokens + embed call count + llm_call_count."
+        )
     )
     shadow_collection: str = Field(description="The shadow Qdrant collection name written.")
     validation_passed: bool = Field(description="Whether the pre-promotion validation gate passed.")
@@ -179,8 +190,14 @@ class BuildResult(BaseModel):
     )
     report: str = Field(description="Plain-language summary of the build run.")
     built_at: str = Field(description="When this build artifact was produced (UTC ISO 8601).")
+    dry_run: bool = Field(
+        default=False,
+        description="True when dry_run mode — no embedding/upsert; chunks inline for preview.",
+    )
     chunks: list[dict[str, Any]] = Field(
-        description="Intentionally empty — chunks are in Qdrant, not inline."
+        description=(
+            "Inline chunks for dry_run/preview (empty in normal runs — chunks live in Qdrant)."
+        )
     )
 
 
@@ -216,13 +233,7 @@ def _load_checkpoint(run_dir: pathlib.Path) -> tuple[set[str], dict[str, int]]:
 def _save_checkpoint(
     run_dir: pathlib.Path, completed: set[str], chunk_counts: dict[str, int]
 ) -> None:
-    """Persist completed document_ids and per-document chunk counts.
-
-    Args:
-        run_dir: Directory for the checkpoint file.
-        completed: Set of completed document_ids.
-        chunk_counts: Per-document chunk counts for all completed documents.
-    """
+    """Persist completed document_ids and per-document chunk counts."""
     path = _checkpoint_path(run_dir)
     path.write_text(
         json.dumps(
@@ -259,58 +270,29 @@ def _segment_source_location(seg: Segment) -> dict[str, Any]:
     }
 
 
-def _build_table_to_markdown_record() -> dict[str, Any]:
-    """Build the D-11 TransformationRecord dict for table_to_markdown (Tier 1).
-
-    Emitted for segments whose segment_type=table — i.e. segments produced from
-    regions whose detected_class_hint=table in the parse result.  The table text
-    was serialised to pipe-delimited Markdown in the parser (html.py /
-    spreadsheet.py) before it reached the segmentation pass; this record makes
-    that Tier-1 structural-normalisation op visible in the chunk provenance per
-    D-11 and §8.
-    """
-    rec = TransformationRecord(
-        tier=TransformationTier.tier_1,
-        operation="table_to_markdown",
-        applied_by=AppliedBy.deterministic,
-        model_ref=None,
-        changed_text=True,
-        note=(
-            "Table serialised to pipe-delimited Markdown in parser "
-            "(html.py / spreadsheet.py) before segmentation."
-        ),
-    )
-    return rec.model_dump(mode="json")
-
-
 def _build_provenance(
     segment_set: SegmentSet,
     seg: Segment,
+    transformation_records: list[TransformationRecord],
 ) -> dict[str, Any]:
     """Assemble the full §8 provenance dict for a chunk from this segment.
 
-    For segments produced from table regions (segment_type=table), a Tier-1
-    table_to_markdown TransformationRecord is included per D-11 and §8.
-    For all other segments, transformations is empty in Phase 1 (no Tier 1/2
-    ops applied; Tier 2 augmentation arrives in Phase 3).
+    Phase 3: ``transformation_records`` flows from ``apply_tier1`` +
+    ``augment_chunk`` + ``compose_embedding_input``.  The old
+    ``_build_table_to_markdown_record`` independent emission has been REMOVED
+    — records now flow exclusively through the transformation pipeline to avoid
+    double-recording (Phase 3 defect fix).
 
     confidence = ocr_confidence if present, else 1.0 (native text).
     """
     confidence = seg.ocr_confidence if seg.ocr_confidence is not None else 1.0
-    # D-11: emit table_to_markdown TransformationRecord for table segments.
-    # The conversion happened in the parser (assess stage); only segments with
-    # segment_type=table were actually produced by that conversion path.
-    if seg.segment_type == SegmentType.table:
-        transformations = [_build_table_to_markdown_record()]
-    else:
-        transformations = []
 
     return {
         "source_document_id": segment_set.document_id,
         "source_document_version": segment_set.content_hash,
         "source_location": _segment_source_location(seg),
         "structural_path": list(seg.structural_path),
-        "transformations": transformations,
+        "transformations": [r.model_dump(mode="json") for r in transformation_records],
         "confidence": confidence,
         "ocr_confidence": seg.ocr_confidence,
         "segment_type": seg.segment_type.value,
@@ -350,7 +332,28 @@ def _build_tenancy(segment_set: SegmentSet) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Core build logic
+# Class-rule lookup
+# ---------------------------------------------------------------------------
+
+
+def _get_rule_for_segment(seg: Segment, ingestion_config: IngestionConfig) -> Any:
+    """Return the ClassRule for ``seg``, falling back to default_rule."""
+    for rule in ingestion_config.class_rules:
+        if rule.segment_class == seg.segment_type:
+            return rule
+    return ingestion_config.default_rule
+
+
+def _get_class_description(seg: Segment, ingestion_config: IngestionConfig) -> str | None:
+    """Return the class description text for ``seg``'s type, or None."""
+    for cd in ingestion_config.class_descriptions:
+        if cd.segment_class == seg.segment_type:
+            return cd.description
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Core per-segment-set processing
 # ---------------------------------------------------------------------------
 
 
@@ -361,32 +364,34 @@ def _process_segment_set(
     shadow_collection: str,
     adapter: IndexAdapter,
     doc_build_id: int,
-) -> tuple[int, list[dict[str, Any]]]:
-    """Process one SegmentSet: chunk + embed + upsert.
+    llm_client_factory: Any | None,
+    dry_run: bool,
+    llm_call_counter: list[int],
+) -> tuple[int, list[dict[str, Any]], list[dict[str, Any]]]:
+    """Process one SegmentSet: tier1 + chunk + tier2 + embed + upsert.
 
     Args:
         segment_set_dict: Raw SegmentSet dict from the batch.
-        ingestion_config: The ingestion config (for config_version, chunking params).
-        provider: EmbeddingProvider for embedding chunks.
+        ingestion_config: The ingestion config.
+        provider: EmbeddingProvider (not used in dry_run).
         shadow_collection: The shadow Qdrant collection to write to.
-        adapter: IndexAdapter for upsert_points.
-        doc_build_id: Unused in Phase 1 (reserved for future incremental builds).
+        adapter: IndexAdapter for upsert_points (not used in dry_run).
+        doc_build_id: Unused (reserved).
+        llm_client_factory: Callable(content_hash, segment_path) -> AugmentationClient | None.
+            None means no tier2 augmentation.
+        dry_run: When True, skip embedding and upsert; return chunks inline.
+        llm_call_counter: Mutable list[int] of length 1 accumulating LLM call counts.
 
     Returns:
-        (chunk_count, skipped_info_list)
-        - chunk_count: number of chunks written for this document.
-        - skipped_info_list: list of segment-level skip records (for observability).
+        (chunk_count, skipped_info_list, inline_chunks)
+        - chunk_count: number of chunks processed for this document.
+        - skipped_info_list: list of segment-level skip records.
+        - inline_chunks: list of chunk dicts (non-empty only in dry_run mode).
     """
-    # Parse the SegmentSet
     seg_set = SegmentSet.model_validate(segment_set_dict)
     config_version = ingestion_config.config_version
     document_id = seg_set.document_id
     content_hash = seg_set.content_hash
-
-    # Get chunking params from the ingestion config default rule.
-    chunking_cfg = ingestion_config.default_rule.chunking
-    max_tokens = chunking_cfg.max_tokens
-    overlap_tokens = chunking_cfg.overlap_tokens
 
     caps = provider.capabilities
     embed_model_id = caps.model_id
@@ -400,10 +405,11 @@ def _process_segment_set(
 
     chunk_count = 0
     skipped_segments: list[dict[str, Any]] = []
+    inline_chunks: list[dict[str, Any]] = []
 
     def _flush(texts: list[str], metas: list[dict[str, Any]]) -> None:
-        """Embed and upsert a batch of chunk texts."""
-        if not texts:
+        """Embed and stage a batch of chunk texts."""
+        if not texts or dry_run:
             return
         result = provider.embed_batch(texts, embed_model_id)
         for i, (_text, meta) in enumerate(zip(texts, metas, strict=True)):
@@ -417,6 +423,8 @@ def _process_segment_set(
 
     def _upsert_buffered() -> None:
         """Upsert all buffered points in batches."""
+        if dry_run:
+            return
         for batch_start in range(0, len(points_buffer), _UPSERT_BATCH_SIZE):
             batch = points_buffer[batch_start : batch_start + _UPSERT_BATCH_SIZE]
             adapter.upsert_points(shadow_collection, batch)
@@ -442,14 +450,81 @@ def _process_segment_set(
             )
             continue
 
-        # Chunk the segment text
-        spans: list[ChunkSpan] = chunk_segment(
-            segment_text=seg.text,
+        # Resolve the class rule for this segment
+        rule = _get_rule_for_segment(seg, ingestion_config)
+        class_description = _get_class_description(seg, ingestion_config)
+        max_tokens = rule.chunking.max_tokens
+        overlap_tokens = rule.chunking.overlap_tokens
+
+        # ------------------------------------------------------------------
+        # Tier 1: Structure normalisation → canonical text + records
+        # ------------------------------------------------------------------
+        tier1_records: list[TransformationRecord] = []
+        if rule.transformation.tier1_enabled and rule.transformation.tier1_operations:
+            canonical_text, tier1_records = apply_tier1(
+                seg.text, rule.transformation.tier1_operations
+            )
+        else:
+            canonical_text = seg.text
+
+        # ------------------------------------------------------------------
+        # Chunking (dispatch by strategy — code_syntax goes to code splitter)
+        # ------------------------------------------------------------------
+        from finecorpus.pipeline.build.chunker import chunk_segment_dispatch
+
+        spans: list[ChunkSpan] = chunk_segment_dispatch(
+            segment_text=canonical_text,
+            strategy=rule.chunking.strategy,
             max_tokens=max_tokens,
             overlap_tokens=overlap_tokens,
         )
 
+        # ------------------------------------------------------------------
+        # ONE LLM client per segment (for table descriptions)
+        # Tier2: augment_chunk is called per SPAN but the LLM call is cached
+        # per segment (same content_hash + segment_path → same cache key).
+        # ------------------------------------------------------------------
+        seg_llm_client: AugmentationClient | None = None
+        if (
+            rule.transformation.tier2_enabled
+            and llm_client_factory is not None
+            and Tier2Operation.table_description in set(rule.transformation.tier2_operations)
+        ):
+            seg_llm_client = llm_client_factory(content_hash, seg.segment_path)
+
         for span in spans:
+            # --------------------------------------------------------------
+            # Tier 2: Augmentation (does NOT touch span.text — T-04)
+            # --------------------------------------------------------------
+            augmentation = Augmentation()
+            tier2_aug_records: list[TransformationRecord] = []
+            tier2_compose_records: list[TransformationRecord] = []
+
+            if rule.transformation.tier2_enabled:
+                augmentation, tier2_aug_records = augment_chunk(
+                    span=span,
+                    segment=seg,
+                    rule=rule,
+                    class_description=class_description,
+                    client=seg_llm_client,
+                )
+
+                # Count LLM calls (only for table_description spans)
+                if seg_llm_client is not None and hasattr(seg_llm_client, "call_count"):
+                    # call_count is tracked at factory level; just note it
+                    pass
+
+            # Compose embedding input (framing augmentation around chunk text)
+            embedding_input, tier2_compose_records = compose_embedding_input(
+                augmentation, span.text
+            )
+
+            # All transformation records in pipeline order
+            all_records = tier1_records + tier2_aug_records + tier2_compose_records
+
+            # --------------------------------------------------------------
+            # IDs and provenance
+            # --------------------------------------------------------------
             chunk_id = derive_chunk_id(
                 document_id=document_id,
                 content_hash=content_hash,
@@ -465,7 +540,7 @@ def _process_segment_set(
                 chunk_index=span.chunk_index,
             )
 
-            provenance_dict = _build_provenance(seg_set, seg)
+            provenance_dict = _build_provenance(seg_set, seg, all_records)
             tenancy_dict = _build_tenancy(seg_set)
 
             embedding_ref_dict = {
@@ -476,20 +551,21 @@ def _process_segment_set(
             }
 
             augmentation_dict = {
-                "parent_breadcrumb": None,
-                "table_description": None,
-                "class_context": None,
-                "generated_by": None,
+                "parent_breadcrumb": augmentation.parent_breadcrumb,
+                "table_description": augmentation.table_description,
+                "class_context": augmentation.class_context,
+                "generated_by": (
+                    seg_llm_client.__class__.__name__
+                    if seg_llm_client is not None and augmentation.table_description is not None
+                    else None
+                ),
             }
-
-            # embedding_input = just chunk text in Phase 1 (no augmentation yet)
-            embedding_input = span.text
 
             payload = build_point_payload(
                 chunk_id=chunk_id,
                 provenance=provenance_dict,
                 tenancy=tenancy_dict,
-                text=span.text,
+                text=span.text,  # T-04: chunk text is the pure canonical slice
                 embedding_ref=embedding_ref_dict,
                 augmentation=augmentation_dict,
                 extra={
@@ -503,17 +579,35 @@ def _process_segment_set(
                 },
             )
 
-            texts_buffer.append(embedding_input)
-            chunk_meta_buffer.append(
-                {
-                    "point_id": point_id,
-                    "payload": payload,
-                }
-            )
+            if dry_run:
+                # Emit chunk inline for preview
+                inline_chunks.append(
+                    {
+                        "chunk_id": chunk_id,
+                        "point_id": str(point_id),
+                        "text": span.text,
+                        "embedding_input": embedding_input,
+                        "augmentation": augmentation_dict,
+                        "provenance": provenance_dict,
+                        "chunk_index": span.chunk_index,
+                        "token_count": span.token_count,
+                        "document_id": document_id,
+                        "segment_path": seg.segment_path,
+                    }
+                )
+            else:
+                texts_buffer.append(embedding_input)
+                chunk_meta_buffer.append(
+                    {
+                        "point_id": point_id,
+                        "payload": payload,
+                    }
+                )
+
             chunk_count += 1
 
             # Flush embed+upsert when the buffer is full
-            if len(texts_buffer) >= _UPSERT_BATCH_SIZE:
+            if not dry_run and len(texts_buffer) >= _UPSERT_BATCH_SIZE:
                 _flush(texts_buffer, chunk_meta_buffer)
                 _upsert_buffered()
                 texts_buffer.clear()
@@ -521,14 +615,18 @@ def _process_segment_set(
                 points_buffer.clear()
 
     # Flush remainder
-    if texts_buffer:
+    if not dry_run and texts_buffer:
         _flush(texts_buffer, chunk_meta_buffer)
         _upsert_buffered()
         texts_buffer.clear()
         chunk_meta_buffer.clear()
         points_buffer.clear()
 
-    return chunk_count, skipped_segments
+    # Accumulate LLM call counts from the factory if it tracks them
+    if llm_client_factory is not None and hasattr(llm_client_factory, "total_call_count"):
+        llm_call_counter[0] += llm_client_factory.total_call_count
+
+    return chunk_count, skipped_segments, inline_chunks
 
 
 # ---------------------------------------------------------------------------
@@ -537,13 +635,18 @@ def _process_segment_set(
 
 
 class BuildStage(Stage):
-    """Stage 5 — Build (Phase 1 real implementation).
+    """Stage 5 — Build (Phase 3 real implementation).
 
     Consumes IngestionConfig, produces BuildResult. Requires:
     - An EmbeddingProvider (injected; FakeProvider in tests).
     - An IndexAdapter (injected; QdrantAdapter in integration tests).
     - A build_id (from the control plane or test harness; monotonically increasing).
     - artifacts_root + run_id (for checkpoint resumability).
+
+    Phase 3 additions:
+    - ``dry_run=True``: full Tier1/2 transform path but no embedding/upsert.
+    - ``llm_provider``: injected LLMProvider for table descriptions.
+    - ``llm_op_config``: ResolvedOpConfig for the augmentation operation.
 
     When provider/adapter are None (test shortcut for unit tests), the stage
     falls back to the Phase 0 skeleton behaviour.
@@ -559,6 +662,9 @@ class BuildStage(Stage):
         run_id: Run ID for checkpoint file.
         workspace_id: Owning workspace (for BuildContext).
         kb_id: Owning KB (for BuildContext and alias).
+        dry_run: When True, skip embedding and upsert; emit chunks inline.
+        llm_provider: Optional LLMProvider for Tier 2 table descriptions.
+        llm_op_config: Optional ResolvedOpConfig for the augmentation operation.
     """
 
     name = "build"
@@ -577,6 +683,9 @@ class BuildStage(Stage):
         run_id: str | None = None,
         workspace_id: str = "",
         kb_id: str = "",
+        dry_run: bool = False,
+        llm_provider: Any | None = None,
+        llm_op_config: Any | None = None,
     ) -> None:
         self._run_started_at = run_started_at or datetime.now(tz=UTC)
         self._provider = embedding_provider
@@ -586,19 +695,33 @@ class BuildStage(Stage):
         self._run_id = run_id
         self._workspace_id = workspace_id
         self._kb_id = kb_id
+        self._dry_run = dry_run
+        self._llm_provider = llm_provider
+        self._llm_op_config = llm_op_config
 
     def _produce(self, input_data: dict[str, Any] | None) -> dict[str, Any]:
         """Produce a BuildResult artifact.
 
-        If no provider or adapter is injected, falls back to Phase 0 skeleton.
+        If no provider or adapter is injected (and not dry_run), falls back to
+        Phase 0 skeleton.
         """
         assert input_data is not None, "Build requires IngestionConfig input"
 
         # Skeleton fallback for unit tests that don't inject a provider/adapter
-        if self._provider is None or self._adapter is None:
+        # (but NOT for dry_run — dry_run is a real path even without an adapter)
+        if not self._dry_run and (self._provider is None or self._adapter is None):
             return self._produce_skeleton(input_data)
 
-        return self._produce_real(input_data)
+        # dry_run with no provider: use a fake embedding provider for dry_run
+        if self._dry_run and self._provider is None:
+            from finecorpus.embedding.fake import FakeProvider
+
+            provider: EmbeddingProvider = FakeProvider()
+        else:
+            assert self._provider is not None
+            provider = self._provider
+
+        return self._produce_real(input_data, provider)
 
     def _produce_skeleton(self, input_data: dict[str, Any]) -> dict[str, Any]:
         """Phase 0 skeleton behaviour (no provider/adapter injected)."""
@@ -609,7 +732,11 @@ class BuildStage(Stage):
             chunk_count=0,
             chunks_by_document={},
             skipped_documents=[],
-            token_accounting={"total_input_tokens": 0, "total_embed_calls": 0},
+            token_accounting={
+                "total_input_tokens": 0,
+                "total_embed_calls": 0,
+                "llm_call_count": 0,
+            },
             shadow_collection="",
             validation_passed=False,
             promoted=False,
@@ -619,19 +746,21 @@ class BuildStage(Stage):
                 "Inject a provider and adapter via BuildStage(...) for real builds."
             ),
             built_at=self._run_started_at.isoformat(),
+            dry_run=False,
             chunks=[],
         )
         return result.model_dump(mode="json")
 
-    def _produce_real(self, input_data: dict[str, Any]) -> dict[str, Any]:
-        """Phase 1 real build: chunk + embed + upsert to shadow collection."""
-        assert self._provider is not None
-        assert self._adapter is not None
+    def _produce_real(
+        self, input_data: dict[str, Any], provider: EmbeddingProvider
+    ) -> dict[str, Any]:
+        """Phase 3 real build: tier1 + chunk + tier2 + embed + upsert to shadow."""
+        assert provider is not None
 
         ingestion_config = IngestionConfig.model_validate(input_data)
         config_version = ingestion_config.config_version
 
-        caps = self._provider.capabilities
+        caps = provider.capabilities
         model_identity = ModelIdentity(
             provider=caps.provider_id,
             model=caps.model_id,
@@ -639,40 +768,40 @@ class BuildStage(Stage):
             config_version=config_version,
         )
 
-        # Create shadow collection — or reattach to an existing one (resume case).
-        # On a resumed run the shadow from the aborted pass already exists; calling
-        # create_shadow again would raise.  We detect the existing collection and
-        # reconstruct the BuildContext without re-creating the Qdrant collection.
-        expected_shadow = collection_name(self._kb_id, self._build_id)
-        if self._adapter.collection_exists(expected_shadow):
-            logger.info(
-                "build: shadow collection '%s' already exists — resuming into it",
-                expected_shadow,
-            )
-            shadow_ctx = BuildContext(
-                kb_id=self._kb_id,
-                workspace_id=self._workspace_id,
-                build_id=self._build_id,
-                shadow_collection=expected_shadow,
-                alias=alias_name(self._kb_id),
-                model_identity=model_identity,
-                state=BuildState.INGESTING,
-            )
-        else:
-            shadow_ctx = create_shadow(
-                adapter=self._adapter,
-                kb_id=self._kb_id,
-                workspace_id=self._workspace_id,
-                build_id=self._build_id,
-                model_identity=model_identity,
-            )
-        shadow_collection = shadow_ctx.shadow_collection
-        shadow_ctx.state = BuildState.INGESTING
+        # In dry_run mode, skip shadow collection creation entirely
+        shadow_collection = ""
+        shadow_ctx = None
+
+        if not self._dry_run:
+            assert self._adapter is not None
+            # Create shadow collection — or reattach to an existing one (resume case).
+            expected_shadow = collection_name(self._kb_id, self._build_id)
+            if self._adapter.collection_exists(expected_shadow):
+                logger.info(
+                    "build: shadow collection '%s' already exists — resuming into it",
+                    expected_shadow,
+                )
+                shadow_ctx = BuildContext(
+                    kb_id=self._kb_id,
+                    workspace_id=self._workspace_id,
+                    build_id=self._build_id,
+                    shadow_collection=expected_shadow,
+                    alias=alias_name(self._kb_id),
+                    model_identity=model_identity,
+                    state=BuildState.INGESTING,
+                )
+            else:
+                shadow_ctx = create_shadow(
+                    adapter=self._adapter,
+                    kb_id=self._kb_id,
+                    workspace_id=self._workspace_id,
+                    build_id=self._build_id,
+                    model_identity=model_identity,
+                )
+            shadow_collection = shadow_ctx.shadow_collection
+            shadow_ctx.state = BuildState.INGESTING
 
         # Load the SegmentSetBatch from the store (previous stage artifact)
-        # NOTE: We receive the IngestionConfig as input_data, but we also need
-        # the SegmentSetBatch. BuildStage does NOT have direct access to the store
-        # from _produce(). We must load it from artifacts_root/run_id/decompose.json.
         segment_batch_dict = self._load_segment_batch()
 
         # Load checkpoint for resumability
@@ -692,6 +821,8 @@ class BuildStage(Stage):
         skipped_documents: list[dict[str, Any]] = []
         total_input_tokens = 0
         total_embed_calls = 0
+        all_inline_chunks: list[dict[str, Any]] = []
+        llm_total_calls = 0
 
         # Fold prior (checkpoint) chunk counts into totals so BuildResult reflects the
         # whole shadow collection, not just the newly-processed documents (F-02).
@@ -700,27 +831,43 @@ class BuildStage(Stage):
                 chunks_by_document[prior_doc_id] = prior_count
                 total_chunks += prior_count
 
-        # Wrap provider to count tokens/calls
-        counting_provider = _CountingProvider(self._provider)
+        # Wrap provider to count tokens/calls (skip in dry_run)
+        if not self._dry_run:
+            counting_provider = _CountingProvider(provider)
+        else:
+            counting_provider = provider  # type: ignore[assignment]
+
+        # Build LLM client factory if a provider is available
+        llm_factory = None
+        if self._llm_provider is not None and self._llm_op_config is not None:
+            llm_factory = _LLMClientFactory(
+                provider=self._llm_provider,
+                op_config=self._llm_op_config,
+                run_dir=run_dir,
+            )
+
+        # Mutable counter for LLM calls (passed through to _process_segment_set)
+        llm_call_counter = [0]
 
         for seg_set_dict in segment_batch.segment_sets:
             doc_id = seg_set_dict.get("document_id", "")
 
-            if doc_id in completed_docs:
+            if doc_id in completed_docs and not self._dry_run:
                 logger.info("build: skipping already-completed document %s", doc_id)
-                # Chunk counts for this doc are already folded in from prior_chunk_counts above.
-                # Chunk IDs are deterministic so skipping avoids redundant embedding API calls.
                 continue
 
             logger.info("build: processing document %s", doc_id)
 
-            chunk_count, skipped_segs = _process_segment_set(
+            chunk_count, skipped_segs, inline_chunks = _process_segment_set(
                 segment_set_dict=seg_set_dict,
                 ingestion_config=ingestion_config,
                 provider=counting_provider,
                 shadow_collection=shadow_collection,
-                adapter=self._adapter,
+                adapter=self._adapter,  # type: ignore[arg-type]
                 doc_build_id=self._build_id,
+                llm_client_factory=llm_factory,
+                dry_run=self._dry_run,
+                llm_call_counter=llm_call_counter,
             )
 
             if chunk_count == 0:
@@ -730,41 +877,54 @@ class BuildStage(Stage):
                 chunks_by_document[doc_id] = chunk_count
                 total_chunks += chunk_count
 
+            all_inline_chunks.extend(inline_chunks)
+
             completed_docs.add(doc_id)
-            if run_dir:
+            if run_dir and not self._dry_run:
                 _save_checkpoint(run_dir, completed_docs, chunks_by_document)
 
-        total_input_tokens = counting_provider.total_input_tokens
-        total_embed_calls = counting_provider.total_embed_calls
+        # Collect embedding token/call stats
+        if not self._dry_run and isinstance(counting_provider, _CountingProvider):
+            total_input_tokens = counting_provider.total_input_tokens
+            total_embed_calls = counting_provider.total_embed_calls
 
-        # Validate shadow
-        shadow_ctx.state = BuildState.VALIDATING
-        validation = validate_shadow(
-            adapter=self._adapter,
-            shadow_collection=shadow_collection,
-            expected_min_chunks=max(1, total_chunks),
-            declared_empty=(total_chunks == 0),
-        )
-        validation_passed = validation.passed
-        if not validation_passed:
-            logger.error(
-                "build: validation FAILED for shadow '%s': %s",
-                shadow_collection,
-                validation.detail,
+        # Collect LLM call count
+        if llm_factory is not None:
+            llm_total_calls = llm_factory.total_call_count
+
+        # Validate shadow (skip in dry_run)
+        validation_passed = True  # dry_run always "passes"
+        if not self._dry_run and shadow_ctx is not None:
+            shadow_ctx.state = BuildState.VALIDATING
+            assert self._adapter is not None
+            validation = validate_shadow(
+                adapter=self._adapter,
+                shadow_collection=shadow_collection,
+                expected_min_chunks=max(1, total_chunks),
+                declared_empty=(total_chunks == 0),
             )
-            shadow_ctx.state = BuildState.VALIDATION_FAILED
-        else:
-            shadow_ctx.state = BuildState.INGESTING  # eligible for promote
+            validation_passed = validation.passed
+            if not validation_passed:
+                logger.error(
+                    "build: validation FAILED for shadow '%s': %s",
+                    shadow_collection,
+                    validation.detail,
+                )
+                shadow_ctx.state = BuildState.VALIDATION_FAILED
+            else:
+                shadow_ctx.state = BuildState.INGESTING  # eligible for promote
 
         # Build report
         n_docs = len(chunks_by_document)
         n_skipped = len(skipped_documents)
+        dry_run_note = " [DRY RUN — no embedding/upsert performed]" if self._dry_run else ""
         report = (
-            f"Build complete: {total_chunks} chunks from {n_docs} documents. "
+            f"Build{'(dry_run)' if self._dry_run else ''} complete: "
+            f"{total_chunks} chunks from {n_docs} documents. "
             f"{n_skipped} documents skipped/excluded. "
-            f"Shadow collection: {shadow_collection}. "
-            f"Validation: {'PASSED' if validation_passed else 'FAILED'}. "
-            f"Token estimate (whitespace-word proxy): {total_input_tokens}."
+            f"Shadow collection: {shadow_collection or '(none — dry_run)'}. "
+            f"Validation: {'PASSED' if validation_passed else 'FAILED'}."
+            f"{dry_run_note}"
         )
 
         result = BuildResult(
@@ -777,13 +937,15 @@ class BuildStage(Stage):
             token_accounting={
                 "total_input_tokens": total_input_tokens,
                 "total_embed_calls": total_embed_calls,
+                "llm_call_count": llm_total_calls,
             },
             shadow_collection=shadow_collection,
             validation_passed=validation_passed,
             promoted=False,  # promote is a separate orchestrator call
             report=report,
             built_at=self._run_started_at.isoformat(),
-            chunks=[],
+            dry_run=self._dry_run,
+            chunks=all_inline_chunks if self._dry_run else [],
         )
         return result.model_dump(mode="json")
 
@@ -836,3 +998,37 @@ class _CountingProvider(EmbeddingProvider):
 
     def estimate_cost(self, texts: list[str]) -> CostEstimate:
         return self._inner.estimate_cost(texts)
+
+
+# ---------------------------------------------------------------------------
+# LLM client factory (shared cache + per-segment binding)
+# ---------------------------------------------------------------------------
+
+
+class _LLMClientFactory:
+    """Creates per-segment LLMBuildClients sharing a persistent cache.
+
+    The factory tracks total LLM calls across all segments so BuildResult
+    can report ``llm_call_count``.
+    """
+
+    def __init__(self, provider: Any, op_config: Any, run_dir: pathlib.Path | None) -> None:
+        from finecorpus.pipeline.build.llm_client import LLMBuildClient
+
+        # Root client holding the shared cache
+        self._root = LLMBuildClient(
+            provider=provider,
+            op_config=op_config,
+            run_dir=run_dir,
+            content_hash="",
+            segment_path="",
+        )
+
+    def __call__(self, content_hash: str, segment_path: str) -> Any:
+        """Return a per-segment client bound to (content_hash, segment_path)."""
+        return self._root.for_segment(content_hash, segment_path)
+
+    @property
+    def total_call_count(self) -> int:
+        """Total LLM calls made across all segments."""
+        return self._root.call_count

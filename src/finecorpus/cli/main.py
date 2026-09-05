@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+from typing import Any
 
 
 def _cmd_init(args: argparse.Namespace) -> int:
@@ -54,11 +55,33 @@ def _cmd_init(args: argparse.Namespace) -> int:
 
 
 def _cmd_pipeline_run(args: argparse.Namespace) -> int:
-    """Wire corpus pipeline run → finecorpus.pipeline.run_pipeline."""
+    """Wire corpus pipeline run → finecorpus.pipeline.run_pipeline.
+
+    Phase 3 addition: cost gate.  Before the Build stage executes, loads the
+    Plan artifact (IngestionConfig + SegmentSetBatch), calls
+    ``estimate_ingestion_cost``, prints the estimate, and requires ``--yes``
+    or interactive confirmation to proceed.
+    """
     from finecorpus.contracts.versions import ContractVersionError
     from finecorpus.pipeline import run_pipeline
     from finecorpus.pipeline.artifact_store import ArtifactStoreError
     from finecorpus.pipeline.stage import StageError
+
+    # Cost gate: estimate before Build if a plan artifact exists.
+    if not getattr(args, "yes", False):
+        cost_estimate = _try_load_cost_estimate(args)
+        if cost_estimate is not None:
+            _print_cost_estimate(cost_estimate)
+            if not getattr(args, "yes", False):
+                # Interactive confirmation (skip if --yes was passed)
+                try:
+                    answer = input("Proceed with ingestion? [y/N] ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    print("\nAborted.", file=sys.stderr)
+                    return 1
+                if answer not in ("y", "yes"):
+                    print("Ingestion cancelled by user.", file=sys.stderr)
+                    return 1
 
     try:
         artifact_paths = run_pipeline(
@@ -84,6 +107,192 @@ def _cmd_pipeline_run(args: argparse.Namespace) -> int:
     print("Pipeline complete. Artifacts:")
     for stage, path in artifact_paths.items():
         print(f"  {stage:10s}: {path}")
+    return 0
+
+
+def _try_load_cost_estimate(args: argparse.Namespace) -> Any | None:
+    """Attempt to load plan + decompose artifacts and compute a cost estimate.
+
+    Returns the IngestionCostEstimate or None if artifacts are not available.
+    """
+    import pathlib
+
+    try:
+        from finecorpus.contracts.ingestion_config import IngestionConfig
+        from finecorpus.contracts.segment_set_batch import SegmentSetBatch
+        from finecorpus.embedding.fake import FakeProvider as FakeEmbeddingProvider
+        from finecorpus.pipeline.costing import estimate_ingestion_cost
+    except ImportError:
+        return None
+
+    artifacts_root = pathlib.Path(args.artifacts)
+    run_id = args.run_id
+    plan_path = artifacts_root / run_id / "plan.json"
+    decompose_path = artifacts_root / run_id / "decompose.json"
+
+    if not plan_path.exists() or not decompose_path.exists():
+        # Artifacts not yet produced — skip the cost gate
+        return None
+
+    try:
+        import json as _json
+
+        ingestion_config = IngestionConfig.model_validate(
+            _json.loads(plan_path.read_text(encoding="utf-8"))
+        )
+        segment_batch = SegmentSetBatch.model_validate(
+            _json.loads(decompose_path.read_text(encoding="utf-8"))
+        )
+    except Exception:  # noqa: BLE001
+        return None
+
+    # Use a fake embedding provider for cost estimation (no live calls)
+    embedding_provider = FakeEmbeddingProvider()
+
+    return estimate_ingestion_cost(
+        segment_set_batch=segment_batch,
+        ingestion_config=ingestion_config,
+        embedding_provider=embedding_provider,
+        llm_provider_or_none=None,
+    )
+
+
+def _print_cost_estimate(estimate: Any) -> None:
+    """Print the cost estimate in a human-readable format."""
+    print()
+    print("=" * 60)
+    print("  INGESTION COST ESTIMATE (pre-Build)")
+    print("=" * 60)
+    print(f"  Tokenizer         : {estimate.tokenizer_name}")
+    print()
+    print("  Embedding:")
+    print(f"    Provider/model  : {estimate.embedding_provider_id}/{estimate.embedding_model_id}")
+    print(f"    Token count     : {estimate.embedding_token_count:,}")
+    if estimate.embedding_zero_marginal_cost:
+        print("    Cost            : $0.00 (local provider — zero marginal cost)")
+    else:
+        print(f"    Cost per 1k     : ${estimate.embedding_cost_per_1k}")
+        print(f"    Estimated cost  : ${estimate.embedding_cost_usd:.4f}")
+    if estimate.embedding_pricing_as_of:
+        print(f"    Pricing as of   : {estimate.embedding_pricing_as_of}")
+    print()
+    if estimate.llm_provider_id:
+        print("  LLM augmentation:")
+        print(f"    Provider/model  : {estimate.llm_provider_id}/{estimate.llm_model_id}")
+        print(f"    Table calls     : {estimate.llm_table_call_count}")
+        print(f"    Other calls     : {estimate.llm_other_call_count}")
+        print(f"    Total calls     : {estimate.llm_total_call_count}")
+        if estimate.llm_zero_marginal_cost:
+            print("    Cost            : $0.00 (local provider — zero marginal cost)")
+        else:
+            print(f"    Estimated cost  : ${estimate.llm_cost_usd:.4f}")
+    else:
+        print("  LLM augmentation  : none configured")
+    print()
+    print(f"  TOTAL ESTIMATED   : ${estimate.total_cost_usd:.4f}")
+    print("=" * 60)
+    print(f"  Basis: {estimate.basis}")
+    print("=" * 60)
+    print()
+
+
+def _cmd_preview(args: argparse.Namespace) -> int:
+    """Wire corpus preview → BuildStage(dry_run=True) over plan artifact.
+
+    Loads the plan artifact (IngestionConfig + SegmentSetBatch), runs Build
+    in dry_run mode over a sample of documents / a specific class, and prints
+    the resulting chunks with text, augmentation fields, and provenance.
+    """
+    import json as _json
+    import pathlib
+
+    artifacts_root = pathlib.Path(args.artifacts)
+    run_id = args.run_id
+    plan_path = artifacts_root / run_id / "plan.json"
+    decompose_path = artifacts_root / run_id / "decompose.json"
+
+    if not plan_path.exists():
+        print(f"ERROR: Plan artifact not found at {plan_path}", file=sys.stderr)
+        print("Run 'corpus pipeline run' first to produce the plan artifact.", file=sys.stderr)
+        return 1
+    if not decompose_path.exists():
+        print(f"ERROR: Decompose artifact not found at {decompose_path}", file=sys.stderr)
+        return 1
+
+    try:
+        from finecorpus.pipeline.build.stage import BuildStage
+    except ImportError as exc:
+        print(f"ERROR: Import failure — {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        ingestion_config_dict = _json.loads(plan_path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: Could not load plan artifact — {exc}", file=sys.stderr)
+        return 1
+
+    # Run Build in dry_run mode — no embedding/upsert, chunks inline
+    stage = BuildStage(
+        artifacts_root=artifacts_root,
+        run_id=run_id,
+        dry_run=True,
+    )
+
+    try:
+        result_dict = stage._produce(ingestion_config_dict)  # noqa: SLF001
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: Preview build failed — {exc}", file=sys.stderr)
+        return 1
+
+    chunks = result_dict.get("chunks", [])
+    n_samples = getattr(args, "samples", 5)
+    filter_class = getattr(args, "class_filter", None)
+
+    # Filter by class if requested
+    if filter_class:
+        chunks = [c for c in chunks if c.get("provenance", {}).get("segment_type") == filter_class]
+
+    # Sample
+    sample_chunks = chunks[:n_samples]
+
+    print(f"Preview: {len(chunks)} chunks total (showing {len(sample_chunks)}")
+    if filter_class:
+        print(f"  class filter: {filter_class}")
+    print()
+
+    for i, chunk in enumerate(sample_chunks):
+        print(f"--- Chunk {i + 1} ---")
+        print(f"  document_id   : {chunk.get('document_id', '?')}")
+        print(f"  segment_path  : {chunk.get('segment_path', '?')}")
+        print(f"  chunk_index   : {chunk.get('chunk_index', '?')}")
+        print(f"  token_count   : {chunk.get('token_count', '?')}")
+        print()
+        text = chunk.get("text", "")
+        print(f"  text ({len(text)} chars):")
+        print("    " + text[:200].replace("\n", "\n    "))
+        if len(text) > 200:
+            print("    [... truncated]")
+        print()
+
+        aug = chunk.get("augmentation", {})
+        if any(v is not None for v in aug.values()):
+            print("  augmentation:")
+            for key, val in aug.items():
+                if val is not None:
+                    short_val = str(val)[:80]
+                    print(f"    {key}: {short_val}")
+            print()
+
+        prov = chunk.get("provenance", {})
+        transforms = prov.get("transformations", [])
+        if transforms:
+            print(f"  transformations ({len(transforms)}):")
+            for tr in transforms:
+                changed = tr.get("changed_text", False)
+                print(f"    [{tr.get('tier')}] {tr.get('operation')} changed={changed}")
+            print()
+
+    print(f"Build summary: {result_dict.get('report', '')}")
     return 0
 
 
@@ -455,6 +664,56 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="KB_ID",
         help="Knowledge base identity (ULID or human-readable id)",
     )
+    run_parser.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        default=False,
+        dest="yes",
+        help=(
+            "Skip the pre-Build cost gate confirmation prompt. Useful in non-interactive scripts."
+        ),
+    )
+
+    # --- preview subcommand (M-038) ---
+    preview_parser = sub.add_parser(
+        "preview",
+        help=(
+            "Preview chunks from the plan artifact without indexing (M-038 dry-run). "
+            "Runs Tier 1 + chunking + Tier 2 augmentation but skips embedding and Qdrant upsert."
+        ),
+    )
+    preview_parser.add_argument(
+        "--artifacts",
+        required=True,
+        metavar="DIR",
+        help="Root directory for pipeline artifacts (same as used with 'corpus pipeline run')",
+    )
+    preview_parser.add_argument(
+        "--run-id",
+        required=True,
+        dest="run_id",
+        metavar="ID",
+        help="Pipeline run ID containing plan + decompose artifacts",
+    )
+    preview_parser.add_argument(
+        "--class",
+        dest="class_filter",
+        metavar="CLASS",
+        default=None,
+        help=(
+            "Filter preview to a specific segment class "
+            "(e.g. prose, table, code). Default: all classes."
+        ),
+    )
+    preview_parser.add_argument(
+        "--samples",
+        dest="samples",
+        type=int,
+        default=5,
+        metavar="N",
+        help="Number of sample chunks to display (default: 5)",
+    )
 
     # --- preflight subcommand ---
     preflight_parser = sub.add_parser("preflight", help="Run configuration preflight checks")
@@ -593,6 +852,8 @@ def main() -> None:
 
     if args.command == "init":
         sys.exit(_cmd_init(args))
+    elif args.command == "preview":
+        sys.exit(_cmd_preview(args))
     elif args.command == "pipeline":
         if args.pipeline_command == "run":
             sys.exit(_cmd_pipeline_run(args))
