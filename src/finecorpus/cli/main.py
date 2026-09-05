@@ -54,6 +54,173 @@ def _cmd_init(args: argparse.Namespace) -> int:
     return 0 if result.preflight_passed else 1
 
 
+def _check_budget_direct_mode(args: argparse.Namespace) -> bool:
+    """Check BudgetGuard before Build in direct (non-queued) pipeline run mode.
+
+    Returns True if the budget cap was hit and the run should be aborted.
+    Returns False if the run should proceed.
+
+    When no control-plane DSN is configured → always returns False (no enforcement).
+    """
+    import pathlib
+
+    # Only activate when a control-plane DSN is configured
+    config = None
+    control_dsn = None
+    try:
+        from finecorpus.config.loader import load_config
+
+        config_path = getattr(args, "config", None) or "corpus.yaml"
+        config = load_config(config_path)
+        control_dsn = config.storage.postgres.url
+    except Exception:  # noqa: BLE001
+        return False  # Config unavailable → no enforcement
+
+    if control_dsn is None:
+        return False  # No DSN → behave as Phase 3
+
+    # Resolve projected cost from artifacts
+    projected_usd = 0.0
+    try:
+        import json as _json
+
+        from finecorpus.contracts.ingestion_config import IngestionConfig
+        from finecorpus.contracts.segment_set_batch import SegmentSetBatch
+        from finecorpus.pipeline.costing import estimate_ingestion_cost, resolve_costing_providers
+
+        artifacts_root = pathlib.Path(args.artifacts)
+        run_id = args.run_id
+        plan_path = artifacts_root / run_id / "plan.json"
+        decompose_path = artifacts_root / run_id / "decompose.json"
+
+        if plan_path.exists() and decompose_path.exists():
+            ic = IngestionConfig.model_validate(_json.loads(plan_path.read_text(encoding="utf-8")))
+            sb = SegmentSetBatch.model_validate(
+                _json.loads(decompose_path.read_text(encoding="utf-8"))
+            )
+            providers = resolve_costing_providers(ic)
+            if not providers.embedding_unavailable and providers.embedding_provider is not None:
+                est = estimate_ingestion_cost(
+                    segment_set_batch=sb,
+                    ingestion_config=ic,
+                    embedding_provider=providers.embedding_provider,
+                    llm_provider_or_none=providers.llm_provider,
+                )
+                projected_usd = float(est.total_cost_usd)
+    except Exception:  # noqa: BLE001
+        pass  # Best-effort; if we can't estimate, guard with 0
+
+    # Connect to control plane and check
+    try:
+        from sqlalchemy.orm import Session
+
+        from finecorpus.control.cost_ledger import BudgetDecision, BudgetGuard, CostLedgerRepository
+        from finecorpus.control.metadata import create_engine, create_tables
+
+        engine = create_engine(control_dsn)
+        create_tables(engine)
+
+        budgets = config.budgets  # type: ignore[union-attr]
+        kb_cap = float(budgets.per_kb_cap_usd) if budgets.per_kb_cap_usd is not None else None
+        ws_cap = (
+            float(budgets.per_workspace_cap_usd)
+            if budgets.per_workspace_cap_usd is not None
+            else None
+        )
+
+        if kb_cap is None and ws_cap is None:
+            engine.dispose()
+            return False  # No caps configured
+
+        with Session(engine) as session:
+            ledger_repo = CostLedgerRepository(session)
+            guard = BudgetGuard(kb_cap_usd=kb_cap, workspace_cap_usd=ws_cap, repo=ledger_repo)
+            decision = guard.check(
+                kb_id=args.kb,
+                workspace_id=args.workspace,
+                projected_usd=projected_usd,
+            )
+
+        engine.dispose()
+
+        if decision == BudgetDecision.allow:
+            return False
+
+        # Cap hit — inform user and abort
+        if decision == BudgetDecision.pause_kb_cap:
+            print(
+                f"ERROR: Per-KB budget cap hit (estimated ${projected_usd:.4f} would exceed cap).",
+                file=sys.stderr,
+            )
+            print(
+                "  To resume: raise per_kb_cap_usd in your config or use 'corpus jobs resume'.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"ERROR: Per-workspace budget cap hit "
+                f"(estimated ${projected_usd:.4f} would exceed cap).",
+                file=sys.stderr,
+            )
+            print(
+                "  To resume: raise per_workspace_cap_usd in your config "
+                "or use 'corpus jobs resume'.",
+                file=sys.stderr,
+            )
+        return True
+
+    except Exception as exc:  # noqa: BLE001
+        # Budget check failed (e.g. DB unreachable) — log and proceed without enforcement
+        import logging
+
+        logging.getLogger("finecorpus.cli").warning(
+            "budget guard check failed: %s; proceeding without enforcement", exc
+        )
+        return False
+
+
+def _requires_confirmation(cost_estimate: Any, args: argparse.Namespace) -> bool:
+    """Return True if the cost estimate requires interactive confirmation.
+
+    Phase 4 extension: also checks budgets.ingestion_confirmation_threshold_usd
+    from config (§16).  If the estimate is above the threshold, confirmation is
+    required regardless of whether a control-plane DSN is configured.
+
+    Note: this function does NOT check the ``--yes`` flag itself.  The caller
+    (``_cmd_pipeline_run``) is responsible for gating the call with
+    ``if not getattr(args, "yes", False)``.  This function returns a policy
+    decision based solely on the cost estimate and the threshold config.
+
+    Policy:
+      - CostEstimateUnavailable (declared non-local, unavailable) → always confirm.
+      - Estimate above ingestion_confirmation_threshold_usd → confirm.
+      - Estimate below threshold → skip (proceed without prompt).
+    """
+    from decimal import Decimal
+
+    from finecorpus.pipeline.costing import CostEstimateUnavailable
+
+    if isinstance(cost_estimate, CostEstimateUnavailable):
+        return True  # Honest unavailable → always confirm
+
+    # Load threshold from config if available; fall back to legacy always-confirm
+    threshold: Decimal | None = None
+    try:
+        from finecorpus.config.loader import load_config
+
+        config_path = getattr(args, "config", None) or "corpus.yaml"
+        cfg = load_config(config_path)
+        threshold = cfg.budgets.ingestion_confirmation_threshold_usd
+    except Exception:  # noqa: BLE001
+        # Config unavailable — use legacy behaviour (always confirm when estimate exists)
+        return True
+
+    total = getattr(cost_estimate, "total_cost_usd", Decimal("0"))
+    if threshold is not None and Decimal(str(total)) <= threshold:
+        return False  # Below threshold — proceed without prompt
+    return True
+
+
 def _cmd_pipeline_run(args: argparse.Namespace) -> int:
     """Wire corpus pipeline run → finecorpus.pipeline.run_pipeline.
 
@@ -61,6 +228,11 @@ def _cmd_pipeline_run(args: argparse.Namespace) -> int:
     Plan artifact (IngestionConfig + SegmentSetBatch), calls
     ``estimate_ingestion_cost``, prints the estimate, and requires ``--yes``
     or interactive confirmation to proceed.
+
+    Phase 4 extension: confirmation threshold from budgets config (§16).
+    When no control-plane DSN is configured, behaves as Phase 3.  When a DSN
+    is configured, also records actuals to cost_ledger and consults BudgetGuard
+    before Build.
     """
     from finecorpus.contracts.versions import ContractVersionError
     from finecorpus.pipeline import run_pipeline
@@ -72,15 +244,22 @@ def _cmd_pipeline_run(args: argparse.Namespace) -> int:
         cost_estimate = _try_load_cost_estimate(args)
         if cost_estimate is not None:
             _print_cost_estimate(cost_estimate)
-            # Interactive confirmation (skip if --yes was passed)
-            try:
-                answer = input("Proceed with ingestion? [y/N] ").strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                print("\nAborted.", file=sys.stderr)
-                return 1
-            if answer not in ("y", "yes"):
-                print("Ingestion cancelled by user.", file=sys.stderr)
-                return 1
+            # Confirmation required? (threshold-aware, Phase 4)
+            if _requires_confirmation(cost_estimate, args):
+                try:
+                    answer = input("Proceed with ingestion? [y/N] ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    print("\nAborted.", file=sys.stderr)
+                    return 1
+                if answer not in ("y", "yes"):
+                    print("Ingestion cancelled by user.", file=sys.stderr)
+                    return 1
+
+    # Phase 4: budget guard in direct-run mode
+    # When a control-plane DSN is configured, consult BudgetGuard before Build.
+    budget_paused = _check_budget_direct_mode(args)
+    if budget_paused:
+        return 1
 
     try:
         artifact_paths = run_pipeline(
@@ -601,6 +780,203 @@ def _cmd_preflight(args: argparse.Namespace) -> int:
     return 1 if report.has_failures else 0
 
 
+def _get_control_session() -> Any:
+    """Return a (engine, session) pair for the control-plane DB.
+
+    Raises SystemExit(1) when no DSN is configured or the DB is unreachable.
+    Caller is responsible for closing the session and disposing the engine.
+    """
+    try:
+        from finecorpus.config.loader import load_config
+
+        config = load_config("corpus.yaml")
+        dsn = config.storage.postgres.url
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: Could not load config — {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    if dsn is None:
+        print(
+            "ERROR: No control-plane DSN configured (storage.postgres.url). "
+            "Set FINECORPUS__STORAGE__POSTGRES__URL or configure corpus.yaml.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    try:
+        from sqlalchemy.orm import Session
+
+        from finecorpus.control.metadata import create_engine, create_tables
+
+        engine = create_engine(dsn)
+        create_tables(engine)
+        session = Session(engine)
+        return engine, session
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: Could not connect to control-plane DB — {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _cmd_jobs_enqueue(args: argparse.Namespace) -> int:
+    """Wire corpus jobs enqueue → pipeline.jobs.enqueue_job."""
+    import json as _json
+
+    from finecorpus.pipeline.jobs import enqueue_job
+
+    payload: dict[str, Any] = {}
+    if getattr(args, "source", None):
+        payload["source_dir"] = args.source
+    if getattr(args, "artifacts", None):
+        payload["artifacts_root"] = args.artifacts
+    if getattr(args, "run_id", None):
+        payload["run_id"] = args.run_id
+    if getattr(args, "payload_json", None):
+        try:
+            payload.update(_json.loads(args.payload_json))
+        except Exception as exc:  # noqa: BLE001
+            print(f"ERROR: Could not parse --payload JSON — {exc}", file=sys.stderr)
+            return 2
+
+    engine, session = _get_control_session()
+    try:
+        job = enqueue_job(
+            session=session,
+            kb_id=args.kb,
+            workspace_id=args.workspace,
+            job_type=args.job_type,
+            payload=payload,
+            dedupe_key=getattr(args, "dedupe_key", None),
+            priority=getattr(args, "priority", 0),
+        )
+        print(f"Enqueued job: {job.job_id}")
+        print(f"  type     : {job.job_type}")
+        print(f"  state    : {job.state}")
+        print(f"  kb_id    : {job.kb_id}")
+        print(f"  priority : {job.priority}")
+        return 0
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def _cmd_jobs_list(args: argparse.Namespace) -> int:
+    """Wire corpus jobs list → pipeline.jobs.list_jobs."""
+    from finecorpus.pipeline.jobs import list_jobs
+
+    engine, session = _get_control_session()
+    try:
+        jobs = list_jobs(
+            session=session,
+            kb_id=getattr(args, "kb", None),
+            state=getattr(args, "state", None),
+            limit=getattr(args, "limit", 50),
+        )
+        if not jobs:
+            print("No jobs found.")
+            return 0
+        print(f"{'JOB_ID':<34} {'TYPE':<22} {'STATE':<16} {'KB_ID':<20} CREATED")
+        print("-" * 110)
+        for job in jobs:
+            created = job.created_at.strftime("%Y-%m-%d %H:%M:%S") if job.created_at else "?"
+            print(f"{job.job_id:<34} {job.job_type:<22} {job.state:<16} {job.kb_id:<20} {created}")
+        return 0
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def _cmd_jobs_status(args: argparse.Namespace) -> int:
+    """Wire corpus jobs status → pipeline.jobs.get_job."""
+    import json as _json
+
+    from finecorpus.pipeline.jobs import get_job
+
+    engine, session = _get_control_session()
+    try:
+        job = get_job(session=session, job_id=args.job_id)
+        if job is None:
+            print(f"ERROR: job {args.job_id!r} not found.", file=sys.stderr)
+            return 1
+        print(f"Job: {job.job_id}")
+        print(f"  type          : {job.job_type}")
+        print(f"  state         : {job.state}")
+        print(f"  kb_id         : {job.kb_id}")
+        print(f"  workspace_id  : {job.workspace_id}")
+        print(f"  priority      : {job.priority}")
+        print(f"  attempt       : {job.attempt}")
+        print(f"  cost_accrued  : ${job.cost_accrued_usd or 0:.6f}")
+        print(f"  claimed_by    : {job.claimed_by}")
+        print(f"  created_at    : {job.created_at}")
+        print(f"  started_at    : {job.started_at}")
+        print(f"  finished_at   : {job.finished_at}")
+        if job.error_msg:
+            print(f"  error         : {job.error_msg}")
+        if job.checkpoint:
+            print(f"  checkpoint    : {_json.dumps(job.checkpoint, indent=4)}")
+        return 0
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def _cmd_jobs_resume(args: argparse.Namespace) -> int:
+    """Wire corpus jobs resume → pipeline.jobs.resume_job."""
+    from finecorpus.pipeline.jobs import resume_job
+
+    engine, session = _get_control_session()
+    try:
+        job = resume_job(session=session, job_id=args.job_id)
+        print(f"Resumed job {job.job_id}: state → {job.state}")
+        return 0
+    except KeyError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        session.close()
+        engine.dispose()
+
+
+def _cmd_jobs_cancel(args: argparse.Namespace) -> int:
+    """Wire corpus jobs cancel → pipeline.jobs.cancel_job."""
+    from finecorpus.pipeline.jobs import cancel_job
+
+    engine, session = _get_control_session()
+    try:
+        job = cancel_job(session=session, job_id=args.job_id)
+        print(f"Cancelled job {job.job_id}: state → {job.state}")
+        return 0
+    except KeyError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        session.close()
+        engine.dispose()
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="corpus",
@@ -849,6 +1225,88 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    # --- jobs subcommand (Phase 4: queue management) ---
+    jobs_parser = sub.add_parser(
+        "jobs",
+        help="Job queue management — enqueue, list, status, resume, cancel (§6.6)",
+    )
+    jobs_sub = jobs_parser.add_subparsers(dest="jobs_command", metavar="<subcommand>")
+
+    # jobs enqueue
+    enqueue_parser = jobs_sub.add_parser("enqueue", help="Enqueue a new job")
+    enqueue_parser.add_argument("--kb", required=True, metavar="KB_ID", help="Knowledge base ID")
+    enqueue_parser.add_argument(
+        "--workspace", required=True, metavar="WORKSPACE_ID", help="Workspace ID"
+    )
+    enqueue_parser.add_argument(
+        "--type",
+        required=True,
+        dest="job_type",
+        metavar="TYPE",
+        choices=["ingest", "reindex_full", "reindex_incremental", "restore", "purge"],
+        help="Job type",
+    )
+    enqueue_parser.add_argument(
+        "--source",
+        default=None,
+        metavar="DIR",
+        help="Source directory (for ingest jobs)",
+    )
+    enqueue_parser.add_argument(
+        "--artifacts",
+        default=None,
+        metavar="DIR",
+        help="Artifacts root directory",
+    )
+    enqueue_parser.add_argument(
+        "--run-id",
+        dest="run_id",
+        default=None,
+        metavar="ID",
+        help="Pipeline run ID",
+    )
+    enqueue_parser.add_argument(
+        "--dedupe-key",
+        dest="dedupe_key",
+        default=None,
+        metavar="KEY",
+        help="Deduplication key (one active job per KB+key)",
+    )
+    enqueue_parser.add_argument(
+        "--priority",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Job priority (higher = higher priority; default 0)",
+    )
+    enqueue_parser.add_argument(
+        "--payload",
+        dest="payload_json",
+        default=None,
+        metavar="JSON",
+        help="Additional payload as a JSON object string",
+    )
+
+    # jobs list
+    list_parser = jobs_sub.add_parser("list", help="List jobs")
+    list_parser.add_argument("--kb", default=None, metavar="KB_ID", help="Filter by KB ID")
+    list_parser.add_argument("--state", default=None, metavar="STATE", help="Filter by state")
+    list_parser.add_argument(
+        "--limit", type=int, default=50, metavar="N", help="Maximum rows (default 50)"
+    )
+
+    # jobs status
+    status_parser = jobs_sub.add_parser("status", help="Show job details")
+    status_parser.add_argument("job_id", metavar="JOB_ID", help="Job ID")
+
+    # jobs resume
+    resume_parser = jobs_sub.add_parser("resume", help="Resume a paused_budget job")
+    resume_parser.add_argument("job_id", metavar="JOB_ID", help="Job ID")
+
+    # jobs cancel
+    cancel_parser = jobs_sub.add_parser("cancel", help="Cancel a queued or paused job")
+    cancel_parser.add_argument("job_id", metavar="JOB_ID", help="Job ID")
+
     # --- report subcommand (Phase 2: findings + exclusion reports) ---
     report_parser = sub.add_parser(
         "report",
@@ -916,6 +1374,20 @@ def main() -> None:
         sys.exit(_cmd_plan(args))
     elif args.command == "report":
         sys.exit(_cmd_report(args))
+    elif args.command == "jobs":
+        if args.jobs_command == "enqueue":
+            sys.exit(_cmd_jobs_enqueue(args))
+        elif args.jobs_command == "list":
+            sys.exit(_cmd_jobs_list(args))
+        elif args.jobs_command == "status":
+            sys.exit(_cmd_jobs_status(args))
+        elif args.jobs_command == "resume":
+            sys.exit(_cmd_jobs_resume(args))
+        elif args.jobs_command == "cancel":
+            sys.exit(_cmd_jobs_cancel(args))
+        else:
+            parser.print_help()
+            sys.exit(1)
     else:
         parser.print_help()
         sys.exit(1)
