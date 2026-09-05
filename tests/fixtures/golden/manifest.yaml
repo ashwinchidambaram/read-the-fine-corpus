@@ -1,4 +1,4 @@
-schema_version: 1.0.0
+schema_version: 1.1.0
 fixtures:
 - file: corpus/clean_native.pdf
   role: §18.1 — clean native-text PDF
@@ -22,6 +22,12 @@ fixtures:
   expected_findings: []
   flags: []
   sha256: ff5829d59ef3af5697e631604c4b359c2f980c791da6bef2a623be54fd6a41bc
+  phase3:
+    expected_chunking_strategy:
+    - recursive_char
+    expected_augmentation:
+      parent_breadcrumb: null
+      table_description: null
 - file: corpus/scanned_poor.pdf
   role: §18.1 — poorly scanned PDF with known-degraded regions
   generator: generators/gen_scanned_pdf.py
@@ -44,6 +50,12 @@ fixtures:
   flags:
   - low_ocr_confidence_page_3
   sha256: 0f2f1aae07bca02a8c0e4ee93153957c75b06215156efd80064a52eac239917b
+  phase3:
+    expected_chunking_strategy:
+    - recursive_char
+    expected_augmentation:
+      parent_breadcrumb: null
+      table_description: null
 - file: corpus/bloated_manual.pdf
   role: §18.1 — bloated manual with cross-references, boilerplate, mixed content types
   generator: generators/gen_bloated_manual.py
@@ -80,6 +92,12 @@ fixtures:
   - cross_reference_see_section_4_2
   - scanned_appendix
   sha256: 40304331a4a65042746e5afad838d336e73d9952593790b076e5ba85d4f27fdb
+  phase3:
+    expected_chunking_strategy:
+    - recursive_char
+    expected_augmentation:
+      parent_breadcrumb: non_null
+      table_description: null
 - file: corpus/boilerplate_a.pdf
   role: §18.1 auxiliary — corpus boilerplate detection support (shares preamble with
     bloated_manual.pdf)
@@ -104,6 +122,12 @@ fixtures:
   flags:
   - boilerplate_legal_preamble
   sha256: 815f983925154301809ff5ee514046db9381d529788056c653b3430f30d4633b
+  phase3:
+    expected_chunking_strategy:
+    - recursive_char
+    expected_augmentation:
+      parent_breadcrumb: non_null
+      table_description: null
 - file: corpus/boilerplate_b.pdf
   role: §18.1 auxiliary — corpus boilerplate detection support (shares preamble with
     bloated_manual.pdf)
@@ -128,6 +152,12 @@ fixtures:
   flags:
   - boilerplate_legal_preamble
   sha256: 3ef2bfebd976798635c8a490c27fffb58c8e3678e6abb661d6c8631153d983e7
+  phase3:
+    expected_chunking_strategy:
+    - recursive_char
+    expected_augmentation:
+      parent_breadcrumb: non_null
+      table_description: null
 - file: corpus/nested_tables.html
   role: §18.1 — document with complex and nested tables
   generator: generators/gen_nested_tables.py
@@ -152,6 +182,13 @@ fixtures:
   - merged_headers_colspan
   - merged_headers_rowspan
   sha256: 8fc2d0c93ab656e0740312b6f799e17fe11aa9e0bc32c10cd76faa998ff143ff
+  phase3:
+    expected_chunking_strategy:
+    - table_atomic
+    - recursive_char
+    expected_augmentation:
+      parent_breadcrumb: non_null
+      table_description: non_null
 - file: corpus/report_spreadsheet.xlsx
   role: '§18.1 — spreadsheet: report kind'
   generator: generators/gen_spreadsheets.py
@@ -177,6 +214,13 @@ fixtures:
     disposition: ingest
   flags: []
   sha256: 4dfcb62e1fb53ea7be1ed2908b82d5de212f1ae5bb875be8fcb787b1cc9ba120
+  phase3:
+    expected_chunking_strategy:
+    - table_atomic
+    - recursive_char
+    expected_augmentation:
+      parent_breadcrumb: non_null
+      table_description: non_null
 - file: corpus/database_spreadsheet.xlsx
   role: '§18.1 — spreadsheet: database kind'
   generator: generators/gen_spreadsheets.py
@@ -198,6 +242,8 @@ fixtures:
   - document_level_exclusion
   - zero_chunks_expected
   sha256: 3e4841db92125d20869316aeae87e2edab41000d0cb450d2913518182fb38da4
+  phase3:
+    note: excluded (spreadsheet_database) — no chunks produced; chunking strategy not applicable
 - file: corpus/model_spreadsheet.xlsx
   role: '§18.1 — spreadsheet: model kind'
   generator: generators/gen_spreadsheets.py
@@ -221,6 +267,8 @@ fixtures:
   - zero_chunks_expected
   - formula_dense
   sha256: fa80a61a9c23e0d530ce4e80084e26c219110f76dc1a978971638e7fa5947c3f
+  phase3:
+    note: excluded (spreadsheet_model) — no chunks produced; chunking strategy not applicable
 - file: corpus/confluence_export.html
   role: §18.1 — Confluence-style HTML export
   generator: generators/gen_confluence_html.py
@@ -255,6 +303,14 @@ fixtures:
   - internal_wiki_links
   - code_blocks_bash_python_yaml
   sha256: 41b73dff7c855896dbdd6b4cbf4e6c6de70d8686fc51a323c1e6ce7d5caf09a8
+  phase3:
+    expected_chunking_strategy:
+    - table_atomic
+    - code_syntax
+    - recursive_char
+    expected_augmentation:
+      parent_breadcrumb: non_null
+      table_description: non_null
 - file: corpus/policy_v1.pdf
   role: '§18.1 — near-duplicate family: policy version 1 (oldest, superseded)'
   generator: generators/gen_near_duplicates.py
@@ -277,6 +333,8 @@ fixtures:
   - dedup_role_superseded
   - default_no_segments
   sha256: 7871f563247a93b54450557cc3002c6d2592301354dd59a0adf576ae68d82b06
+  phase3:
+    note: excluded (dedup_superseded) — no chunks produced; chunking strategy not applicable
 - file: corpus/policy_v2.pdf
   role: '§18.1 — near-duplicate family: policy version 2 (intermediate, superseded)'
   generator: generators/gen_near_duplicates.py
@@ -298,6 +356,8 @@ fixtures:
   - dedup_role_superseded
   - default_no_segments
   sha256: 8d39980eaf3c5bc205356d274aa1e6db2a2527000b93f9253d912e0d72df2147
+  phase3:
+    note: excluded (dedup_superseded) — no chunks produced; chunking strategy not applicable
 - file: corpus/policy_v3.pdf
   role: '§18.1 — near-duplicate family: policy version 3 (newest, primary)'
   generator: generators/gen_near_duplicates.py
@@ -320,6 +380,12 @@ fixtures:
   - near_duplicate
   - dedup_role_primary
   sha256: 8497b16eea9a456f0999455d40640f836c4411d8a28051ddd5220ab93fd674e8
+  phase3:
+    expected_chunking_strategy:
+    - recursive_char
+    expected_augmentation:
+      parent_breadcrumb: non_null
+      table_description: null
 - file: corpus/password_protected.pdf
   role: '§18.1 — unservable: password-protected PDF'
   generator: generators/gen_unservable.py
@@ -340,6 +406,8 @@ fixtures:
   - document_level_exclusion
   - unservable_encrypted
   sha256: 21e88b2f4ca8cd5cc3e8c2a09334697957948cee002670a8dc63fcdc811b66c0
+  phase3:
+    note: excluded (encrypted/password_protected) — no chunks produced; chunking strategy not applicable
 - file: corpus/audio_stub.wav
   role: '§18.1 — unservable: audio file'
   generator: generators/gen_unservable.py
@@ -359,6 +427,8 @@ fixtures:
   - document_level_exclusion
   - unservable_audio
   sha256: 3fa20276d8a4131431490ed129d0b05fafa4e9c82d4339b5cf635512103d6615
+  phase3:
+    note: excluded (unservable_audio) — no chunks produced; chunking strategy not applicable
 - file: corpus/video_stub.mp4
   role: '§18.1 — unservable: video file'
   generator: generators/gen_unservable.py
@@ -378,6 +448,8 @@ fixtures:
   - document_level_exclusion
   - unservable_video
   sha256: 9a4b8abae4dae7f59f4872ab80f61f774f5c3ad01c957819baf4ebcd964a2edf
+  phase3:
+    note: excluded (unservable_video) — no chunks produced; chunking strategy not applicable
 - file: corpus/image_only.pdf
   role: '§18.1 — image-only PDF parsed via OCR (Phase 2)'
   generator: generators/gen_unservable.py
@@ -401,6 +473,12 @@ fixtures:
   - ocr_parsed
   - low_confidence_page
   sha256: 7ddfe5289a1c41a373a58a56163b6343acf16437f975e3eb9c7d3b680bb3ff23
+  phase3:
+    expected_chunking_strategy:
+    - recursive_char
+    expected_augmentation:
+      parent_breadcrumb: null
+      table_description: null
 - file: corpus/cad_binary.dwg
   role: '§18.1 — unservable: CAD/binary file with plausible magic bytes'
   generator: generators/gen_unservable.py
@@ -421,6 +499,8 @@ fixtures:
   - document_level_exclusion
   - unservable_cad
   sha256: 755644163743d2d6c6d3fe91da0b272bebd86b8a377de1166382fc0e92ef20d8
+  phase3:
+    note: excluded (unservable_cad) — no chunks produced; chunking strategy not applicable
 - file: corpus/adversarial.pdf
   role: §18.1 + §14.1 — adversarial PDF with injection-shaped text and invisible content
   generator: generators/gen_adversarial_pdf.py
@@ -481,6 +561,12 @@ fixtures:
   - invisible_off_page_page_7
   - all_text_retained_not_stripped
   sha256: ff04be503f7c2c2e8cfa65c19cedf0714d4a80893b921e412dd54c0bfbe20927
+  phase3:
+    expected_chunking_strategy:
+    - recursive_char
+    expected_augmentation:
+      parent_breadcrumb: non_null
+      table_description: null
 - file: corpus/form_filled.pdf
   role: §18.1 Finding F-1 — filled form PDF with label/value pairs (form_field coverage)
   generator: generators/gen_form_pdf.py
@@ -504,6 +590,12 @@ fixtures:
   - form_filled
   - label_value_pairs
   sha256: e4848120d053d55df4d907a40233adf05a775ae442acc6fb0c4264fc1c7516af
+  phase3:
+    expected_chunking_strategy:
+    - recursive_char
+    expected_augmentation:
+      parent_breadcrumb: null
+      table_description: null
 - file: corpus/malformed_structure.pdf
   role: §18.1 Finding F-2 — PDF with deliberately corrupted FlateDecode content stream
     (unknown segment type coverage)
@@ -533,3 +625,9 @@ fixtures:
   - partial_parse
   - corrupted_content_stream_page_2
   sha256: d494775231248ad511b41fb0067b891da69cd1c9a0310a2a2c07154393138cfe
+  phase3:
+    expected_chunking_strategy:
+    - recursive_char
+    expected_augmentation:
+      parent_breadcrumb: null
+      table_description: null
