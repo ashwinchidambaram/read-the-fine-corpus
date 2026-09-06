@@ -1,21 +1,32 @@
 """Phase 5 tests for M-086 eval-question deletion linkage.
 
+These tests exercise the PRODUCTION deletion-linkage path: the document's real
+chunk/segment IDs are collected from the index via a payload-filtered search
+(``collect_document_segment_ids``) BEFORE ``delete_by_document`` removes the
+points, and eval questions whose ``source_segment_ids`` intersect that set are
+removed.  The same code path runs for the real QdrantAdapter and the test
+FakeAdapter — there is deliberately no FakeAdapter-only ``.collections`` shortcut.
+
+Because the collection is resolved through a real ``AliasRecord`` (exactly as in
+production), every test seeds a genuine alias record rather than mocking the
+repository.  A dedicated test asserts the honest degraded behaviour when no
+alias record exists (no collection → nothing to resolve → nothing removed).
+
 Test inventory:
-  test_eval_questions_removed_on_doc_deletion — M-086: delete a doc → its
-    derived eval questions removed, count on report, audit row written;
-    other docs' questions untouched.
-  test_eval_questions_count_on_report — DeletionReport.eval_questions_removed
-    carries the correct count.
-  test_other_kb_questions_untouched — questions for a different KB are not
-    removed when a doc is deleted in another KB.
-  test_no_eval_questions_yields_zero_count — deletion of a doc with no
-    eval questions yields eval_questions_removed=0.
+  test_eval_questions_removed_via_production_path — M-086 core: removal happens
+    through the search-based collection path (this FAILS against the old
+    ``.collections``-only code once the alias resolves the collection).
+  test_eval_questions_removed_on_doc_deletion — sibling doc's questions untouched.
+  test_eval_questions_count_on_report — DeletionReport.eval_questions_removed count.
+  test_audit_row_includes_eval_questions_removed — audit row carries the count.
+  test_other_kb_questions_untouched — cross-KB isolation.
+  test_no_eval_questions_yields_zero_count — no questions → zero.
+  test_no_alias_record_removes_nothing — honest degraded path when unresolvable.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from unittest.mock import patch
 
 import pytest
 from sqlalchemy import create_engine, select
@@ -23,7 +34,8 @@ from sqlalchemy.orm import Session
 
 from finecorpus.control.audit import AuditLogRecord
 from finecorpus.control.eval_store import EvalSetRepository
-from finecorpus.control.metadata import create_tables
+from finecorpus.control.metadata import AliasRepository, create_tables
+from finecorpus.index.adapter import alias_name
 from finecorpus.pipeline.deletion import delete_document
 from tests.retrieval.helpers import FakeAdapter
 
@@ -42,6 +54,11 @@ CHK_B1 = "seg-b-chunk-1"
 EVAL_SET_A = "es-del-001"
 EVAL_SET_OTHER = "es-del-other"
 _NOW = datetime(2026, 9, 6, 12, 0, 0, tzinfo=UTC)
+
+
+def _coll_name(kb_id: str) -> str:
+    return f"rtfc_{kb_id.replace('-', '').lower()}_00000001"
+
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -102,21 +119,52 @@ def _seed_kb_with_eval(
     session.commit()
 
 
+def _seed_alias(
+    session: Session,
+    *,
+    kb_id: str = KB_ID,
+    coll: str | None = None,
+) -> str:
+    """Seed a real promoted AliasRecord so the live collection resolves.
+
+    This mirrors production: the deletion path reads ``AliasRecord.collection_name``
+    to find the live collection and then searches it for the document's segments.
+    """
+    if coll is None:
+        coll = _coll_name(kb_id)
+    repo = AliasRepository(session)
+    repo.create(alias=alias_name(kb_id), kb_id=kb_id, workspace_id=WS_ID)
+    repo.promote(
+        alias=alias_name(kb_id),
+        new_collection=coll,
+        new_build_id=1,
+        embedding_provider="fake",
+        embedding_model="fake-embed",
+        embedding_dimensions=64,
+        config_version="cfg-000",
+        promoted_at=_NOW,
+    )
+    session.commit()
+    return coll
+
+
 def _make_adapter_with_doc(
     *,
     kb_id: str = KB_ID,
     doc_id: str = DOC_A,
     seg_ids: list[str] | None = None,
 ) -> FakeAdapter:
-    """Create a FakeAdapter with points for doc_id carrying seg_ids as chunk_ids."""
-    from finecorpus.index.adapter import alias_name  # noqa: PLC0415
+    """Create a FakeAdapter with points for doc_id carrying seg_ids as chunk_ids.
 
+    The collection name matches ``_coll_name(kb_id)`` so it lines up with the
+    promoted AliasRecord seeded by ``_seed_alias``.
+    """
     if seg_ids is None:
         seg_ids = [CHK_A1, CHK_A2]
 
     adapter = FakeAdapter()
     alias = alias_name(kb_id)
-    coll = f"rtfc_{kb_id.replace('-', '').lower()}_00000001"
+    coll = _coll_name(kb_id)
 
     points = []
     for seg_id in seg_ids:
@@ -138,66 +186,77 @@ def _make_adapter_with_doc(
 
     adapter.collections[coll] = {"points": points}
     adapter.aliases[alias] = coll
-
-    # Register alias record so the AliasRepository mock returns it
     return adapter
 
 
-def _patch_alias_none(session: Session):
-    """Patch AliasRepository to return None (no live collection)."""
-    from unittest.mock import MagicMock  # noqa: PLC0415
-
-    mock_repo = MagicMock()
-    mock_repo.get.return_value = None
-    return patch("finecorpus.pipeline.deletion.AliasRepository", return_value=mock_repo)
-
-
 # ---------------------------------------------------------------------------
-# test_eval_questions_removed_on_doc_deletion (M-086)
+# M-086 core: removal via the production search path
 # ---------------------------------------------------------------------------
 
 
 class TestEvalQuestionsRemovedOnDocDeletion:
     """M-086: delete a doc → its derived eval questions removed."""
 
-    def test_eval_questions_removed_on_doc_deletion(self, engine):
+    def test_eval_questions_removed_via_production_path(self, engine):
+        """Removal must flow through the search-based collection path.
+
+        The alias resolves the live collection; ``collect_document_segment_ids``
+        searches it for DOC_A's real chunk IDs (CHK_A1/CHK_A2) BEFORE the points
+        are deleted, and the eval store removes the matching questions.  This is
+        the exact production path — no FakeAdapter-only ``.collections`` iteration.
+        """
         with Session(engine) as session:
-            # Seed eval questions derived from DOC_A's segments
             _seed_kb_with_eval(
                 session, kb_id=KB_ID, eval_set_id=EVAL_SET_A, doc_id=DOC_A, seg_ids=[CHK_A1, CHK_A2]
             )
+            _seed_alias(session, kb_id=KB_ID)
+            adapter = _make_adapter_with_doc(kb_id=KB_ID, doc_id=DOC_A, seg_ids=[CHK_A1, CHK_A2])
 
-            # Seed eval questions for DOC_B — should NOT be removed
+            report = delete_document(
+                kb_id=KB_ID,
+                document_id=DOC_A,
+                purge=False,
+                session=session,
+                adapter=adapter,
+                deleted_by="test-actor",
+                reason="test deletion",
+                deleted_at=_NOW,
+            )
+
+            assert report.eval_questions_removed == 2
+            eval_repo = EvalSetRepository(session)
+            assert len(eval_repo.get_questions(EVAL_SET_A)) == 0
+
+    def test_eval_questions_removed_on_doc_deletion(self, engine):
+        with Session(engine) as session:
+            _seed_kb_with_eval(
+                session, kb_id=KB_ID, eval_set_id=EVAL_SET_A, doc_id=DOC_A, seg_ids=[CHK_A1, CHK_A2]
+            )
+            # Sibling doc's questions — must NOT be removed
             _seed_kb_with_eval(
                 session, kb_id=KB_ID, eval_set_id="es-del-002", doc_id=DOC_B, seg_ids=[CHK_B1]
             )
-
+            _seed_alias(session, kb_id=KB_ID)
             adapter = _make_adapter_with_doc(kb_id=KB_ID, doc_id=DOC_A, seg_ids=[CHK_A1, CHK_A2])
 
-            with _patch_alias_none(session):
-                report = delete_document(
-                    kb_id=KB_ID,
-                    document_id=DOC_A,
-                    purge=False,
-                    session=session,
-                    adapter=adapter,
-                    deleted_by="test-actor",
-                    reason="test deletion",
-                    deleted_at=_NOW,
-                )
+            report = delete_document(
+                kb_id=KB_ID,
+                document_id=DOC_A,
+                purge=False,
+                session=session,
+                adapter=adapter,
+                deleted_by="test-actor",
+                reason="test deletion",
+                deleted_at=_NOW,
+            )
 
-            # Check eval_questions_removed on report
             assert isinstance(report.eval_questions_removed, int)
-            assert report.eval_questions_removed >= 2  # CHK_A1 and CHK_A2 derived questions
+            assert report.eval_questions_removed == 2
 
-            # Verify DOC_A's questions are gone
             eval_repo = EvalSetRepository(session)
-            remaining_a = eval_repo.get_questions(EVAL_SET_A)
-            assert len(remaining_a) == 0
-
-            # Verify DOC_B's questions are still present
-            remaining_b = eval_repo.get_questions("es-del-002")
-            assert len(remaining_b) == 1
+            assert len(eval_repo.get_questions(EVAL_SET_A)) == 0
+            # Sibling doc's question survives (its segment was not in the deleted doc).
+            assert len(eval_repo.get_questions("es-del-002")) == 1
 
     def test_eval_questions_count_on_report(self, engine):
         """DeletionReport.eval_questions_removed reflects actual removed count."""
@@ -205,19 +264,18 @@ class TestEvalQuestionsRemovedOnDocDeletion:
             _seed_kb_with_eval(
                 session, kb_id=KB_ID, eval_set_id=EVAL_SET_A, doc_id=DOC_A, seg_ids=[CHK_A1, CHK_A2]
             )
-
+            _seed_alias(session, kb_id=KB_ID)
             adapter = _make_adapter_with_doc(kb_id=KB_ID, doc_id=DOC_A, seg_ids=[CHK_A1, CHK_A2])
 
-            with _patch_alias_none(session):
-                report = delete_document(
-                    kb_id=KB_ID,
-                    document_id=DOC_A,
-                    purge=False,
-                    session=session,
-                    adapter=adapter,
-                    deleted_by="test-actor",
-                    deleted_at=_NOW,
-                )
+            report = delete_document(
+                kb_id=KB_ID,
+                document_id=DOC_A,
+                purge=False,
+                session=session,
+                adapter=adapter,
+                deleted_by="test-actor",
+                deleted_at=_NOW,
+            )
 
             assert report.eval_questions_removed == 2
 
@@ -227,21 +285,19 @@ class TestEvalQuestionsRemovedOnDocDeletion:
             _seed_kb_with_eval(
                 session, kb_id=KB_ID, eval_set_id=EVAL_SET_A, doc_id=DOC_A, seg_ids=[CHK_A1]
             )
-
+            _seed_alias(session, kb_id=KB_ID)
             adapter = _make_adapter_with_doc(kb_id=KB_ID, doc_id=DOC_A, seg_ids=[CHK_A1])
 
-            with _patch_alias_none(session):
-                delete_document(
-                    kb_id=KB_ID,
-                    document_id=DOC_A,
-                    purge=False,
-                    session=session,
-                    adapter=adapter,
-                    deleted_by="test-actor",
-                    deleted_at=_NOW,
-                )
+            delete_document(
+                kb_id=KB_ID,
+                document_id=DOC_A,
+                purge=False,
+                session=session,
+                adapter=adapter,
+                deleted_by="test-actor",
+                deleted_at=_NOW,
+            )
 
-            # Find the deletion audit row
             from finecorpus.control.audit import AuditAction  # noqa: PLC0415
 
             audit_rows = list(
@@ -260,11 +316,10 @@ class TestEvalQuestionsRemovedOnDocDeletion:
     def test_other_kb_questions_untouched(self, engine):
         """Questions in a different KB must not be removed."""
         with Session(engine) as session:
-            # Seed KB_ID eval questions
             _seed_kb_with_eval(
                 session, kb_id=KB_ID, eval_set_id=EVAL_SET_A, doc_id=DOC_A, seg_ids=[CHK_A1]
             )
-            # Seed other KB eval questions with same chunk ID
+            # Other KB, same chunk ID — the KB scope must protect it.
             _seed_kb_with_eval(
                 session,
                 kb_id=KB_ID_OTHER,
@@ -272,44 +327,65 @@ class TestEvalQuestionsRemovedOnDocDeletion:
                 doc_id=DOC_A,
                 seg_ids=[CHK_A1],
             )
-
+            _seed_alias(session, kb_id=KB_ID)
             adapter = _make_adapter_with_doc(kb_id=KB_ID, doc_id=DOC_A, seg_ids=[CHK_A1])
 
-            with _patch_alias_none(session):
-                delete_document(
-                    kb_id=KB_ID,
-                    document_id=DOC_A,
-                    purge=False,
-                    session=session,
-                    adapter=adapter,
-                    deleted_by="test-actor",
-                    deleted_at=_NOW,
-                )
+            delete_document(
+                kb_id=KB_ID,
+                document_id=DOC_A,
+                purge=False,
+                session=session,
+                adapter=adapter,
+                deleted_by="test-actor",
+                deleted_at=_NOW,
+            )
 
             eval_repo = EvalSetRepository(session)
-            # KB_ID questions should be gone
-            remaining_own = eval_repo.get_questions(EVAL_SET_A)
-            assert len(remaining_own) == 0
-
-            # Other KB questions should still be present
-            remaining_other = eval_repo.get_questions(EVAL_SET_OTHER)
-            assert len(remaining_other) == 1
+            assert len(eval_repo.get_questions(EVAL_SET_A)) == 0
+            assert len(eval_repo.get_questions(EVAL_SET_OTHER)) == 1
 
     def test_no_eval_questions_yields_zero_count(self, engine):
         """Deletion of a doc with no eval questions yields eval_questions_removed=0."""
         with Session(engine) as session:
-            # No eval questions seeded
+            _seed_alias(session, kb_id=KB_ID)
             adapter = _make_adapter_with_doc(kb_id=KB_ID, doc_id=DOC_A, seg_ids=[CHK_A1])
 
-            with _patch_alias_none(session):
-                report = delete_document(
-                    kb_id=KB_ID,
-                    document_id=DOC_A,
-                    purge=False,
-                    session=session,
-                    adapter=adapter,
-                    deleted_by="test-actor",
-                    deleted_at=_NOW,
-                )
+            report = delete_document(
+                kb_id=KB_ID,
+                document_id=DOC_A,
+                purge=False,
+                session=session,
+                adapter=adapter,
+                deleted_by="test-actor",
+                deleted_at=_NOW,
+            )
 
             assert report.eval_questions_removed == 0
+
+    def test_no_alias_record_removes_nothing(self, engine):
+        """Honest degraded path: with no alias record the live collection cannot
+        be resolved, so no segment IDs are collected and nothing is removed.
+
+        This documents the boundary — M-086 linkage depends on the index being
+        resolvable; it does not silently claim success when it is not.
+        """
+        with Session(engine) as session:
+            _seed_kb_with_eval(
+                session, kb_id=KB_ID, eval_set_id=EVAL_SET_A, doc_id=DOC_A, seg_ids=[CHK_A1, CHK_A2]
+            )
+            # No _seed_alias — AliasRepository.get returns None.
+            adapter = _make_adapter_with_doc(kb_id=KB_ID, doc_id=DOC_A, seg_ids=[CHK_A1, CHK_A2])
+
+            report = delete_document(
+                kb_id=KB_ID,
+                document_id=DOC_A,
+                purge=False,
+                session=session,
+                adapter=adapter,
+                deleted_by="test-actor",
+                deleted_at=_NOW,
+            )
+
+            assert report.eval_questions_removed == 0
+            eval_repo = EvalSetRepository(session)
+            assert len(eval_repo.get_questions(EVAL_SET_A)) == 2
