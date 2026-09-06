@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Sign in — Read The Fine Corpus{% endblock %}
+{% block content %}
+<section class="card auth-card">
+  <h1>Read The Fine Corpus</h1>
+  <p class="muted">Sign in to continue.</p>
+  {% if error %}
+  <p class="error" role="alert">{{ error }}</p>
+  {% endif %}
+  <form method="post" action="/login">
+    <label for="username">Username</label>
+    <input id="username" name="username" type="text" autocomplete="username" required autofocus />
+
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" required />
+
+    <button type="submit">Sign in</button>
+  </form>
+</section>
+{% endblock %}

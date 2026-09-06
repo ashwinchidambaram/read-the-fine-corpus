@@ -1,0 +1,92 @@
+:root {
+  --bg: #0f1115;
+  --card: #1a1d24;
+  --fg: #e6e8eb;
+  --muted: #9aa1ab;
+  --accent: #4c8bf5;
+  --error: #ff6b6b;
+  --border: #2a2e37;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+  line-height: 1.5;
+}
+
+.container {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 3rem 1rem;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1.75rem;
+}
+
+.auth-card { max-width: 380px; margin: 0 auto; }
+
+h1 { font-size: 1.35rem; margin: 0 0 0.25rem; }
+
+.muted { color: var(--muted); }
+
+.error {
+  color: var(--error);
+  background: rgba(255, 107, 107, 0.08);
+  border: 1px solid rgba(255, 107, 107, 0.3);
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.9rem;
+}
+
+label {
+  display: block;
+  margin: 0.9rem 0 0.3rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+input {
+  width: 100%;
+  padding: 0.6rem 0.7rem;
+  background: #0f1115;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--fg);
+  font-size: 0.95rem;
+}
+
+input:focus { outline: 2px solid var(--accent); outline-offset: 0; }
+
+button {
+  margin-top: 1.2rem;
+  padding: 0.6rem 1rem;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+
+button.secondary {
+  margin-top: 0;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--fg);
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.logout-form { margin: 0; }

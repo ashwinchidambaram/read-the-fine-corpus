@@ -102,6 +102,51 @@ class AuthConfig(BaseModel):
     )
 
 
+class WebConfig(BaseModel):
+    """Web application (server-rendered UI) settings (Phase 6, WU-A).
+
+    Foundation scope only: bind host/port for the FastAPI+Jinja+HTMX app.
+
+    The session-signing/opaque-token secret is **never** carried here — it is
+    supplied via the ``RTFC_WEB_SESSION_SECRET`` environment variable and read
+    at app-construction time. This preserves the project's secret-handling
+    discipline (§14.2): no secret is ever written to ``corpus.yaml``.
+    """
+
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "Phase 6 — When ``true``, the web UI service is served. Defaults to "
+            "``false``; the web app is opt-in and independent of the retrieval API."
+        ),
+    )
+    host: str = Field(
+        default="127.0.0.1",
+        description="Phase 6 — Bind address for the web UI service.",
+    )
+    port: int = Field(
+        default=8080,
+        ge=1,
+        le=65535,
+        description="Phase 6 — Bind port for the web UI service.",
+    )
+    session_ttl_seconds: int = Field(
+        default=60 * 60 * 8,
+        ge=60,
+        description="Phase 6 — Session lifetime in seconds (default 8 hours).",
+    )
+    cookie_secure: bool = Field(
+        default=False,
+        description=(
+            "Phase 6 — When ``true``, the session cookie is emitted with the "
+            "``Secure`` flag so it is never sent over plaintext HTTP. Default "
+            "``false`` for local/dev over HTTP; set ``true`` for ANY deployment "
+            "reachable over HTTPS (a reverse proxy cannot add ``Secure`` to a "
+            "cookie the app emitted without it)."
+        ),
+    )
+
+
 class PlatformConfig(BaseModel):
     """Platform identity and global behaviour (§4.6)."""
 
@@ -962,6 +1007,7 @@ class Config(BaseModel):
     """
 
     auth: AuthConfig = Field(default_factory=AuthConfig)
+    web: WebConfig = Field(default_factory=WebConfig)
     platform: PlatformConfig = Field(default_factory=PlatformConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
     providers: ProvidersConfig = Field(default_factory=ProvidersConfig)
