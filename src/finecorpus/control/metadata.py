@@ -213,7 +213,7 @@ _AUDIT_LOG_TRIGGER_FN_DDL = DDL(
 CREATE OR REPLACE FUNCTION _rtfc_audit_log_immutable()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-    RAISE EXCEPTION 'audit_log is append-only (entry_id=%)', OLD.entry_id;
+    RAISE EXCEPTION 'audit_log is append-only (entry_id=%%)', OLD.entry_id;
 END;
 $$;
 """
@@ -232,7 +232,7 @@ _TOMBSTONE_LOG_TRIGGER_FN_DDL = DDL(
 CREATE OR REPLACE FUNCTION _rtfc_tombstone_log_immutable()
 RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-    RAISE EXCEPTION 'tombstone_log is append-only (entry_id=%)', OLD.entry_id;
+    RAISE EXCEPTION 'tombstone_log is append-only (entry_id=%%)', OLD.entry_id;
 END;
 $$;
 """
