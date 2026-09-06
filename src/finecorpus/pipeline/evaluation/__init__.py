@@ -6,6 +6,8 @@ Modules:
   baseline   — §9.3 pinned naive baseline reference config builder and helpers.
   candidates — Configuration-sweep candidate enumeration and deterministic corpus
                sampling (§9.3, M-046, D-07).
+  generation — Eval-set generation, stratified by QuestionType, with provisional
+               labelling (M-043) and D-22 injection scanning.
 
 These are intentionally pure-logic modules: they compute over in-memory data only.
 """
@@ -21,6 +23,10 @@ from finecorpus.pipeline.evaluation.candidates import (
     SweepCandidate,
     enumerate_candidates,
     sample_corpus,
+)
+from finecorpus.pipeline.evaluation.generation import (
+    GeneratedQuestionRecord,
+    generate_eval_set,
 )
 from finecorpus.pipeline.evaluation.metrics import (
     QuestionScore,
@@ -47,4 +53,7 @@ __all__ = [
     "SweepCandidate",
     "enumerate_candidates",
     "sample_corpus",
+    # generation
+    "generate_eval_set",
+    "GeneratedQuestionRecord",
 ]

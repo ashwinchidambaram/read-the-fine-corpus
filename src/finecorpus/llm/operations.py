@@ -41,6 +41,7 @@ from finecorpus.llm.base import (
 from finecorpus.llm.prompts import (
     build_augmentation_prompt,
     build_classification_prompt,
+    build_question_generation_prompt,
     check_for_injection_suspicion,
 )
 
@@ -196,6 +197,17 @@ class QuestionGenSegment(BaseModel):
         description="Ordered heading breadcrumb (§4.3).",
     )
     source_document_id: str = Field(description="Stable document ID for provenance.")
+    segment_id: str | None = Field(
+        default=None,
+        description=(
+            "Stable segment-level ID for provenance.  When set, "
+            "``_segment_id()`` in generation.py uses this value for "
+            "``source_segment_ids`` / ``expected_segment_ids`` on each "
+            "EvalQuestion; without it the fallback is ``source_document_id``, "
+            "which makes eval scoring semantically meaningless (§19 acceptance "
+            "criteria require segment-level granularity)."
+        ),
+    )
 
 
 class _QuestionItem(BaseModel):
@@ -338,12 +350,66 @@ def run_question_generation(
     op_config: ResolvedOpConfig,
     input_model: QuestionGenInput,
 ) -> QuestionGenOutput:
-    """Question generation — raises OperationNotImplementedError (Phase 5).
+    """Execute the question-generation operation (Phase 5 — M-067 enforcement point).
 
-    Loud stub: callers that attempt this in Phase 3 get a clear error message
-    with the target phase, not a silent no-op.
+    Builds prompts via ``prompts.build_question_generation_prompt``, dispatches
+    to the provider, and validates the response schema.  Segment text is framed
+    as data (M-067): placed inside ``<document_content>`` delimiters in the
+    user message and never in the system message instruction area.
+
+    Parameters
+    ----------
+    provider:
+        A concrete ``LLMProvider``.
+    op_config:
+        Fully-resolved operation config (temperature, max_output_tokens, etc.).
+    input_model:
+        ``QuestionGenInput`` containing segments, class_description,
+        question_types, and count_per_type.
+
+    Returns
+    -------
+    QuestionGenOutput
+        Schema-validated output; every question has
+        ``generation_method="llm_generated"`` and ``review_status="provisional"``
+        (enforced by the ``_QuestionItem`` schema).
+
+    Raises
+    ------
+    LLMProviderUnavailableError
+        After ``op_config.max_retries`` failed attempts (schema-validation
+        failure counts as a provider error per §4.3).
+    LLMProviderError
+        Non-retryable provider error.
     """
-    raise OperationNotImplementedError("question_generation", available_in="Phase 5")
+    system, user = build_question_generation_prompt(
+        segments=input_model.segments,
+        class_description=input_model.class_description,
+        question_types=[qt.value for qt in input_model.question_types],
+        count_per_type=input_model.count_per_type,
+    )
+
+    output = _call_with_retry(
+        provider=provider,
+        op_config=op_config,
+        system=system,
+        user=user,
+        schema=QuestionGenOutput,
+        operation_name="question_generation",
+    )
+
+    # §14.1: check free-text output fields for injection-shaped content; log only.
+    for item in output.questions:
+        if check_for_injection_suspicion(item.question_text):
+            logger.warning(
+                "LLM security observation: question_generation 'question_text' field "
+                "contains injection-shaped content. Stored for provenance; "
+                "NOT re-fed to model. provider=%s model=%s",
+                op_config.provider_id,
+                op_config.model_id,
+            )
+
+    return output
 
 
 def run_rewriting(
