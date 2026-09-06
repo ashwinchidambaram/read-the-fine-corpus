@@ -39,34 +39,54 @@ def get_session_factory() -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Admin principal extraction (simple header-based; control API uses X-Admin-Key
-# for now — Phase 6 will wire the full auth stack)
+# Admin authentication (key-validated; identity is server-derived — a client-
+# set header can NEVER establish admin identity on break-glass routes)
 # ---------------------------------------------------------------------------
 
 
-def _require_admin_id(
-    x_admin_id: Annotated[
-        str | None,
-        Header(
-            alias="X-Admin-ID",
-            description="Admin principal ID (Phase 4: trusted header; Phase 6 → full auth).",
-        ),
-    ] = None,
-) -> str:
-    """Require a non-empty X-Admin-ID header.
+def _extract_raw_key(
+    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
+    x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
+) -> str | None:
+    if authorization and authorization.lower().startswith("bearer "):
+        return authorization[7:].strip()
+    return x_api_key
 
-    Phase 4: the control API trusts this header directly.  Phase 6 will wire
-    the full API-key authentication stack to replace this.
+
+def _require_admin_id(
+    raw_key: Annotated[str | None, Depends(_extract_raw_key)] = None,
+) -> str:
+    """Authenticate an admin API key and return the server-derived identity.
+
+    Security: break-glass is the most privileged operation in the system.
+    Identity comes exclusively from a validated admin-role API key — never
+    from a client-set header (spoofable-field bypass, fixed in PR #37).
 
     Raises:
-        HTTPException 401: If the header is absent.
+        HTTPException 401/403: missing/invalid key or non-admin role.
     """
-    if not x_admin_id:
+    if raw_key is None:
         raise HTTPException(
             status_code=401,
-            detail="Missing X-Admin-ID header.  Admin identity required for break-glass routes.",
-        )
-    return x_admin_id
+            detail="Admin API key required for break-glass routes.",
+        ) from None
+    try:
+        from finecorpus.control.auth import ApiKeyRepository, Role
+
+        session_factory = get_session_factory()
+        with session_factory() as sess:
+            repo = ApiKeyRepository(sess)
+            principal = repo.validate(raw_key)
+        if Role(principal.role) != Role.admin:
+            raise HTTPException(
+                status_code=403,
+                detail="Admin role required for break-glass routes.",
+            ) from None
+        return principal.name
+    except HTTPException:
+        raise
+    except Exception:  # noqa: BLE001
+        raise HTTPException(status_code=401, detail="Invalid or expired API key.") from None
 
 
 # ---------------------------------------------------------------------------
@@ -163,7 +183,7 @@ def create_grant(
 
     with session_factory() as session:
         try:
-            grant_record, audit_record = issue_grant(
+            grant_record, _audit_record = issue_grant(
                 session=session,
                 target_kb_id=body.target_kb_id,
                 granting_admin_id=admin_id,
@@ -172,18 +192,21 @@ def create_grant(
                 notified_principals=body.notified_principals,
             )
             session.commit()
+            # Read fields while the instance is still session-bound: the ORM
+            # record detaches once the session closes (DetachedInstanceError).
+            response = GrantResponse(
+                grant_id=grant_record.grant_id,
+                target_kb_id=grant_record.target_kb_id,
+                granting_admin_id=grant_record.granting_admin_id,
+                reason=grant_record.reason,
+                granted_at=grant_record.granted_at.isoformat(),
+                expires_at=grant_record.expires_at.isoformat(),
+                audit_entry_id=grant_record.audit_entry_id,
+            )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    return GrantResponse(
-        grant_id=grant_record.grant_id,
-        target_kb_id=grant_record.target_kb_id,
-        granting_admin_id=grant_record.granting_admin_id,
-        reason=grant_record.reason,
-        granted_at=grant_record.granted_at.isoformat(),
-        expires_at=grant_record.expires_at.isoformat(),
-        audit_entry_id=grant_record.audit_entry_id,
-    )
+    return response
 
 
 @router.get(
@@ -204,21 +227,22 @@ def list_active_grants(
     with session_factory() as session:
         repo = BreakGlassRepository(session)
         grants = repo.list_active()
-
-    return ActiveGrantsResponse(
-        grants=[
-            ActiveGrantInfo(
-                grant_id=g.grant_id,
-                target_kb_id=g.target_kb_id,
-                granting_admin_id=g.granting_admin_id,
-                reason=g.reason,
-                granted_at=g.granted_at.isoformat(),
-                expires_at=g.expires_at.isoformat(),
-                audit_entry_id=g.audit_entry_id,
-            )
-            for g in grants
-        ]
-    )
+        # Build the response while records are still session-bound.
+        response = ActiveGrantsResponse(
+            grants=[
+                ActiveGrantInfo(
+                    grant_id=g.grant_id,
+                    target_kb_id=g.target_kb_id,
+                    granting_admin_id=g.granting_admin_id,
+                    reason=g.reason,
+                    granted_at=g.granted_at.isoformat(),
+                    expires_at=g.expires_at.isoformat(),
+                    audit_entry_id=g.audit_entry_id,
+                )
+                for g in grants
+            ]
+        )
+    return response
 
 
 @router.delete(
@@ -244,6 +268,11 @@ def revoke_grant(
         try:
             record = repo.revoke(grant_id)
             session.commit()
+            response = RevokeResponse(
+                grant_id=record.grant_id,
+                revoked=True,
+                revoked_at=record.revoked_at.isoformat() if record.revoked_at else "",
+            )
         except KeyError:
             raise HTTPException(
                 status_code=404,
@@ -255,11 +284,7 @@ def revoke_grant(
                 detail=str(exc),
             ) from exc
 
-    return RevokeResponse(
-        grant_id=record.grant_id,
-        revoked=True,
-        revoked_at=record.revoked_at.isoformat() if record.revoked_at else "",
-    )
+    return response
 
 
 __all__ = ["router"]
