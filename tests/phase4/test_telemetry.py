@@ -63,12 +63,15 @@ def test_five_domains_present_m102():
 
 
 def test_quality_stubs_have_stub_docstring():
-    """Quality metrics have docstrings containing '[STUB' to signal Phase 5 population."""
+    """Remaining quality stub metrics have docstrings containing 'STUB'.
+
+    QUALITY_RETRIEVAL_PRECISION_AT_K and QUALITY_RETRIEVAL_RECALL_AT_K are
+    no longer stubs — they are populated by the eval scoring harness (Phase 5).
+    The three metrics below remain un-implemented stubs.
+    """
     import finecorpus.telemetry as tel
 
     for metric_obj in [
-        tel.QUALITY_RETRIEVAL_PRECISION_AT_K,
-        tel.QUALITY_RETRIEVAL_RECALL_AT_K,
         tel.QUALITY_INJECTION_FLAGGED_DOCS,
         tel.QUALITY_PII_FLAGGED_DOCS,
         tel.QUALITY_EVAL_SET_SIZE,
@@ -76,6 +79,29 @@ def test_quality_stubs_have_stub_docstring():
         desc = metric_obj._documentation  # prometheus_client stores in _documentation
         assert "[STUB" in desc or "STUB" in desc, (
             f"Quality metric {metric_obj._name!r} does not have STUB marker in docstring: {desc!r}"
+        )
+
+
+def test_quality_precision_recall_are_live():
+    """QUALITY_RETRIEVAL_PRECISION_AT_K and QUALITY_RETRIEVAL_RECALL_AT_K are live (Phase 5+).
+
+    These gauges are populated by score_eval_set at promotion time and must NOT
+    carry STUB markers in their help strings.
+    """
+    import finecorpus.telemetry as tel
+
+    for metric_obj in [
+        tel.QUALITY_RETRIEVAL_PRECISION_AT_K,
+        tel.QUALITY_RETRIEVAL_RECALL_AT_K,
+    ]:
+        desc = metric_obj._documentation
+        assert "STUB" not in desc, (
+            f"Quality metric {metric_obj._name!r} is live (Phase 5+) but still carries "
+            f"a STUB marker: {desc!r}"
+        )
+        assert "score_eval_set" in desc or "eval scoring harness" in desc, (
+            f"Quality metric {metric_obj._name!r} description should reference the "
+            f"eval scoring harness: {desc!r}"
         )
 
 

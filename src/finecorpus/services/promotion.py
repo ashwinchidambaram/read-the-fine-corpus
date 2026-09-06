@@ -156,6 +156,20 @@ def score_and_validate_shadow(
             )
             # scoring_error propagates to validate_shadow via shadow_eval_score=None
             # with an eval set configured → Gate 3 FAIL (see lifecycle semantics).
+    elif eval_set_questions is not None and provider is None:
+        # Eval questions were supplied but no provider was given.  Scoring cannot
+        # run — Gate 3 will FAIL with a clear diagnostic naming the missing provider.
+        scoring_error = (
+            "eval scoring did not run: a provider (EmbeddingProvider) is required "
+            "but provider=None was supplied to score_and_validate_shadow. "
+            "Pass an EmbeddingProvider instance to enable eval scoring."
+        )
+        logger.error(
+            "score_and_validate_shadow: kb=%r eval_set_questions supplied but "
+            "provider=None — scoring skipped, Gate 3 will FAIL. "
+            "Supply a provider to enable eval scoring.",
+            ctx.kb_id,
+        )
 
     # ------------------------------------------------------------------
     # Step 2: Fetch live baseline

@@ -250,11 +250,18 @@ class TestGate4RegressionThreshold:
         assert not result.passed
         assert result.gate == "regression_threshold"
 
-    def test_gate_exactly_at_threshold_behavior(self):
-        """Threshold check uses strict greater-than (>): regression == threshold → PASSED.
+    def test_regression_below_threshold_passes(self):
+        """Threshold check uses strict greater-than (>): regression < threshold → PASSED.
 
         The gate FAILS only when regression STRICTLY EXCEEDS the threshold.
         Use a value that is unambiguously within threshold (0.04 < 0.05 → PASSED).
+
+        IEEE-754 hazard note — exact-threshold-apart scores are float-hazardous:
+            (0.80 - 0.75) evaluates to 0.050000000000000044 in IEEE-754, which
+            is STRICTLY GREATER THAN 0.05 and would therefore BLOCK promotion.
+        Callers must keep headroom (e.g. shadow_score = baseline - threshold + epsilon)
+        rather than relying on exact floating-point equality at the boundary.
+        The strict ``>`` check is correct per spec (§10.4) and is kept as-is.
         """
         adapter = _make_adapter(100)
         result = validate_shadow(
@@ -270,6 +277,33 @@ class TestGate4RegressionThreshold:
         assert result.passed
         gate_map = {g["gate"]: g for g in result.gate_results}
         assert gate_map["regression_threshold"]["status"] == str(GateStatus.PASSED)
+
+    def test_ieee754_hazard_exact_threshold_apart_blocks(self):
+        """IEEE-754 hazard: (0.80 - 0.75) == 0.050000000000000044 > 0.05 → BLOCKS.
+
+        This documents the float-hazardous exact-threshold boundary case:
+        scores that are EXACTLY threshold apart in real arithmetic may still
+        trigger the gate due to IEEE-754 floating-point representation.
+
+        Callers MUST keep headroom between shadow_score and baseline rather than
+        relying on exact-threshold equality.  The strict ``>`` check is correct
+        per spec (§10.4) — this test simply makes the hazard observable.
+        """
+        adapter = _make_adapter(100)
+        result = validate_shadow(
+            adapter=adapter,
+            shadow_collection="shadow",
+            expected_min_chunks=1,
+            shadow_eval_score=0.75,
+            live_baseline_score=0.80,
+            eval_regression_threshold=0.05,
+            eval_configured=True,
+        )
+        # In IEEE-754: 0.80 - 0.75 = 0.050000000000000044, which IS > 0.05.
+        # The gate correctly BLOCKS promotion even though the intended regression
+        # is exactly at the threshold. Callers must keep headroom to avoid this.
+        assert not result.passed
+        assert result.gate == "regression_threshold"
 
 
 # ---------------------------------------------------------------------------

@@ -180,15 +180,18 @@ RETRIEVAL_TENANT_VOLUME: Counter = Counter(
 QUALITY_RETRIEVAL_PRECISION_AT_K: Gauge = Gauge(
     "rtfc_quality_retrieval_precision_at_k",
     (
-        "[STUB — Phase 5] Mean precision@k measured against curated eval sets. "
-        "Populated by the offline evaluation harness; zero until Phase 5 ships eval."
+        "Mean context precision@k measured against curated eval sets. "
+        "Populated by the eval scoring harness (score_eval_set) at promotion time (Phase 5+)."
     ),
     ["kb_id"],
 )
 
 QUALITY_RETRIEVAL_RECALL_AT_K: Gauge = Gauge(
     "rtfc_quality_retrieval_recall_at_k",
-    ("[STUB — Phase 5] Mean recall@k measured against curated eval sets. Zero until Phase 5."),
+    (
+        "Mean context recall@k measured against curated eval sets. "
+        "Populated by the eval scoring harness (score_eval_set) at promotion time (Phase 5+)."
+    ),
     ["kb_id"],
 )
 
