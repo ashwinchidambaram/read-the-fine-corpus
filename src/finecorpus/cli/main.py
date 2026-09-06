@@ -944,6 +944,147 @@ def _cmd_kb_snapshots(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_kb_status(args: argparse.Namespace) -> int:
+    """Wire corpus kb status → hot/cold inventory + memory footprint (M-096).
+
+    Displays:
+    - Live collection and N-1 collection names
+    - Vector count and estimated memory footprint per hot copy
+    - §10.2 advisory about raising hot_retention_count
+    """
+    try:
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+
+        from finecorpus.config.loader import load_config
+        from finecorpus.control.metadata import AliasRepository
+        from finecorpus.index.adapter import alias_name
+        from finecorpus.index.qdrant.backend import QdrantAdapter
+
+        config_path = getattr(args, "config", None)
+        config = load_config(config_path)
+        engine = create_engine(config.storage.postgres.url or "sqlite:///:memory:")
+        SessionLocal = sessionmaker(bind=engine)
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: Could not initialize control-plane connection — {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        adapter = QdrantAdapter(url=config.storage.qdrant.url)
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: Could not connect to Qdrant — {exc}", file=sys.stderr)
+        return 1
+
+    kb_id = args.kb_id
+    als = alias_name(kb_id)
+    with SessionLocal() as session:
+        alias_repo = AliasRepository(session)
+        record = alias_repo.get(als)
+
+    if record is None:
+        print(f"No alias record found for kb '{kb_id}'.", file=sys.stderr)
+        return 1
+
+    print(f"KB status: {kb_id}")
+    print(f"  alias            : {record.alias}")
+    print(f"  live collection  : {record.collection_name or '(none)'}")
+    print(f"  N-1 collection   : {record.previous_collection or '(none)'}")
+    promoted = record.promoted_at.isoformat() if record.promoted_at else "(never)"
+    print(f"  promoted_at      : {promoted}")
+    print()
+
+    # Hot copy inventory
+    hot_collections: list[str] = []
+    if record.collection_name:
+        hot_collections.append(record.collection_name)
+    if record.previous_collection:
+        hot_collections.append(record.previous_collection)
+
+    hot_retention = getattr(getattr(config, "index_lifecycle", None), "hot_retention_count", 1)
+    print(f"  hot_retention_count (config): {hot_retention}")
+    print(f"  hot collections found       : {len(hot_collections)}")
+    print()
+
+    for coll in hot_collections:
+        label = "(live)" if coll == record.collection_name else "(N-1)"
+        try:
+            info = adapter.get_collection_info(coll)
+            dims = info.vector_size
+            count = info.point_count
+            # §10.2 memory estimate: vector_count × dims × 4 bytes + payload estimate
+            # Payload estimate: ~500 bytes per point (heuristic; label as estimate)
+            vector_bytes = count * dims * 4
+            payload_estimate = count * 500
+            total_bytes = vector_bytes + payload_estimate
+            total_mb = total_bytes / (1024 * 1024)
+            print(f"  [{coll}] {label}")
+            print(f"    vector count     : {count:,}")
+            print(f"    dimensions       : {dims}")
+            mem_note = f"ESTIMATE: {count:,} × {dims}d × 4B + ~500B payload/point"
+            print(f"    memory estimate  : {total_mb:.1f} MB  ({mem_note})")
+        except Exception as exc:  # noqa: BLE001
+            print(f"  [{coll}] {label}  ERROR: {exc}", file=sys.stderr)
+
+    print()
+    print(
+        "  NOTE (§10.2): Raising hot_retention_count adds one full hot collection to"
+        " memory cost per additional copy. Each hot copy costs approximately"
+        " vector_count × dimensions × 4 bytes plus payload overhead."
+    )
+    return 0
+
+
+def _cmd_kb_export(args: argparse.Namespace) -> int:
+    """Wire corpus kb export → finecorpus.pipeline.export.export_kb (M-090)."""
+    try:
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+
+        from finecorpus.config.loader import load_config
+        from finecorpus.index.qdrant.backend import QdrantAdapter
+
+        config_path = getattr(args, "config", None)
+        config = load_config(config_path)
+        engine = create_engine(config.storage.postgres.url or "sqlite:///:memory:")
+        SessionLocal = sessionmaker(bind=engine)
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: Could not initialize control-plane connection — {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        adapter = QdrantAdapter(url=config.storage.qdrant.url)
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: Could not connect to Qdrant — {exc}", file=sys.stderr)
+        return 1
+
+    from finecorpus.pipeline.export import export_kb
+
+    try:
+        with SessionLocal() as session:
+            manifest = export_kb(
+                kb_id=args.kb_id,
+                out_dir=args.out,
+                session=session,
+                adapter=adapter,
+                artifacts_root=getattr(args, "artifacts", None),
+                run_id=getattr(args, "run_id", None),
+            )
+    except ValueError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print(f"ERROR: File system error — {exc}", file=sys.stderr)
+        return 1
+
+    print(f"Export complete: {manifest.out_dir}")
+    print(f"  KB          : {manifest.kb_id}")
+    print(f"  exported_at : {manifest.exported_at.isoformat()}")
+    print(f"  chunk_count : {manifest.chunk_count:,}")
+    print(f"  files       : {len(manifest.file_hashes)}")
+    print(f"  manifest    : {manifest.out_dir / 'manifest.json'}")
+    return 0
+
+
 def _cmd_report(args: argparse.Namespace) -> int:
     """Wire corpus report → finecorpus.pipeline.report.generate_report."""
     from pathlib import Path
@@ -1661,6 +1802,58 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Path to corpus.yaml (default: ./corpus.yaml)",
     )
 
+    # corpus kb status <kb_id>  (M-096)
+    status_parser = kb_sub.add_parser(
+        "status",
+        help=(
+            "Show hot/cold version inventory + estimated memory footprint per hot copy (M-096). "
+            "Includes the §10.2 advisory about hot_retention_count."
+        ),
+    )
+    status_parser.add_argument("kb_id", metavar="KB_ID", help="Knowledge-base identifier")
+    status_parser.add_argument(
+        "--config",
+        metavar="FILE",
+        default=None,
+        help="Path to corpus.yaml (default: ./corpus.yaml)",
+    )
+
+    # corpus kb export <kb_id> --out DIR  (M-090)
+    export_parser = kb_sub.add_parser(
+        "export",
+        help=(
+            "Export a knowledge base to a portable bundle directory (M-090). "
+            "Includes config, class descriptions, findings/exclusion reports, "
+            "chunks (scrolled from live collection), eval-set stub, and manifest."
+        ),
+    )
+    export_parser.add_argument("kb_id", metavar="KB_ID", help="Knowledge-base identifier")
+    export_parser.add_argument(
+        "--out",
+        required=True,
+        metavar="DIR",
+        help="Output directory for the export bundle (created if it does not exist).",
+    )
+    export_parser.add_argument(
+        "--config",
+        metavar="FILE",
+        default=None,
+        help="Path to corpus.yaml (default: ./corpus.yaml)",
+    )
+    export_parser.add_argument(
+        "--artifacts",
+        metavar="DIR",
+        default=None,
+        help="Artifacts root for config/report files (optional).",
+    )
+    export_parser.add_argument(
+        "--run-id",
+        dest="run_id",
+        metavar="ID",
+        default=None,
+        help="Pipeline run ID for artifact lookup (required when --artifacts is set).",
+    )
+
     # --- report subcommand (Phase 2: findings + exclusion reports) ---
     report_parser = sub.add_parser(
         "report",
@@ -1753,6 +1946,10 @@ def main() -> None:
             sys.exit(_cmd_kb_purge_doc(args))
         elif args.kb_command == "snapshots":
             sys.exit(_cmd_kb_snapshots(args))
+        elif args.kb_command == "status":
+            sys.exit(_cmd_kb_status(args))
+        elif args.kb_command == "export":
+            sys.exit(_cmd_kb_export(args))
         else:
             parser.print_help()
             sys.exit(1)

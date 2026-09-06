@@ -35,6 +35,7 @@ from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Path
+from fastapi.responses import Response as _PlainResponse
 from pydantic import BaseModel, Field
 
 import finecorpus
@@ -420,6 +421,27 @@ def _response_to_http_status(response: RetrievalResponse) -> int:
 
 
 @app.get(
+    "/metrics",
+    summary="Prometheus metrics",
+    description="Prometheus-format metrics for all five telemetry domains (M-102).",
+    tags=["ops"],
+    response_class=_PlainResponse,
+)
+def retrieval_metrics() -> _PlainResponse:
+    """Prometheus /metrics endpoint (M-102).
+
+    Exposes ingestion, index, retrieval, quality (stubs), and governance metrics.
+    """
+    import prometheus_client
+
+    data = prometheus_client.generate_latest()
+    return _PlainResponse(
+        content=data,
+        media_type=prometheus_client.CONTENT_TYPE_LATEST,
+    )
+
+
+@app.get(
     "/healthz",
     summary="Health check",
     description="Returns service status. Always 200 when the process is alive.",
@@ -548,6 +570,8 @@ def query_kb(
 
     All returned content is labelled ``trust_level: untrusted_ingested`` (§14.1).
     """
+    import time as _time
+
     # ------------------------------------------------------------------
     # Rate limit check (M-101) — before touching any DB or embedding.
     # Keyed by principal_id when available; falls back to kb_id for
@@ -583,6 +607,7 @@ def query_kb(
     session_factory = _get_session()
     cache = get_query_cache()
 
+    _t0 = _time.monotonic()
     with session_factory() as session:
         svc_response = query(
             kb_id=kb_id,
@@ -598,6 +623,42 @@ def query_kb(
             explain=body.explain,
             break_glass_grant_id=x_break_glass_grant_id,
         )
+    _latency = _time.monotonic() - _t0
+
+    # ------------------------------------------------------------------
+    # Telemetry instrumentation (M-102: retrieval domain)
+    # Wrapped in try/except so telemetry failures never break retrieval.
+    # ------------------------------------------------------------------
+    try:
+        from finecorpus.telemetry import (
+            RETRIEVAL_ERRORS_TOTAL,
+            RETRIEVAL_LATENCY,
+            RETRIEVAL_REQUESTS_TOTAL,
+            RETRIEVAL_TENANT_VOLUME,
+            RETRIEVAL_ZERO_RESULTS_TOTAL,
+        )
+
+        result_status_val = (
+            svc_response.result_status.value
+            if hasattr(svc_response.result_status, "value")
+            else str(svc_response.result_status)
+        )
+        RETRIEVAL_REQUESTS_TOTAL.labels(kb_id=kb_id, result_status=result_status_val).inc()
+        RETRIEVAL_LATENCY.labels(kb_id=kb_id).observe(_latency)
+
+        if svc_response.result_status.value in ("no_matches", "filtered_to_zero"):
+            RETRIEVAL_ZERO_RESULTS_TOTAL.labels(kb_id=kb_id, reason=result_status_val).inc()
+
+        if svc_response.result_status.value == "error" and svc_response.error is not None:
+            RETRIEVAL_ERRORS_TOTAL.labels(
+                kb_id=kb_id,
+                error_code=str(svc_response.error.code),
+            ).inc()
+
+        if principal is not None:
+            RETRIEVAL_TENANT_VOLUME.labels(kb_id=kb_id, principal_id=principal.principal_id).inc()
+    except Exception:  # noqa: BLE001
+        pass  # telemetry must never break retrieval
 
     http_status = _response_to_http_status(svc_response)
     if http_status != 200:
