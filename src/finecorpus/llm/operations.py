@@ -197,6 +197,17 @@ class QuestionGenSegment(BaseModel):
         description="Ordered heading breadcrumb (§4.3).",
     )
     source_document_id: str = Field(description="Stable document ID for provenance.")
+    segment_id: str | None = Field(
+        default=None,
+        description=(
+            "Stable segment-level ID for provenance.  When set, "
+            "``_segment_id()`` in generation.py uses this value for "
+            "``source_segment_ids`` / ``expected_segment_ids`` on each "
+            "EvalQuestion; without it the fallback is ``source_document_id``, "
+            "which makes eval scoring semantically meaningless (§19 acceptance "
+            "criteria require segment-level granularity)."
+        ),
+    )
 
 
 class _QuestionItem(BaseModel):

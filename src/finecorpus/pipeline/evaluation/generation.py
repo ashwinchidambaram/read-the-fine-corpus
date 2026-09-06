@@ -98,11 +98,15 @@ _EVAL_SET_SCHEMA_VERSION = "1.0.0"
 # ---------------------------------------------------------------------------
 
 
-class _GeneratedQuestion:
-    """Internal holder for a generated question plus its D-22 suspicion score.
+class GeneratedQuestionRecord:
+    """Public holder for a generated question plus its D-22 suspicion score.
 
-    Not exported — used only within this module and returned to callers so
-    PR-2's store can persist the injection_suspicion_score.
+    Returned by ``generate_eval_set`` so that PR-2's eval_store can persist the
+    ``injection_suspicion_score`` alongside the EvalQuestion control row.
+
+    Previously named ``_GeneratedQuestion`` (private).  Renamed to a public name
+    so downstream units (eval_store, PR-2) can import it without depending on an
+    internal implementation detail.
     """
 
     __slots__ = ("question", "injection_suspicion_score")
@@ -110,6 +114,10 @@ class _GeneratedQuestion:
     def __init__(self, question: EvalQuestion, injection_suspicion_score: float) -> None:
         self.question = question
         self.injection_suspicion_score = injection_suspicion_score
+
+
+# Backward-compatible alias — remove once all call sites use GeneratedQuestionRecord.
+_GeneratedQuestion = GeneratedQuestionRecord
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +146,7 @@ def generate_eval_set(
     kb_id: str,
     workspace_id: str,
     count_per_type: int = 5,
-) -> tuple[EvalSet, list[_GeneratedQuestion]]:
+) -> tuple[EvalSet, list[GeneratedQuestionRecord]]:
     """Generate an EvalSet from corpus segments, stratified by QuestionType.
 
     Parameters
@@ -166,9 +174,9 @@ def generate_eval_set(
 
     Returns
     -------
-    (EvalSet, list[_GeneratedQuestion])
+    (EvalSet, list[GeneratedQuestionRecord])
         The assembled EvalSet (confidence_level=provisional, origin=generated)
-        plus a list of ``_GeneratedQuestion`` objects carrying the per-question
+        plus a list of ``GeneratedQuestionRecord`` objects carrying the per-question
         injection_suspicion_score for PR-2's store.
 
     Notes
@@ -181,6 +189,12 @@ def generate_eval_set(
     ``assessment.eval_injection_suspicion_threshold`` keep ``review_status=unreviewed``.
     All generated questions start as unreviewed; this constraint prevents any
     generation-time auto-promotion to a reviewed status.
+
+    Multi-class limitation: When ``class_descriptions`` is a ``dict``, only the
+    FIRST value is forwarded to the LLM as the class description.  Phase 5 is
+    scoped to single-class corpora; per-class question stratification is a future
+    refinement.  Callers with multi-class corpora should invoke ``generate_eval_set``
+    once per class, or accept that the first class description drives all questions.
     """
     threshold = config.assessment.eval_injection_suspicion_threshold
     now = datetime.now(tz=UTC)
@@ -196,7 +210,7 @@ def generate_eval_set(
     # Build typed segment list for the operation
     typed_segments = _coerce_segments(segments)
 
-    all_generated: list[_GeneratedQuestion] = []
+    all_generated: list[GeneratedQuestionRecord] = []
 
     question_types = [
         QuestionType.factual_lookup,
@@ -294,7 +308,7 @@ def generate_eval_set(
                 class_description_ref=class_description,
             )
 
-            all_generated.append(_GeneratedQuestion(eval_question, inj_score))
+            all_generated.append(GeneratedQuestionRecord(eval_question, inj_score))
 
     tenancy = TenancyBlock(
         workspace_id=workspace_id,
@@ -357,12 +371,17 @@ def _coerce_one_segment(s: Any) -> QuestionGenSegment:
     doc_id = str(_get("source_document_id") or _get("document_id") or "unknown")
     seg_type = _get("segment_type")
     structural_path = _get("structural_path") or []
+    # Extract segment_id so that _segment_id() can return the real segment-level
+    # ID rather than falling back to source_document_id (Ruling 1 fix).
+    raw_seg_id = _get("segment_id")
+    seg_id: str | None = str(raw_seg_id) if raw_seg_id is not None else None
 
     return QuestionGenSegment(
         segment_text=text,
         source_document_id=doc_id,
         segment_type=seg_type,
         structural_path=list(structural_path),
+        segment_id=seg_id,
     )
 
 
