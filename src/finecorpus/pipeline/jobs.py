@@ -368,181 +368,38 @@ class JobRunner:
     # ------------------------------------------------------------------
 
     def _run_eval_sweep(self, job: JobRecord) -> None:
-        """Run an eval_sweep job: corpus sampling + candidate enumeration dispatch.
+        """Run an eval_sweep job — FAIL LOUDLY (Ruling 2).
 
-        Layer note: pipeline jobs may not import from the services layer (C-5).
-        Full retrieval-quality scoring (which requires services.eval_scoring) is
-        therefore NOT performed here.  This arm provides corpus validation (M-050
-        decline) and candidate enumeration, persisting a SweepRunRecord so the run
-        is auditable.  Operators who need retrieval-quality ranking should trigger
-        the sweep via ``corpus pipeline sweep <kb_id>`` (CLI path via
-        services.eval_sweep.run_sweep).
+        Layer constraint (C-5): pipeline jobs may NOT import from the services
+        layer.  Retrieval-quality scoring (services.eval_scoring.score_eval_set)
+        cannot be performed here.  Persisting a "completed" SweepRunRecord with
+        all-0.0 scores would be actively misleading — operators would see a zeros
+        table that looks like a real sweep result.
 
-        The payload is expected to contain:
-        - ``kb_id``            : knowledge-base identifier (also on job.kb_id).
-        - ``base_config_dict`` : serialised IngestionConfig dict.
-        - ``documents``        : list of InventoryItem dicts (the corpus).
-        - ``confirmed``        : bool, True to skip cost confirmation (M-048).
+        This arm therefore FAILS LOUDLY with a clear descriptive error so no
+        zeros table is ever committed as if it were a real scored sweep.
 
-        On completion the job is marked completed with sweep_run_id in the
-        checkpoint.  On failure the job is marked failed.
+        Deferral: queue-driven scored sweeps require a services-layer worker
+        that can import retrieval.service and services.eval_scoring.  That
+        architecture is out of scope for Phase 5.  Operators MUST use the CLI
+        entrypoint (``corpus pipeline sweep <kb_id>``) which calls
+        ``services.eval_sweep.run_sweep`` directly from the services layer.
         """
-        from decimal import Decimal
-
-        from finecorpus.contracts.ingestion_config import IngestionConfig
-        from finecorpus.contracts.inventory import InventoryItem
-        from finecorpus.control.eval_store import SweepRunRepository
-        from finecorpus.pipeline.evaluation.candidates import (
-            enumerate_candidates,
-            sample_corpus,
+        _FAIL_MSG = (
+            "eval_sweep must run via the services entrypoint "
+            "(corpus pipeline sweep <kb_id>); "
+            "the queue worker sits in the pipeline layer and cannot score. "
+            "Queue-driven scored sweep is deferred."
         )
 
-        payload = job.payload or {}
-        kb_id: str = job.kb_id
-        workspace_id: str = job.workspace_id
-
-        # Deserialise documents
-        doc_dicts: list[dict] = payload.get("documents", [])
-        documents: list[InventoryItem] = []
-        for d in doc_dicts:
-            try:
-                documents.append(InventoryItem.model_validate(d))
-            except Exception:  # noqa: BLE001
-                pass
-
-        # Deserialise base config
-        base_config_dict: dict | None = payload.get("base_config_dict")
-        if base_config_dict is None or self._config is None:
-            logger.warning(
-                "job_runner: eval_sweep job %s missing base_config_dict or platform config",
-                job.job_id,
-            )
-            self._queue.fail(job.job_id, error_msg="eval_sweep: missing base_config_dict")
-            self._session.commit()
-            return
-
-        try:
-            base_config = IngestionConfig.model_validate(base_config_dict)
-        except Exception as exc:
-            err = f"eval_sweep: invalid base_config_dict — {exc}"
-            self._queue.fail(job.job_id, error_msg=err)
-            self._session.commit()
-            raise ValueError(err) from exc
-
-        assessment = self._config.assessment
-        sweep_repo = SweepRunRepository(self._session)
-
-        # M-050: Decline when corpus is too small
-        n_docs = len(documents)
-        if n_docs < assessment.sweep_min_corpus_docs:
-            reason = (
-                f"Corpus has {n_docs} document(s), which is below the minimum "
-                f"of {assessment.sweep_min_corpus_docs} required to run a "
-                f"configuration sweep. Trigger the sweep via CLI once more "
-                f"documents are available."
-            )
-            run_record = sweep_repo.create(
-                kb_id=kb_id,
-                workspace_id=workspace_id,
-                status="declined",
-            )
-            sweep_repo.set_status(run_record.id, status="declined", declined_reason=reason)
-            self._session.commit()
-            checkpoint_data = {
-                "sweep_run_id": run_record.id,
-                "declined": True,
-                "near_optimal": False,
-                "n_candidates_run": 0,
-            }
-            self._queue.checkpoint(job.job_id, data=checkpoint_data)
-            self._queue.complete(job.job_id, cost_accrued_usd=0.0)
-            self._session.commit()
-            logger.info(
-                "job_runner: eval_sweep job %s M-050 decline sweep_run_id=%r n_docs=%d",
-                job.job_id,
-                run_record.id,
-                n_docs,
-            )
-            return
-
-        try:
-            # Sample corpus + enumerate candidates (pipeline-layer; no scoring)
-            _sampled = sample_corpus(
-                documents,
-                min_docs=assessment.sweep_min_corpus_docs,
-                sample_factor=assessment.sweep_sample_factor,
-                seed=42,
-            )
-            candidates = enumerate_candidates(
-                base_config,
-                budget=assessment.sweep_candidate_budget,
-                seed=42,
-            )
-
-            run_record = sweep_repo.create(
-                kb_id=kb_id,
-                workspace_id=workspace_id,
-                status="running",
-            )
-            sweep_repo.set_status(run_record.id, status="running", confirmed=False)
-            self._session.commit()
-
-            # Persist ranking rows with zero-scores (no retrieval scoring in pipeline layer).
-            # Retrieval-quality ranking requires CLI dispatch via services.eval_sweep.
-            for rank, candidate in enumerate(candidates, start=1):
-                sweep_repo.add_ranking_row(
-                    sweep_run_id=run_record.id,
-                    rank=rank,
-                    config_json={
-                        "candidate_id": candidate.candidate_id,
-                        "label": candidate.label,
-                    },
-                    recall=0.0,
-                    precision=0.0,
-                    recall_delta=0.0,
-                    precision_delta=0.0,
-                    est_cost_usd=0.0,
-                    index_size=0,
-                    ingestion_seconds=0.0,
-                )
-
-            sweep_repo.set_status(
-                run_record.id,
-                status="completed",
-                total_cost_usd=float(Decimal("0")),
-                confirmed=False,
-            )
-            self._session.commit()
-
-        except Exception as exc:
-            error_msg = f"{type(exc).__name__}: {exc}"
-            logger.error(
-                "job_runner: eval_sweep job %s failed — %s",
-                job.job_id,
-                error_msg,
-                exc_info=True,
-            )
-            self._queue.fail(job.job_id, error_msg=error_msg)
-            self._session.commit()
-            raise
-
-        checkpoint_data = {
-            "sweep_run_id": run_record.id,
-            "declined": False,
-            "near_optimal": False,
-            "n_candidates_run": len(candidates),
-        }
-        self._queue.checkpoint(job.job_id, data=checkpoint_data)
-        self._queue.complete(job.job_id, cost_accrued_usd=0.0)
-        self._session.commit()
-
-        logger.info(
-            "job_runner: eval_sweep job %s completed sweep_run_id=%r n_candidates=%d "
-            "(retrieval scoring requires CLI dispatch via services.eval_sweep)",
+        logger.error(
+            "job_runner: eval_sweep job %s cannot be scored via the queue worker — %s",
             job.job_id,
-            run_record.id,
-            len(candidates),
+            _FAIL_MSG,
         )
+        self._queue.fail(job.job_id, error_msg=_FAIL_MSG)
+        self._session.commit()
+        raise ValueError(_FAIL_MSG)
 
     # ------------------------------------------------------------------
     # Budget enforcement

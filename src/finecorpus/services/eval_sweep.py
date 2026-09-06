@@ -826,6 +826,21 @@ def _score_candidate(
     Returns:
         (recall, precision, index_size, ingestion_seconds)
 
+    Scoring discipline (§19 crit 1, BLOCKER):
+        Each candidate is scored against ITS OWN scratch collection via
+        ``collection_override`` — not the live production alias.  Without
+        this override, all candidates query the same live alias and return
+        identical scores (recall deltas all 0.0), which violates §19 crit 1.
+
+    Tenancy:
+        The collection_override path in retrieval.service.query still applies
+        a tenancy payload filter, using the scratch collection name as the
+        kb_id scope (matching the payload written by _ingest_sample_to_scratch).
+
+    Timing (Ruling 4):
+        ingestion_seconds captures only the wall-clock time for
+        _ingest_sample_to_scratch, NOT the scoring or cleanup time.
+
     This is a best-effort scorer: when ingestion or scoring fails for a candidate,
     returns (0.0, 0.0, 0, 0.0) so the sweep continues and the failed candidate
     ranks last.
@@ -834,7 +849,7 @@ def _score_candidate(
 
     scratch_collection = f"sweep_scratch_{kb_id}_{candidate.candidate_id}"
 
-    t_start = time.monotonic()
+    t_ingestion_start = time.monotonic()
     index_size = 0
 
     try:
@@ -854,9 +869,13 @@ def _score_candidate(
         )
         # Fall through: ingestion may be partial (zero index size is a valid result)
 
-    _ = time.monotonic() - t_start  # ingestion wall-time (reserved for ranking row)
+    # Ruling 4: capture ingestion wall-time BEFORE scoring begins.
+    t_ingestion_end = time.monotonic()
+    ingestion_s = t_ingestion_end - t_ingestion_start
 
-    # Score using the kb_id scope (retrieval always scoped to the KB alias)
+    # Score against the candidate's OWN scratch collection (§19 crit 1, Ruling 1).
+    # collection_override bypasses alias resolution in retrieval.service.query
+    # so each candidate is scored against its own ingested content, not the live alias.
     recall = 0.0
     precision = 0.0
     if eval_set:
@@ -869,6 +888,7 @@ def _score_candidate(
                 session=session,
                 k=eval_k,
                 confidence_level=confidence_level,
+                collection_override=scratch_collection,
             )
             recall = score_result.recall
             precision = score_result.precision
@@ -889,7 +909,6 @@ def _score_candidate(
             exc,
         )
 
-    ingestion_s = time.monotonic() - t_start
     return recall, precision, index_size, ingestion_s
 
 

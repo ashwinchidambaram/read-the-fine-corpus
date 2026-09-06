@@ -292,7 +292,13 @@ class FakeAdapter:
 
         coll = self.aliases.get(alias)
         if coll is None:
-            return []
+            # Fallback: the caller may have passed a collection name directly
+            # (e.g. the collection_override path in retrieval.service.query).
+            # When the alias is not registered, look the name up as a collection.
+            if alias in self.collections:
+                coll = alias
+            else:
+                return []
 
         points = self.collections.get(coll, {}).get("points", [])
         results: list[SearchResult] = []

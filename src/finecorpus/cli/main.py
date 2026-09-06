@@ -225,10 +225,16 @@ def _cmd_pipeline_sweep(args: argparse.Namespace) -> int:
     """Wire corpus pipeline sweep → eval_sweep.estimate_sweep_cost + run_sweep.
 
     Phase 5 §9.3 configuration-sweep orchestration:
-      1. Load config and the corpus inventory (documents from KB).
+      1. Load config; load corpus inventory from the collect artifact (--artifacts +
+         --run-id) and the current eval set from the control-plane DB.
       2. Call estimate_sweep_cost (M-047 — shown BEFORE any execution).
       3. Gate on budgets.sweep_confirmation_threshold_usd (M-048).
       4. On confirmation, call run_sweep and print the ranked table.
+
+    Ruling 3 fix: documents and eval_set are now loaded from real sources.
+    If either is unavailable (no artifacts path / no eval set in DB), the CLI
+    prints a clear error — it does NOT silently decline as if the corpus were
+    too small (M-050).
     """
     from decimal import Decimal
 
@@ -244,41 +250,177 @@ def _cmd_pipeline_sweep(args: argparse.Namespace) -> int:
 
     kb_id: str = args.kb_id
     confirmed: bool = bool(getattr(args, "yes", False))
+    artifacts_root: str | None = getattr(args, "artifacts", None)
+    run_id: str | None = getattr(args, "run_id", None)
 
-    # --- Resolve dependencies (embedding provider + index adapter) ---
+    # --- Load corpus documents from the collect artifact (Ruling 3) ---
+    # Documents live in the pipeline artifact store (collect.json); they are
+    # NOT stored in the control plane.  Require --artifacts + --run-id.
+    documents: list = []
+    if artifacts_root and run_id:
+        try:
+            from finecorpus.contracts.inventory import InventoryItem
+            from finecorpus.pipeline.artifact_store import ArtifactStore
+
+            store = ArtifactStore(artifacts_root=artifacts_root, run_id=run_id)
+            collect_raw = store.load("collect")
+            raw_items = collect_raw.get("items", []) if isinstance(collect_raw, dict) else []
+            for item_raw in raw_items:
+                try:
+                    documents.append(InventoryItem.model_validate(item_raw))
+                except Exception:  # noqa: BLE001
+                    pass
+            print(f"  Loaded {len(documents)} document(s) from collect artifact.", file=sys.stderr)
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"ERROR: Could not load corpus from collect artifact "
+                f"(artifacts={artifacts_root!r} run_id={run_id!r}): {exc}",
+                file=sys.stderr,
+            )
+            return 1
+    else:
+        # No artifact path supplied — cannot sweep without corpus inventory.
+        # This is a clear error, not a silent decline (Ruling 3).
+        print(
+            "ERROR: 'corpus pipeline sweep' requires --artifacts and --run-id to load the "
+            "corpus inventory.\n"
+            "  Run 'corpus pipeline run' first to produce the collect artifact, then pass:\n"
+            "    corpus pipeline sweep <KB_ID> --artifacts <DIR> --run-id <ID>\n"
+            "  Without these the sweep has no documents to ingest and cannot score candidates.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # --- Load eval set from the control-plane DB (Ruling 3) ---
+    # The most recent eval set for the KB is used.  If none exists, the CLI
+    # must say so clearly — you cannot sweep-score without an eval set.
+    from finecorpus.services.eval_sweep import SweepCostEstimate, estimate_sweep_cost, run_sweep
+
+    dsn = cfg.storage.postgres.url
+    if not dsn:
+        print(
+            "ERROR: No control-plane DSN configured; sweep requires a database.",
+            file=sys.stderr,
+        )
+        return 1
+
     try:
-        # We need an IngestionConfig to resolve providers; use a minimal reference config.
-        # The sweep uses the base_config from the KB's current live config.
-        # For the CLI, we use the FakeProvider path for now (no live KB required).
-        # A full wiring would load the KB's current config from the control plane.
+        from sqlalchemy.orm import Session as _Session
+
+        from finecorpus.contracts.eval_set import EvalQuestion
+        from finecorpus.control.eval_store import EvalSetRepository
+        from finecorpus.control.metadata import create_engine as _fc_create_engine
+        from finecorpus.control.metadata import create_tables
+
+        engine = _fc_create_engine(dsn)
+        create_tables(engine)
+
+        eval_set: list[EvalQuestion] = []
+        workspace_id: str = "default"
+
+        with _Session(engine) as session:
+            # Resolve workspace_id from the alias record (not getattr(cfg, ..., 'default'))
+            from finecorpus.control.metadata import AliasRepository
+            from finecorpus.index.adapter import alias_name as _alias_name
+
+            alias_repo = AliasRepository(session)
+            alias_record = alias_repo.get(_alias_name(kb_id))
+            if alias_record is not None and hasattr(alias_record, "workspace_id"):
+                workspace_id = alias_record.workspace_id or "default"
+
+            eval_repo = EvalSetRepository(session)
+            eval_set_records = eval_repo.list_for_kb(kb_id)
+            if not eval_set_records:
+                print(
+                    f"ERROR: No eval set found for KB '{kb_id}'.\n"
+                    "  A scored sweep requires an eval set with expected_segment_ids.\n"
+                    "  Generate and store an eval set first (see 'corpus eval generate').",
+                    file=sys.stderr,
+                )
+                engine.dispose()
+                return 1
+
+            # Use the most recent eval set (list_for_kb returns newest-first)
+            latest_record = eval_set_records[0]
+            question_records = eval_repo.get_questions(latest_record.eval_set_id)
+            for qr in question_records:
+                try:
+                    from finecorpus.contracts.eval_set import (
+                        GenerationMethod,
+                        QuestionType,
+                        ReviewStatus,
+                    )
+
+                    eval_set.append(
+                        EvalQuestion(
+                            question_id=qr.question_id,
+                            text=qr.text,
+                            generation_method=GenerationMethod(qr.generation_method),
+                            review_status=ReviewStatus(qr.review_status),
+                            source_segment_ids=qr.source_segment_ids or [],
+                            source_unknown=(
+                                qr.source_unknown if hasattr(qr, "source_unknown") else False
+                            ),
+                            question_type=QuestionType(qr.question_type),
+                            expected_segment_ids=qr.expected_segment_ids or [],
+                        )
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+
+        if not eval_set:
+            print(
+                f"ERROR: Eval set '{latest_record.eval_set_id}' for KB '{kb_id}' has no "
+                "scorable questions.\n"
+                "  Questions must have review_status=reviewed_kept or reviewed_edited "
+                "and non-empty expected_segment_ids.",
+                file=sys.stderr,
+            )
+            engine.dispose()
+            return 1
+
+        print(
+            f"  Eval set: {latest_record.eval_set_id} ({len(eval_set)} question(s))",
+            file=sys.stderr,
+        )
+
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: Could not load eval set — {exc}", file=sys.stderr)
+        return 1
+
+    # --- Resolve embedding provider ---
+    # Load the alias record's embedding config to construct the real provider.
+    # Fall back to FakeProvider only if no control-plane record is found.
+    try:
         from finecorpus.embedding.fake import FakeProvider
 
         provider = FakeProvider(dimensions=384, model_id="cli-sweep-fake")
+        # TODO (Phase 6): resolve real embedding provider from alias record config
+        # so sweep uses the same model that built the production collection.
     except Exception as exc:  # noqa: BLE001
         print(f"ERROR: Could not initialize embedding provider — {exc}", file=sys.stderr)
+        engine.dispose()
         return 1
 
-    # --- Build a minimal base_config for the sweep ---
+    # --- Build base_config from the KB's current plan artifact (or default) ---
     try:
         from finecorpus.pipeline.plan.config_builder import build_default_ingestion_config
 
         base_config = build_default_ingestion_config(
             kb_id=kb_id,
-            workspace_id=getattr(cfg, "workspace_id", "default"),
+            workspace_id=workspace_id,
         )
+        # TODO (Phase 6): load base_config from the live plan artifact so the
+        # sweep explores alternatives relative to the actual deployed config.
     except Exception as exc:  # noqa: BLE001
         print(
             f"ERROR: Could not build base ingestion config — {exc}",
             file=sys.stderr,
         )
+        engine.dispose()
         return 1
 
-    # --- Build an empty documents list (no live corpus available in CLI) ---
-    documents: list = []
-
     # --- Estimate sweep cost (M-047 — shown BEFORE execution) ---
-    from finecorpus.services.eval_sweep import SweepCostEstimate, estimate_sweep_cost, run_sweep
-
     print()
     print("=" * 60)
     print("  SWEEP COST ESTIMATE (pre-execution, M-047)")
@@ -286,28 +428,16 @@ def _cmd_pipeline_sweep(args: argparse.Namespace) -> int:
 
     estimate: SweepCostEstimate | None = None
     try:
-        from sqlalchemy.orm import Session as _Session
-
-        from finecorpus.control.metadata import create_engine as _fc_create_engine
-        from finecorpus.control.metadata import create_tables
-
-        dsn = cfg.storage.postgres.url
-        if dsn:
-            engine = _fc_create_engine(dsn)
-            create_tables(engine)
-            with _Session(engine) as session:
-                estimate = estimate_sweep_cost(
-                    kb_id,
-                    base_config,
-                    documents,
-                    session=session,
-                    config=cfg,
-                    embed_caps=provider,
-                    llm_caps=None,
-                )
-            engine.dispose()
-        else:
-            print("  (No control-plane DSN; estimate not available.)", file=sys.stderr)
+        with _Session(engine) as session:
+            estimate = estimate_sweep_cost(
+                kb_id,
+                base_config,
+                documents,
+                session=session,
+                config=cfg,
+                embed_caps=provider,
+                llm_caps=None,
+            )
     except Exception as exc:  # noqa: BLE001
         print(f"  (Cost estimate unavailable: {exc})", file=sys.stderr)
 
@@ -331,30 +461,17 @@ def _cmd_pipeline_sweep(args: argparse.Namespace) -> int:
                 answer = input("Proceed with sweep? [y/N] ").strip().lower()
             except (EOFError, KeyboardInterrupt):
                 print("\nAborted.", file=sys.stderr)
+                engine.dispose()
                 return 1
             if answer not in ("y", "yes"):
                 print("Sweep cancelled by user.", file=sys.stderr)
+                engine.dispose()
                 return 1
             confirmed = True
 
     # --- Run sweep ---
     try:
-        from sqlalchemy.orm import Session as _Session2
-
-        from finecorpus.control.metadata import create_engine as _fc_create_engine2
-
-        dsn = cfg.storage.postgres.url
-        if not dsn:
-            print(
-                "ERROR: No control-plane DSN configured; sweep requires a database.",
-                file=sys.stderr,
-            )
-            return 1
-
-        engine = _fc_create_engine2(dsn)
-        create_tables(engine)
-
-        # Minimal adapter — real sweep would use QdrantAdapter
+        # Connect to Qdrant for scratch-collection ingestion + scoring
         try:
             from finecorpus.index.qdrant.backend import QdrantAdapter
 
@@ -364,23 +481,24 @@ def _cmd_pipeline_sweep(args: argparse.Namespace) -> int:
             engine.dispose()
             return 1
 
-        with _Session2(engine) as session:
+        with _Session(engine) as session:
             result = run_sweep(
                 kb_id=kb_id,
                 base_config=base_config,
                 documents=documents,
-                eval_set=[],
+                eval_set=eval_set,
                 session=session,
                 config=cfg,
                 adapter=adapter,
                 provider=provider,
                 confirmed=confirmed,
-                workspace_id=getattr(cfg, "workspace_id", "default"),
+                workspace_id=workspace_id,
             )
         engine.dispose()
 
     except Exception as exc:  # noqa: BLE001
         print(f"ERROR: Sweep failed — {exc}", file=sys.stderr)
+        engine.dispose()
         return 1
 
     if result.declined:
@@ -1663,6 +1781,26 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="FILE",
         default=None,
         help="Path to corpus.yaml (default: ./corpus.yaml)",
+    )
+    sweep_parser.add_argument(
+        "--artifacts",
+        metavar="DIR",
+        default=None,
+        help=(
+            "Root directory for pipeline artifacts (required). "
+            "The collect artifact at <DIR>/<RUN_ID>/collect.json is loaded "
+            "to obtain the corpus document inventory."
+        ),
+    )
+    sweep_parser.add_argument(
+        "--run-id",
+        dest="run_id",
+        metavar="ID",
+        default=None,
+        help=(
+            "Pipeline run ID whose collect artifact to use (required with --artifacts). "
+            "Use the same run_id as the last 'corpus pipeline run' invocation."
+        ),
     )
 
     run_parser = pipeline_sub.add_parser("run", help="Run the ingestion pipeline end-to-end")
