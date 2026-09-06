@@ -70,6 +70,7 @@ class JobRunner:
         embedding_provider: EmbeddingProvider | None = None,
         index_adapter: IndexAdapter | None = None,
         worker_id: str = "runner",
+        config: Any = None,
     ) -> None:
         self._session = session
         self._queue = queue_repo
@@ -81,6 +82,7 @@ class JobRunner:
         self._embedding_provider = embedding_provider
         self._index_adapter = index_adapter
         self._worker_id = worker_id
+        self._config = config
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -147,6 +149,19 @@ class JobRunner:
         artifacts_root: str = payload.get("artifacts_root", self._artifacts_root or "")
         promote: bool = bool(payload.get("promote", False))
 
+        # M-053 dispatch guard: incremental reindex is structurally impossible
+        # when config_version changed since enqueue (chunk identity includes it).
+        if str(job.job_type) == "reindex_incremental" and self._config is not None:
+            from finecorpus.pipeline.reindex import (
+                _get_current_config_version,
+                assert_incremental_allowed,
+            )
+
+            assert_incremental_allowed(
+                _get_current_config_version(self._config),
+                str(payload.get("config_version", "")),
+            )
+
         # Determine which stages have already completed (resume path)
         checkpoint_data = job.checkpoint or {}
         stages_completed: list[str] = list(checkpoint_data.get("stages_completed", []))
@@ -182,6 +197,16 @@ class JobRunner:
         total_cost = float(job.cost_accrued_usd or 0)
         self._queue.complete(job.job_id, cost_accrued_usd=total_cost)
         self._session.commit()
+
+        # B-1: successful scheduled run resets the cap-hit counter.
+        trigger_id = (job.payload or {}).get("trigger_id")
+        if trigger_id:
+            try:
+                from finecorpus.pipeline.reindex import record_successful_run_for_trigger
+
+                record_successful_run_for_trigger(self._session, trigger_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("cap-hit reset failed for %s: %s", trigger_id, exc)
         logger.info("job_runner: job %s completed total_cost=%.6f", job.job_id, total_cost)
 
     def _run_pre_build_stages(
@@ -242,7 +267,22 @@ class JobRunner:
         # Stage 4: Plan
         if "plan" not in stages_completed:
             segment_set_batch = store.load("decompose")
-            plan = PlanStage()
+            # D-16: thread the collect artifact's permission-gap acknowledgement
+            # into the Plan stage (queue mode previously dropped it).
+            ack = False
+            try:
+                collect_artifact = store.load("collect")
+                ack = bool(
+                    (collect_artifact.get("source_run") or {}).get(
+                        "acknowledged_permission_gap", False
+                    )
+                )
+            except Exception:  # noqa: BLE001
+                ack = False
+            plan = PlanStage(
+                acknowledged_permission_gap=ack,
+                audit_session=self._session,
+            )
             plan.run(input_data=segment_set_batch, store=store)
             stages_completed.append("plan")
             self._checkpoint(job, stages_completed, {})
@@ -378,6 +418,25 @@ class JobRunner:
             )
 
         self._session.commit()
+
+        # B-1: live cap-hit governance — increment the trigger's counter so
+        # the M-085 repeated-cap-hit alert can actually fire.
+        trigger_id = (job.payload or {}).get("trigger_id")
+        if trigger_id and self._config is not None:
+            try:
+                from finecorpus.pipeline.reindex import record_budget_pause_for_trigger
+
+                record_budget_pause_for_trigger(
+                    self._session,
+                    trigger_id,
+                    config=self._config,
+                    audit_repo=self._audit,
+                    job_id=job.job_id,
+                    kb_id=job.kb_id,
+                    workspace_id=job.workspace_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("cap-hit counter update failed for %s: %s", trigger_id, exc)
         return True
 
     # ------------------------------------------------------------------

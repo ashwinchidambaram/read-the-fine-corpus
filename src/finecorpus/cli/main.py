@@ -1210,6 +1210,38 @@ def _cmd_jobs_cancel(args: argparse.Namespace) -> int:
         engine.dispose()
 
 
+def _cmd_reindex(args: argparse.Namespace) -> int:
+    """Wire corpus reindex <kb_id> [--full] → pipeline.reindex.trigger_manual_reindex."""
+    from finecorpus.pipeline.reindex import trigger_manual_reindex
+
+    engine, session = _get_control_session()
+    try:
+        # Infer workspace_id from the most recent job for this KB
+        from finecorpus.pipeline.jobs import list_jobs
+
+        jobs = list_jobs(session=session, kb_id=args.kb_id, limit=1)
+        workspace_id = jobs[0].workspace_id if jobs else args.kb_id
+
+        info = trigger_manual_reindex(
+            session=session,
+            kb_id=args.kb_id,
+            workspace_id=workspace_id,
+            full=getattr(args, "full", False),
+        )
+        print(f"Reindex enqueued: {info.job_id}")
+        print(f"  type       : {info.job_type}")
+        print(f"  trigger    : {info.trigger_type}")
+        print(f"  kb_id      : {info.kb_id}")
+        print(f"  coalesced  : {info.coalesced}")
+        return 0
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        session.close()
+        engine.dispose()
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="corpus",
@@ -1662,6 +1694,26 @@ def _build_parser() -> argparse.ArgumentParser:
         help=("Directory to write report files to. If omitted, reports are printed to stdout."),
     )
 
+    # --- reindex subcommand (Phase 4: manual reindex trigger) ---
+    reindex_parser = sub.add_parser(
+        "reindex",
+        help="Enqueue a manual reindex job for a knowledge base (M-052/M-053)",
+    )
+    reindex_parser.add_argument(
+        "kb_id",
+        metavar="KB_ID",
+        help="Knowledge-base identifier to reindex",
+    )
+    reindex_parser.add_argument(
+        "--full",
+        action="store_true",
+        default=False,
+        help=(
+            "Force a full reindex (reindex_full) instead of incremental (reindex_incremental). "
+            "Required when config_version has changed (M-053)."
+        ),
+    )
+
     return parser
 
 
@@ -1706,6 +1758,8 @@ def main() -> None:
             sys.exit(1)
     elif args.command == "report":
         sys.exit(_cmd_report(args))
+    elif args.command == "reindex":
+        sys.exit(_cmd_reindex(args))
     elif args.command == "jobs":
         if args.jobs_command == "enqueue":
             sys.exit(_cmd_jobs_enqueue(args))

@@ -159,14 +159,50 @@ class ValidationResult:
     """Outcome of the pre-promotion validation pass.
 
     Attributes:
-        passed: True iff all gates passed.
+        passed: True iff all blocking gates passed.
         gate: Name of the first failing gate (if any).
         detail: Human-readable explanation.
+        warnings: Non-blocking issues (D-20 tier-shift warning, etc.).
+        gate_results: Per-gate outcome list for visibility reporting.
     """
 
     passed: bool
     gate: str = ""
     detail: str = ""
+    warnings: list[str] = field(default_factory=list)
+    gate_results: list[dict] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Gate status enum
+# ---------------------------------------------------------------------------
+
+
+class GateStatus(StrEnum):
+    """Status of an individual validation gate."""
+
+    PASSED = "PASSED"
+    FAILED = "FAILED"
+    SKIPPED = "SKIPPED"
+    WARNING = "WARNING"
+
+
+@dataclass
+class GateResult:
+    """Outcome of one individual validation gate.
+
+    Attributes:
+        gate: Gate name.
+        status: PASSED / FAILED / SKIPPED / WARNING.
+        reason: Human-readable explanation.
+    """
+
+    gate: str
+    status: GateStatus
+    reason: str = ""
+
+    def to_dict(self) -> dict:
+        return {"gate": self.gate, "status": str(self.status), "reason": self.reason}
 
 
 def validate_shadow(
@@ -175,16 +211,35 @@ def validate_shadow(
     expected_min_chunks: int = 1,
     expected_max_chunks: int | None = None,
     declared_empty: bool = False,
+    *,
+    previous_chunk_count: int | None = None,
+    previous_chunks_by_class: dict[str, int] | None = None,
+    current_chunks_by_class: dict[str, int] | None = None,
+    chunk_count_tolerance_pct: float = 20.0,
 ) -> ValidationResult:
-    """Run Phase 1 validation gates on a shadow collection (§5).
+    """Run pre-promotion validation gates on a shadow collection (M-054, §5).
 
-    Phase 1 gates:
-    1. Chunk count ≥ ``expected_min_chunks`` (unless ``declared_empty=True``).
-    2. Chunk count ≤ ``expected_max_chunks`` (if supplied).
-    3. Non-empty unless declared empty (fail-safe default).
+    Gates:
+    1. collection_exists — shadow collection must exist.
+    2. non_empty — non-empty unless declared_empty=True.
+    3. chunk_count_bounds — count within expected_min/max_chunks.
+    4. chunk_count_tolerance (M-054 Gate 1) — count within ±chunk_count_tolerance_pct%
+       of the PREVIOUS collection's count (when previous_chunk_count is supplied).
+    5. no_class_zero_regression (M-054 Gate 2) — no segment class that produced chunks
+       before produces ZERO now (uses previous_chunks_by_class if supplied).
+    6. eval_baseline (M-054 Gate 3) — STUB returning SKIPPED ("phase5-eval-integration").
+    7. regression_threshold (M-054 Gate 4) — STUB returning SKIPPED ("phase5-eval-integration").
+    8. tier_shift_warning (D-20) — non-blocking WARNING comparing salience-tier distribution.
 
-    Gates 3 and 4 (eval baseline, regression threshold) are out of scope for
-    Phase 1 and pass vacuously here.
+    Gate source for per-class counts (Gate 5):
+    We use the build-result stats artifact (chunks_by_class) rather than scrolling
+    Qdrant, because:
+    - The build-result artifact is already computed and available at promotion time.
+    - Scroll-with-payload aggregation would require a production Qdrant connection
+      and a full-collection scan, adding latency and a network dependency.
+    - The build artifact is the most consistent source since it reflects exactly
+      what was written to the shadow collection in this run.
+    This is documented as the "build-result stats" strategy (chosen over scroll).
 
     Args:
         adapter: IndexAdapter instance.
@@ -193,55 +248,304 @@ def validate_shadow(
         expected_max_chunks: Upper bound; unlimited if None.
         declared_empty: If True, a zero-chunk collection is accepted (Gate 3
             pass-through). Use for knowledge bases with no documents.
+        previous_chunk_count: Count from the previous (live) collection, used for
+            Gate 4 tolerance check.  None skips the tolerance gate.
+        previous_chunks_by_class: Per-class chunk counts from the previous build,
+            used for Gate 5 class-zero-regression check.  None skips the gate.
+        chunk_count_tolerance_pct: Maximum percentage deviation from previous_chunk_count
+            before Gate 4 fails (default 20%).
 
     Returns:
-        ValidationResult with ``passed=True`` or the failing gate details.
+        ValidationResult with ``passed=True`` or the failing gate details, plus
+        non-blocking warnings and a gate_results list for full visibility.
     """
+    gate_results: list[GateResult] = []
+    warnings: list[str] = []
+
+    # ------------------------------------------------------------------
+    # Gate: collection_exists
+    # ------------------------------------------------------------------
     try:
         actual_count = adapter.count_points(shadow_collection)
     except CollectionNotFoundError:
+        gr = GateResult(
+            gate="collection_exists",
+            status=GateStatus.FAILED,
+            reason=f"Shadow collection '{shadow_collection}' does not exist",
+        )
+        gate_results.append(gr)
         return ValidationResult(
             passed=False,
             gate="collection_exists",
-            detail=f"Shadow collection '{shadow_collection}' does not exist",
+            detail=gr.reason,
+            warnings=warnings,
+            gate_results=[r.to_dict() for r in gate_results],
         )
+    gate_results.append(GateResult(gate="collection_exists", status=GateStatus.PASSED))
 
-    # Gate 1/2: non-empty check
+    # ------------------------------------------------------------------
+    # Gate: non_empty
+    # ------------------------------------------------------------------
     if actual_count == 0 and not declared_empty:
-        return ValidationResult(
-            passed=False,
+        gr = GateResult(
             gate="non_empty",
-            detail=(
+            status=GateStatus.FAILED,
+            reason=(
                 f"Shadow collection '{shadow_collection}' has 0 chunks and "
                 f"declared_empty=False. Either the ingestion produced no chunks "
                 f"(systematic failure) or the caller must set declared_empty=True."
             ),
         )
-
-    # Gate 1: lower bound
-    if actual_count < expected_min_chunks and not declared_empty:
+        gate_results.append(gr)
         return ValidationResult(
             passed=False,
+            gate="non_empty",
+            detail=gr.reason,
+            warnings=warnings,
+            gate_results=[r.to_dict() for r in gate_results],
+        )
+    gate_results.append(GateResult(gate="non_empty", status=GateStatus.PASSED))
+
+    # ------------------------------------------------------------------
+    # Gate: chunk_count_bounds (absolute)
+    # ------------------------------------------------------------------
+    if actual_count < expected_min_chunks and not declared_empty:
+        gr = GateResult(
             gate="chunk_count_bounds",
-            detail=(
+            status=GateStatus.FAILED,
+            reason=(
                 f"Shadow collection '{shadow_collection}' has {actual_count} chunks, "
                 f"below expected minimum {expected_min_chunks}."
             ),
         )
-
-    # Gate 2: upper bound
-    if expected_max_chunks is not None and actual_count > expected_max_chunks:
+        gate_results.append(gr)
         return ValidationResult(
             passed=False,
             gate="chunk_count_bounds",
-            detail=(
+            detail=gr.reason,
+            warnings=warnings,
+            gate_results=[r.to_dict() for r in gate_results],
+        )
+    if expected_max_chunks is not None and actual_count > expected_max_chunks:
+        gr = GateResult(
+            gate="chunk_count_bounds",
+            status=GateStatus.FAILED,
+            reason=(
                 f"Shadow collection '{shadow_collection}' has {actual_count} chunks, "
                 f"above expected maximum {expected_max_chunks}."
             ),
         )
+        gate_results.append(gr)
+        return ValidationResult(
+            passed=False,
+            gate="chunk_count_bounds",
+            detail=gr.reason,
+            warnings=warnings,
+            gate_results=[r.to_dict() for r in gate_results],
+        )
+    gate_results.append(GateResult(gate="chunk_count_bounds", status=GateStatus.PASSED))
 
-    # Gates 3 and 4 (eval baseline, regression threshold) — vacuously pass in Phase 1.
-    return ValidationResult(passed=True)
+    # ------------------------------------------------------------------
+    # Gate: chunk_count_tolerance (M-054 Gate 1)
+    # ------------------------------------------------------------------
+    if previous_chunk_count is not None and previous_chunk_count > 0 and not declared_empty:
+        tolerance = chunk_count_tolerance_pct / 100.0
+        lower_bound = previous_chunk_count * (1.0 - tolerance)
+        upper_bound = previous_chunk_count * (1.0 + tolerance)
+        if actual_count < lower_bound or actual_count > upper_bound:
+            gr = GateResult(
+                gate="chunk_count_tolerance",
+                status=GateStatus.FAILED,
+                reason=(
+                    f"Shadow chunk count {actual_count} deviates by more than "
+                    f"{chunk_count_tolerance_pct:.1f}% from previous collection count "
+                    f"{previous_chunk_count} "
+                    f"(allowed range: [{int(lower_bound)}, {int(upper_bound)}])."
+                ),
+            )
+            gate_results.append(gr)
+            logger.error(
+                "validate_shadow: chunk_count_tolerance FAILED for '%s': %s",
+                shadow_collection,
+                gr.reason,
+            )
+            return ValidationResult(
+                passed=False,
+                gate="chunk_count_tolerance",
+                detail=gr.reason,
+                warnings=warnings,
+                gate_results=[r.to_dict() for r in gate_results],
+            )
+        gate_results.append(
+            GateResult(
+                gate="chunk_count_tolerance",
+                status=GateStatus.PASSED,
+                reason=(
+                    f"count={actual_count} within "
+                    f"{chunk_count_tolerance_pct:.1f}% of {previous_chunk_count}"
+                ),
+            )
+        )
+    else:
+        gate_results.append(
+            GateResult(
+                gate="chunk_count_tolerance",
+                status=GateStatus.SKIPPED,
+                reason="no previous collection count available",
+            )
+        )
+
+    # ------------------------------------------------------------------
+    # Gate: no_class_zero_regression (M-054 Gate 2)
+    # Source: build-result stats artifact (chunks_by_class from this run)
+    # vs previous_chunks_by_class passed by the caller.
+    #
+    # Per-class count source decision: build-result stats artifact.
+    # Rationale: the build artifact (chunks_by_document grouped by class)
+    # is already available at promotion time and was produced by the same run
+    # that populated the shadow collection.  Scroll-with-payload aggregation
+    # would require a full Qdrant scan (expensive, adds latency, requires live
+    # connection) and is less reliable than the artifact.  We require callers
+    # to pass current_chunks_by_class from the build result artifact.
+    # ------------------------------------------------------------------
+    if previous_chunks_by_class is not None and current_chunks_by_class is not None:
+        regressions: list[str] = []
+        for seg_class, prev_count in previous_chunks_by_class.items():
+            if prev_count > 0:
+                cur_count = current_chunks_by_class.get(seg_class, 0)
+                if cur_count == 0:
+                    regressions.append(
+                        f"class '{seg_class}' had {prev_count} chunk(s) before but now 0"
+                    )
+        if regressions:
+            regression_detail = "; ".join(regressions)
+            gr = GateResult(
+                gate="no_class_zero_regression",
+                status=GateStatus.FAILED,
+                reason=(
+                    f"M-054 Gate 2: segment class(es) that produced chunks before now "
+                    f"produce zero — possible systematic regression: {regression_detail}"
+                ),
+            )
+            gate_results.append(gr)
+            logger.error(
+                "validate_shadow: no_class_zero_regression FAILED for '%s': %s",
+                shadow_collection,
+                gr.reason,
+            )
+            return ValidationResult(
+                passed=False,
+                gate="no_class_zero_regression",
+                detail=gr.reason,
+                warnings=warnings,
+                gate_results=[r.to_dict() for r in gate_results],
+            )
+        gate_results.append(
+            GateResult(
+                gate="no_class_zero_regression",
+                status=GateStatus.PASSED,
+                reason="all previously-producing classes still produce chunks",
+            )
+        )
+    elif previous_chunks_by_class is not None and current_chunks_by_class is None:
+        gate_results.append(
+            GateResult(
+                gate="no_class_zero_regression",
+                status=GateStatus.SKIPPED,
+                reason=(
+                    "current per-class counts not supplied; pass current_chunks_by_class "
+                    "from the build result to activate this gate"
+                ),
+            )
+        )
+    else:
+        gate_results.append(
+            GateResult(
+                gate="no_class_zero_regression",
+                status=GateStatus.SKIPPED,
+                reason="no previous per-class counts available",
+            )
+        )
+
+    # ------------------------------------------------------------------
+    # Gate: eval_baseline (M-054 Gate 3) — STUB (phase5-eval-integration)
+    # ------------------------------------------------------------------
+    gate_results.append(
+        GateResult(
+            gate="eval_baseline",
+            status=GateStatus.SKIPPED,
+            reason="phase5-eval-integration",
+        )
+    )
+    logger.debug("validate_shadow: eval_baseline gate SKIPPED (phase5-eval-integration)")
+
+    # ------------------------------------------------------------------
+    # Gate: regression_threshold (M-054 Gate 4) — STUB (phase5-eval-integration)
+    # ------------------------------------------------------------------
+    gate_results.append(
+        GateResult(
+            gate="regression_threshold",
+            status=GateStatus.SKIPPED,
+            reason="phase5-eval-integration",
+        )
+    )
+    logger.debug("validate_shadow: regression_threshold gate SKIPPED (phase5-eval-integration)")
+
+    # ------------------------------------------------------------------
+    # D-20: tier-shift WARNING gate (non-blocking)
+    # Compares the salience-tier distribution of the new shadow vs. previous.
+    # We approximate using the total count ratio by tier.
+    # This is a WARNING gate — it never blocks promotion.
+    # ------------------------------------------------------------------
+    if previous_chunk_count is not None and previous_chunk_count > 0 and actual_count > 0:
+        # Without per-tier counts from the adapter, we can only emit a generic
+        # advisory.  The full tier-distribution comparison requires the build
+        # result artifact.  We emit a WARNING placeholder.
+        logger.info(
+            "validate_shadow: D-20 tier-shift check: shadow=%s count=%d previous=%d "
+            "(per-tier breakdown requires build result artifact — placeholder WARNING)",
+            shadow_collection,
+            actual_count,
+            previous_chunk_count,
+        )
+        shift_pct = abs(actual_count - previous_chunk_count) / previous_chunk_count * 100
+        if shift_pct > 30.0:
+            msg = (
+                f"D-20 tier-shift WARNING: chunk count changed by {shift_pct:.1f}% "
+                f"({previous_chunk_count} → {actual_count}); salience-tier distribution "
+                f"may have shifted significantly. Review build report."
+            )
+            warnings.append(msg)
+            logger.warning("validate_shadow: %s", msg)
+            gate_results.append(
+                GateResult(
+                    gate="tier_shift_warning",
+                    status=GateStatus.WARNING,
+                    reason=msg,
+                )
+            )
+        else:
+            gate_results.append(
+                GateResult(
+                    gate="tier_shift_warning",
+                    status=GateStatus.PASSED,
+                    reason=f"count change {shift_pct:.1f}% within acceptable range",
+                )
+            )
+    else:
+        gate_results.append(
+            GateResult(
+                gate="tier_shift_warning",
+                status=GateStatus.SKIPPED,
+                reason="no previous collection count available for tier-shift comparison",
+            )
+        )
+
+    return ValidationResult(
+        passed=True,
+        gate_results=[r.to_dict() for r in gate_results],
+        warnings=warnings,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1094,6 +1398,8 @@ def restore_from_snapshot(
 __all__ = [
     "BuildContext",
     "BuildState",
+    "GateResult",
+    "GateStatus",
     "LifecycleError",
     "NoNMinusOneError",
     "PromotionError",

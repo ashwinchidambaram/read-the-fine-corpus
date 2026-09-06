@@ -41,15 +41,36 @@ def _handle_sigterm(signum: int, frame: Any) -> None:
     _SHUTDOWN = True
 
 
-def scheduler_tick() -> None:
+def scheduler_tick(
+    session: Any = None,
+    config: Any = None,
+) -> None:
     """Evaluate reindex triggers and enqueue reindex jobs as needed.
 
-    SEAM: This function is a named placeholder for the reindex trigger evaluator.
-    A sibling unit (Phase 4-E) implements the trigger evaluation logic here.
-    Called once per worker loop iteration, before job claim.
+    Called once per worker loop iteration, before job claim.  Failure-isolated:
+    any exception is caught and logged; the worker loop continues.
+
+    When session/config are not provided (legacy no-arg call from the loop),
+    this function is a no-op — the loop passes them explicitly when available.
+
+    Args:
+        session: Optional SQLAlchemy Session for the control-plane DB.
+        config: Optional platform config (CorpusConfig).
     """
-    # No-op until the scheduler sibling unit lands.
-    pass
+    if session is None or config is None:
+        # Called without args from the legacy loop path — no-op.
+        return
+
+    try:
+        from finecorpus.pipeline.reindex import evaluate_triggers
+
+        evaluate_triggers(
+            session=session,
+            config=config,
+            adapter=None,  # adapter not wired here; change-detection uses None path
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ingest-worker: scheduler_tick error: %s", exc, exc_info=True)
 
 
 def _touch_heartbeat() -> None:
@@ -146,6 +167,7 @@ def _build_runner(
         ledger_repo=ledger_repo,
         audit_repo=audit_repo,
         budget_guard=budget_guard,
+        config=config,
         embedding_provider=embedding_provider,
         index_adapter=index_adapter,
         worker_id=worker_id,
@@ -240,9 +262,9 @@ def run() -> None:
             with Session(engine) as session:
                 queue_repo = JobQueueRepository(session)
 
-                # scheduler_tick: seam for reindex trigger evaluation (sibling unit)
+                # scheduler_tick: evaluate reindex triggers (Phase 4-F)
                 try:
-                    scheduler_tick()
+                    scheduler_tick(session=session, config=config)
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("ingest-worker: scheduler_tick error: %s", exc)
 
