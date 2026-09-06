@@ -388,3 +388,105 @@ artifact, or when the Decompose artifact was deleted.
 4. If resuming is not possible (e.g., source files were deleted after Collect),
    the partial exclusion report is still valid for Assess-level exclusions.
    Document the gap in your audit trail.
+
+---
+
+## Phase 4 failure modes
+
+### Job stuck in `paused_budget` state
+
+**Symptom:** An ingestion or reindex job shows `state: paused_budget` in
+`corpus jobs status <job_id>`. The job does not progress. If a scheduled reindex
+trigger is involved, `corpus jobs list --kb <kb_id>` shows the same trigger
+creating successive jobs that all end in `paused_budget`.
+
+**Meaning:** The job's estimated cost would exceed a per-KB or per-workspace budget
+cap configured in `corpus.yaml`. The job pauses rather than continuing to spend.
+`paused_budget` is a permanent pause — the job does not automatically resume. If
+a scheduled trigger is hitting the cap repeatedly, the `consecutive_cap_hits` counter
+increments, and an `ERROR ALERT` log entry is emitted when
+`budgets.scheduled_reindex_cap_hit_alert_count` is reached (default: 3).
+
+**Operator action:**
+
+1. Identify which cap was hit and the projected cost:
+   ```
+   corpus jobs status <job_id>
+   ```
+   The job's `payload` and `checkpoint_data` fields contain cost attribution and
+   the cap that triggered the pause.
+
+2. Check the configured caps in `corpus.yaml`:
+   ```yaml
+   budgets:
+     per_kb_cap_usd: <current value>
+     per_workspace_cap_usd: <current value>
+     scheduled_reindex_cap_hit_alert_count: 3
+   ```
+
+3. **To resume:** Either raise the cap and then resume the job, or accept the cost
+   and resume without raising:
+   ```
+   corpus jobs resume <job_id>
+   ```
+   The job continues from the last checkpoint — no work is lost or duplicated.
+
+4. **To cancel:** If the job should not proceed:
+   ```
+   corpus jobs cancel <job_id>
+   ```
+   Cancellation leaves any shadow collection in a partial state (not promoted).
+
+5. **Repeated cap-hits from a scheduled trigger:** If `consecutive_cap_hits` is
+   high, either raise the cap or reduce reindex frequency via the trigger's
+   `cron_expr`. A successful run resets the counter to zero. See
+   `runbooks/budget-cap-hit.md` for full guidance.
+
+**See also:** `runbooks/budget-cap-hit.md`.
+
+---
+
+### Restored collection not promotable (M-087 marker)
+
+**Symptom:** After `restore_from_snapshot()`, attempting to call `promote()` on
+the restored collection raises `RestoredUnreplayedError` with a message similar to:
+*"Collection <name> was restored from snapshot but tombstone replay has not
+completed; promotion blocked."*
+
+**Meaning:** The `restore_from_snapshot()` function writes a marker key
+`_restored_unreplayed` with value `"true"` to the restored collection's metadata
+immediately on restore. This marker blocks `promote()` until tombstone replay has
+completed and the marker is cleared to `"false"`. The purpose is to prevent serving
+a restored collection that may contain documents that were deleted (tombstoned) after
+the snapshot was taken.
+
+**Operator action:**
+
+1. **Normal path:** If the restore was initiated via `corpus kb restore-cold`, the
+   tombstone replay happens automatically in the same call before returning. The
+   marker is cleared on completion. If the call returned successfully, the collection
+   should be promotable. If `promote()` still raises this error, the replay may have
+   been interrupted.
+
+2. **Interrupted replay:** If the restore process was interrupted (e.g., a crash
+   during replay), the marker remains `"true"`. Check the service log for tombstone
+   replay messages. Restart the restore command — `restore_from_snapshot()` is
+   idempotent on a fresh snapshot:
+   ```
+   corpus kb restore-cold --kb <kb_id> --snapshot <snapshot_id>
+   ```
+   This re-applies all tombstones and clears the marker.
+
+3. **Gap detection:** If any tombstone entries are missing from the control-plane
+   database (OQ-L-8 — tombstone log gap when DB was restored from a backup that
+   predates deletions), the replay will not replay the missing tombstones. Documents
+   deleted after the backup point will reappear. See `runbooks/tombstone-replay.md`
+   for the gap detection and resolution procedure.
+
+4. **Verify and promote:** After replay completes, verify the marker is cleared
+   by inspecting the collection metadata. Then promote:
+   ```
+   corpus kb promote --kb <kb_id> --shadow <shadow_collection_name>
+   ```
+
+**See also:** `runbooks/restore-cold.md`, `runbooks/tombstone-replay.md`.
