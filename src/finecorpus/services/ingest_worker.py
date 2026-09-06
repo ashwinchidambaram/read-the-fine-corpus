@@ -290,6 +290,103 @@ def _build_runner(
     )
 
 
+def _build_adapter_provider(config: Any) -> tuple[Any, Any]:
+    """Best-effort construction of (index_adapter, embedding_provider) from config.
+
+    Returns ``(None, None)`` on any construction failure so the worker loop can
+    still run reindex triggers and claim jobs; cron/serviced drift is then
+    skipped rather than crashing the loop.
+    """
+    try:
+        from finecorpus.embedding.registry import build_provider_from_config  # noqa: PLC0415
+        from finecorpus.index.qdrant import QdrantAdapter  # noqa: PLC0415
+
+        provider = build_provider_from_config(config)
+        adapter = QdrantAdapter(
+            url=config.storage.qdrant.url,
+            api_key=config.storage.qdrant.api_key,
+        )
+        return adapter, provider
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "ingest-worker: could not build adapter/provider for drift scoring: %s "
+            "(cron + serviced drift disabled this session)",
+            exc,
+        )
+        return None, None
+
+
+def _service_eval_drift_job(
+    *,
+    job: Any,
+    session: Any,
+    config: Any,
+    adapter: Any,
+    provider: Any,
+    queue_repo: Any,
+) -> None:
+    """Service a claimed ``eval_drift`` job in the SERVICES layer (§9.4, M-100).
+
+    The pipeline-layer JobRunner cannot import services (C-5), so the scored
+    drift check runs here instead of being handed to the runner (whose
+    eval_drift arm fails loud by design).  This is the real production executor
+    for post-reindex drift intents: it runs ``run_drift_check`` (which returns
+    ``no_baseline`` gracefully when a KB has no retained baseline) and completes
+    the job.  On any scoring error it fails the job loudly — never fakes a result.
+    """
+    from finecorpus.services.eval_drift import run_drift_check  # noqa: PLC0415
+
+    if adapter is None or provider is None:
+        msg = (
+            "eval_drift job cannot be serviced: index adapter/embedding provider "
+            "unavailable (check storage.qdrant + embedding config)."
+        )
+        logger.error("ingest-worker: %s job=%s", msg, job.job_id)
+        queue_repo.start(job.job_id)
+        queue_repo.fail(job.job_id, error_msg=msg)
+        session.commit()
+        return
+
+    try:
+        queue_repo.start(job.job_id)
+        session.commit()
+        result = run_drift_check(
+            kb_id=job.kb_id,
+            session=session,
+            adapter=adapter,
+            provider=provider,
+            config=config,
+        )
+        queue_repo.complete(job.job_id)
+        session.commit()
+        logger.info(
+            "ingest-worker: serviced eval_drift job %s kb=%s status=%s regressed=%s "
+            "delta_recall=%s",
+            job.job_id,
+            job.kb_id,
+            result.status,
+            result.regressed,
+            result.delta_recall,
+        )
+    except Exception as exc:  # noqa: BLE001
+        error_msg = f"{type(exc).__name__}: {exc}"
+        logger.error(
+            "ingest-worker: eval_drift job %s failed during scoring: %s",
+            job.job_id,
+            error_msg,
+            exc_info=True,
+        )
+        try:
+            queue_repo.fail(job.job_id, error_msg=error_msg)
+            session.commit()
+        except Exception as mark_exc:  # noqa: BLE001
+            logger.error(
+                "ingest-worker: could not mark eval_drift job %s failed: %s",
+                job.job_id,
+                mark_exc,
+            )
+
+
 def run() -> None:
     """Main worker loop: claim jobs from the queue and execute pipeline stages.
 
@@ -371,6 +468,14 @@ def run() -> None:
     worker_id = os.environ.get("RTFC_WORKER_ID", "ingest-worker")
     logger.info("ingest-worker: starting job loop worker_id=%s", worker_id)
 
+    # Build the index adapter + embedding provider once at loop scope so cron
+    # drift (scheduler_tick) and serviced eval_drift jobs have a real scoring
+    # path.  Best-effort: (None, None) on failure disables drift but keeps the
+    # loop running (B-1/B-2 fix — the drift trigger was previously inert because
+    # scheduler_tick was called without these and claimed eval_drift jobs were
+    # routed to the pipeline runner's fail-loud arm).
+    drift_adapter, drift_provider = _build_adapter_provider(config)
+
     while not _SHUTDOWN:
         _touch_heartbeat()
 
@@ -378,9 +483,14 @@ def run() -> None:
             with Session(engine) as session:
                 queue_repo = JobQueueRepository(session)
 
-                # scheduler_tick: evaluate reindex triggers (Phase 4-F)
+                # scheduler_tick: evaluate reindex triggers (Phase 4-F) + cron drift (§9.4)
                 try:
-                    scheduler_tick(session=session, config=config)
+                    scheduler_tick(
+                        session=session,
+                        config=config,
+                        adapter=drift_adapter,
+                        provider=drift_provider,
+                    )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("ingest-worker: scheduler_tick error: %s", exc)
 
@@ -410,6 +520,21 @@ def run() -> None:
                         job.job_type,
                         job.kb_id,
                     )
+                    # eval_drift jobs are serviced in the SERVICES layer (scored
+                    # drift check) — the pipeline runner cannot import services
+                    # (C-5) and its eval_drift arm fails loud by design.
+                    from finecorpus.control.jobs import JobType  # noqa: PLC0415
+
+                    if job.job_type == str(JobType.eval_drift):
+                        _service_eval_drift_job(
+                            job=job,
+                            session=session,
+                            config=config,
+                            adapter=drift_adapter,
+                            provider=drift_provider,
+                            queue_repo=queue_repo,
+                        )
+                        continue
                     try:
                         runner = _build_runner(session, queue_repo, config)
                     except Exception as build_exc:  # noqa: BLE001

@@ -275,6 +275,155 @@ class TestDriftAlertOnInducedRegression:
         assert result.current_recall == pytest.approx(0.50)
         assert result.threshold == pytest.approx(0.05)
 
+    def test_real_induced_regression_fires_through_scoring(self, engine, provider):
+        """§19 crit 2 with a REAL regression — score_eval_set is NOT mocked.
+
+        The retained baseline recall=1.0 (the prior index returned the expected
+        chunk CHK_A).  The current LIVE index is degraded — CHK_A is gone, only
+        CHK_B/CHK_C remain — so real scoring through score_eval_set → retrieval
+        yields recall=0.0 for the CHK_A-expecting question.  delta_recall=1.0 >
+        0.05 threshold → drift_detected fires + an audit row is written, all via
+        the production scoring path (no stubbed scorer).
+        """
+        with Session(engine) as session:
+            eval_repo = EvalSetRepository(session)
+            baseline_repo = EvalBaselineRepository(session)
+            eval_repo.create(
+                eval_set_id=EVAL_SET_ID,
+                kb_id=KB_ID,
+                workspace_id=WS_ID,
+                schema_version="1.0.0",
+                origin="generated",
+                confidence_level="reviewed",
+                baseline_ref=None,
+                created_at=_NOW,
+            )
+            eval_repo.add_question(
+                question_id="q-drift-real-001",
+                eval_set_id=EVAL_SET_ID,
+                kb_id=KB_ID,
+                text="What is CHK_A about?",
+                question_type=QuestionType.factual_lookup.value,
+                generation_method=GenerationMethod.generated_factual.value,
+                review_status=ReviewStatus.reviewed_kept.value,
+                source_segment_ids=[CHK_A],
+                source_unknown=False,
+                expected_segment_ids=[CHK_A],
+            )
+            baseline_repo.upsert_current(
+                kb_id=KB_ID,
+                reference_id="ref-real-001",
+                reference_fingerprint="fp-real-001",
+                eval_set_id=EVAL_SET_ID,
+                recall=1.0,
+                precision=1.0,
+                scored_at=_NOW,
+            )
+            session.commit()
+
+            # DEGRADED live index — CHK_A removed; only CHK_B/CHK_C remain.
+            degraded = FakeAdapter()
+            degraded.seed_collection(
+                alias=ALIAS,
+                coll=COLL,
+                points=[
+                    make_chunk_payload(chunk_id=CHK_B, kb_id=KB_ID, score=0.95),
+                    make_chunk_payload(chunk_id=CHK_C, kb_id=KB_ID, score=0.85),
+                ],
+            )
+            alias_record = make_alias_record(KB_ID, model_id=MODEL_ID, dimensions=DIMENSIONS)
+            cfg = _make_config(threshold=0.05)
+
+            with _patch_alias_repo(alias_record):
+                result = run_drift_check(
+                    KB_ID,
+                    session=session,
+                    adapter=degraded,
+                    provider=provider,
+                    config=cfg,
+                )
+
+            assert result.status == "regressed"
+            assert result.regressed is True
+            assert result.current_recall == pytest.approx(0.0, abs=1e-9)
+            assert result.delta_recall == pytest.approx(1.0, abs=1e-9)
+
+            audit_rows = list(
+                session.execute(
+                    select(AuditLogRecord).where(
+                        AuditLogRecord.entry_type == str(AuditAction.drift_detected)
+                    )
+                ).scalars()
+            )
+            assert len(audit_rows) == 1
+            assert audit_rows[0].target_kb_id == KB_ID
+
+    def test_healthy_index_does_not_fire_through_scoring(self, engine, provider, adapter):
+        """Control for the real-regression test — proves the alert is not rigged.
+
+        Same real scoring path, but the live index DOES contain CHK_A (the
+        ``adapter`` fixture seeds CHK_A/B/C), so recall=1.0 matches the baseline
+        (1.0) → delta 0 → NO regression, NO drift_detected audit row.
+        """
+        with Session(engine) as session:
+            eval_repo = EvalSetRepository(session)
+            baseline_repo = EvalBaselineRepository(session)
+            eval_repo.create(
+                eval_set_id=EVAL_SET_ID,
+                kb_id=KB_ID,
+                workspace_id=WS_ID,
+                schema_version="1.0.0",
+                origin="generated",
+                confidence_level="reviewed",
+                baseline_ref=None,
+                created_at=_NOW,
+            )
+            eval_repo.add_question(
+                question_id="q-drift-real-002",
+                eval_set_id=EVAL_SET_ID,
+                kb_id=KB_ID,
+                text="What is CHK_A about?",
+                question_type=QuestionType.factual_lookup.value,
+                generation_method=GenerationMethod.generated_factual.value,
+                review_status=ReviewStatus.reviewed_kept.value,
+                source_segment_ids=[CHK_A],
+                source_unknown=False,
+                expected_segment_ids=[CHK_A],
+            )
+            baseline_repo.upsert_current(
+                kb_id=KB_ID,
+                reference_id="ref-real-002",
+                reference_fingerprint="fp-real-002",
+                eval_set_id=EVAL_SET_ID,
+                recall=1.0,
+                precision=1.0,
+                scored_at=_NOW,
+            )
+            session.commit()
+
+            alias_record = make_alias_record(KB_ID, model_id=MODEL_ID, dimensions=DIMENSIONS)
+            cfg = _make_config(threshold=0.05)
+
+            with _patch_alias_repo(alias_record):
+                result = run_drift_check(
+                    KB_ID,
+                    session=session,
+                    adapter=adapter,
+                    provider=provider,
+                    config=cfg,
+                )
+
+            assert result.regressed is False
+            assert result.current_recall == pytest.approx(1.0, abs=1e-9)
+            audit_rows = list(
+                session.execute(
+                    select(AuditLogRecord).where(
+                        AuditLogRecord.entry_type == str(AuditAction.drift_detected)
+                    )
+                ).scalars()
+            )
+            assert len(audit_rows) == 0
+
     def test_audit_row_written_on_regression(self, engine, provider, adapter):
         """AuditAction.drift_detected row must be written when regressed=True."""
         with Session(engine) as session:
@@ -669,7 +818,7 @@ class TestEvalDriftJobArmFailsLoud:
             queue_repo.start(job.job_id)
             session.commit()
 
-            with pytest.raises(ValueError, match="eval_drift must run via the services entrypoint"):
+            with pytest.raises(ValueError, match="eval_drift reached the pipeline JobRunner"):
                 runner._run_eval_drift(job)
 
             # Job should be in failed state
@@ -681,3 +830,135 @@ class TestEvalDriftJobArmFailsLoud:
                 sa_select(JobRecord).where(JobRecord.job_id == job.job_id)
             ).scalar_one()
             assert failed_job.state == "failed"
+
+
+# ---------------------------------------------------------------------------
+# Worker-serviced drift (B-1/B-2): the reachable PRODUCTION executor
+# ---------------------------------------------------------------------------
+
+
+class TestWorkerServicedDrift:
+    """The services-layer worker (_service_eval_drift_job) is the reachable
+    production executor for enqueued eval_drift jobs — it runs the scored check
+    that the pipeline runner cannot (C-5).  These tests prove a real drift job
+    is serviced end-to-end (not routed to the fail-loud pipeline arm).
+    """
+
+    def test_serviced_job_fires_real_drift_and_completes(self, engine, provider):
+        """An enqueued eval_drift job serviced by the worker runs real scoring:
+        degraded live index → recall=0.0 vs baseline 1.0 → drift_detected audit
+        row written AND the job is marked completed (not failed)."""
+        from finecorpus.control.jobs import JobRecord  # noqa: PLC0415
+        from finecorpus.services.ingest_worker import _service_eval_drift_job  # noqa: PLC0415
+
+        with Session(engine) as session:
+            eval_repo = EvalSetRepository(session)
+            baseline_repo = EvalBaselineRepository(session)
+            eval_repo.create(
+                eval_set_id=EVAL_SET_ID,
+                kb_id=KB_ID,
+                workspace_id=WS_ID,
+                schema_version="1.0.0",
+                origin="generated",
+                confidence_level="reviewed",
+                baseline_ref=None,
+                created_at=_NOW,
+            )
+            eval_repo.add_question(
+                question_id="q-drift-svc-001",
+                eval_set_id=EVAL_SET_ID,
+                kb_id=KB_ID,
+                text="What is CHK_A about?",
+                question_type=QuestionType.factual_lookup.value,
+                generation_method=GenerationMethod.generated_factual.value,
+                review_status=ReviewStatus.reviewed_kept.value,
+                source_segment_ids=[CHK_A],
+                source_unknown=False,
+                expected_segment_ids=[CHK_A],
+            )
+            baseline_repo.upsert_current(
+                kb_id=KB_ID,
+                reference_id="ref-svc-001",
+                reference_fingerprint="fp-svc-001",
+                eval_set_id=EVAL_SET_ID,
+                recall=1.0,
+                precision=1.0,
+                scored_at=_NOW,
+            )
+            session.commit()
+
+            degraded = FakeAdapter()
+            degraded.seed_collection(
+                alias=ALIAS,
+                coll=COLL,
+                points=[make_chunk_payload(chunk_id=CHK_B, kb_id=KB_ID, score=0.9)],
+            )
+            queue_repo = JobQueueRepository(session)
+            job = queue_repo.enqueue(
+                kb_id=KB_ID,
+                workspace_id=WS_ID,
+                job_type=JobType.eval_drift,
+                payload={"trigger": "post_reindex"},
+                dedupe_key=None,
+            )
+            session.commit()
+
+            alias_record = make_alias_record(KB_ID, model_id=MODEL_ID, dimensions=DIMENSIONS)
+            cfg = _make_config(threshold=0.05)
+
+            with _patch_alias_repo(alias_record):
+                _service_eval_drift_job(
+                    job=job,
+                    session=session,
+                    config=cfg,
+                    adapter=degraded,
+                    provider=provider,
+                    queue_repo=queue_repo,
+                )
+
+            completed = session.execute(
+                select(JobRecord).where(JobRecord.job_id == job.job_id)
+            ).scalar_one()
+            assert completed.state == "completed"
+
+            audit_rows = list(
+                session.execute(
+                    select(AuditLogRecord).where(
+                        AuditLogRecord.entry_type == str(AuditAction.drift_detected)
+                    )
+                ).scalars()
+            )
+            assert len(audit_rows) == 1
+            assert audit_rows[0].target_kb_id == KB_ID
+
+    def test_serviced_job_fails_loud_without_adapter(self, engine, provider):
+        """No adapter/provider available → the job FAILS (loud), never fakes a
+        completed drift result."""
+        from finecorpus.control.jobs import JobRecord  # noqa: PLC0415
+        from finecorpus.services.ingest_worker import _service_eval_drift_job  # noqa: PLC0415
+
+        with Session(engine) as session:
+            queue_repo = JobQueueRepository(session)
+            job = queue_repo.enqueue(
+                kb_id=KB_ID,
+                workspace_id=WS_ID,
+                job_type=JobType.eval_drift,
+                payload={"trigger": "post_reindex"},
+                dedupe_key=None,
+            )
+            session.commit()
+            cfg = _make_config(threshold=0.05)
+
+            _service_eval_drift_job(
+                job=job,
+                session=session,
+                config=cfg,
+                adapter=None,
+                provider=None,
+                queue_repo=queue_repo,
+            )
+
+            failed = session.execute(
+                select(JobRecord).where(JobRecord.job_id == job.job_id)
+            ).scalar_one()
+            assert failed.state == "failed"

@@ -416,20 +416,19 @@ class JobRunner:
         This arm therefore FAILS LOUDLY with a clear descriptive error so no
         fake drift result is ever committed.
 
-        Architecture: the eval_drift job is ENQUEUED by the post-reindex hook
-        (services/ingest_worker.py after _run_ingest) to record intent in the
-        audit trail.  The ACTUAL SCORED DRIFT CHECK runs from the services
-        layer: either via scheduler_tick (cron) or directly from the services
-        entrypoint (``corpus pipeline drift-check <kb_id>``).
-
-        The queue-mode eval_drift job arm exists ONLY to record intent and
-        fail loud — it never produces scored results.
+        Architecture: eval_drift jobs are enqueued by the post-reindex hook
+        (this runner, after _run_ingest) AND are SERVICED in the services layer
+        by the ingest-worker loop (_service_eval_drift_job), which CAN import
+        services and runs the scored run_drift_check.  Cron-scheduled drift runs
+        via scheduler_tick.  This pipeline-layer arm is only ever reached if a
+        drift job is dispatched directly to the JobRunner (misconfiguration); it
+        FAILS LOUD rather than committing a fake all-zero result.
         """
         _FAIL_MSG = (
-            "eval_drift must run via the services entrypoint "
-            "(corpus pipeline drift-check <kb_id>) or via scheduler_tick cron; "
-            "the queue worker sits in the pipeline layer and cannot score retrieval. "
-            "Queue-driven scored drift is deferred."
+            "eval_drift reached the pipeline JobRunner, which sits below the services "
+            "layer and cannot score retrieval (C-5). Scored drift is serviced by the "
+            "ingest-worker loop (_service_eval_drift_job) or scheduler_tick cron — a "
+            "drift job should never be handed to JobRunner.run_job directly."
         )
 
         logger.error(
