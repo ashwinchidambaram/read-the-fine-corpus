@@ -136,6 +136,49 @@ class TestReferenceFingerprint:
         emb2 = EmbeddingConfig(provider="openai", model="m", dimensions=100, normalize=True)
         assert reference_fingerprint(emb1) == reference_fingerprint(emb2)
 
+    # --- RULING 2: supports_languages must NOT affect the fingerprint ---
+
+    def test_supports_languages_change_does_not_change_fingerprint(self) -> None:
+        """RULING 2: supports_languages is not build-affecting; must not flip the fingerprint.
+
+        Two EmbeddingConfigs differing only in supports_languages must produce the SAME
+        reference_fingerprint.  An unrelated supports_languages change must not trigger M-049
+        false-positive reference-change detection.
+        """
+        emb_a = EmbeddingConfig(
+            provider="openai",
+            model="text-embedding-3-small",
+            dimensions=1536,
+            normalize=True,
+            supports_languages=None,
+        )
+        emb_b = EmbeddingConfig(
+            provider="openai",
+            model="text-embedding-3-small",
+            dimensions=1536,
+            normalize=True,
+            supports_languages=["en", "fr", "de"],
+        )
+        assert reference_fingerprint(emb_a) == reference_fingerprint(emb_b)
+
+    def test_model_change_still_changes_fingerprint(self) -> None:
+        """Sanity check: build-affecting field (model) still changes the fingerprint."""
+        emb_a = EmbeddingConfig(
+            provider="openai",
+            model="model-alpha",
+            dimensions=1536,
+            normalize=True,
+            supports_languages=["en"],
+        )
+        emb_b = EmbeddingConfig(
+            provider="openai",
+            model="model-beta",
+            dimensions=1536,
+            normalize=True,
+            supports_languages=["en"],
+        )
+        assert reference_fingerprint(emb_a) != reference_fingerprint(emb_b)
+
 
 # ---------------------------------------------------------------------------
 # build_naive_baseline_ref — contract validation
@@ -228,3 +271,49 @@ class TestIsNearOptimal:
     def test_multiple_calls_same_result(self) -> None:
         args = (0.82, 0.80, 0.01)
         assert is_near_optimal(*args) == is_near_optimal(*args)
+
+    # --- RULING 5: boundary test float-approximation honesty ---
+
+    def test_boundary_at_exact_margin_constructed_by_addition(self) -> None:
+        """Boundary case: candidate constructed as reference + margin.
+
+        0.80 + 0.03 in IEEE-754 double precision is 0.8300000000000001 (not exactly 0.83),
+        so candidate - reference is strictly greater than noise_margin by a ULP.  This is
+        the honest floating-point behaviour: the predicate correctly returns False for this
+        triple, demonstrating that callers must account for float representation when
+        constructing boundary inputs.
+
+        To obtain a true boundary (candidate - reference == noise_margin exactly), use
+        values that are exact in IEEE-754 (e.g. powers of two or simple fractions like 0.5,
+        0.25).  The test below with 0.75 + 0.25 demonstrates the exact boundary.
+        """
+        reference = 0.80
+        margin = 0.03
+        candidate = reference + margin  # 0.8300000000000001 in IEEE-754, not 0.83
+        # candidate - reference > noise_margin by a ULP → correctly returns False
+        assert not is_near_optimal(
+            candidate_score=candidate, reference_score=reference, noise_margin=margin
+        )
+
+    def test_boundary_exact_ieee754_values(self) -> None:
+        """Boundary using IEEE-754-exact values: 0.75 + 0.25 == 1.0 exactly.
+
+        candidate - reference = 1.0 - 0.75 = 0.25 == noise_margin → ≤ → True.
+        These values are exact in binary floating-point so no rounding artefact.
+        """
+        reference = 0.75
+        margin = 0.25
+        candidate = reference + margin  # 1.0 exactly
+        assert is_near_optimal(
+            candidate_score=candidate, reference_score=reference, noise_margin=margin
+        )
+
+    def test_boundary_just_above_margin_uses_approx_for_clarity(self) -> None:
+        """Candidate is strictly above reference+margin — returns False.
+
+        0.831 - 0.80 = 0.031 > 0.03.  The raw float comparison is exact here, but
+        we document that callers should use pytest.approx for fuzz-sensitive comparisons
+        in swept-score contexts.
+        """
+        # Direct assertion: this exact float triple is not ambiguous
+        assert not is_near_optimal(candidate_score=0.831, reference_score=0.80, noise_margin=0.03)

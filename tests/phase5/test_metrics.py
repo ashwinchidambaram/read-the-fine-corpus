@@ -302,3 +302,104 @@ class TestAggregateScores:
         score = self._make_score("q1", QuestionType.factual_lookup, recall=1.0, precision=1.0)
         with pytest.raises((AttributeError, TypeError)):
             score.recall = 0.0  # type: ignore[misc]
+
+    # --- Ruling 1: sentinel exclusion — empty-expected recall=0.0 must not drag mean down ---
+
+    def test_aggregate_excludes_empty_expected_from_recall_mean(self) -> None:
+        """RULING 1: mean_recall over [recall=1.0 real, recall=0.0 empty-expected] == 1.0.
+
+        A QuestionScore from a question with no gold segments carries a sentinel 0.0 recall
+        (per context_recall_at_k convention). Averaging it in understates quality.
+        aggregate_scores MUST exclude non-scorable questions from the recall mean.
+        """
+        real_score = QuestionScore(
+            question_id="q-real",
+            question_type=QuestionType.factual_lookup,
+            recall=1.0,
+            precision=1.0,
+            scorable=True,
+        )
+        sentinel_score = QuestionScore(
+            question_id="q-empty",
+            question_type=QuestionType.factual_lookup,
+            recall=0.0,
+            precision=0.0,
+            scorable=False,
+        )
+        summary = aggregate_scores([real_score, sentinel_score])
+        # Only the scorable question contributes to recall mean: 1.0/1 = 1.0, not (1.0+0.0)/2
+        assert summary.mean_recall == pytest.approx(1.0)
+
+    def test_aggregate_all_non_scorable_recall_mean_is_zero(self) -> None:
+        """When no questions are scorable, mean_recall falls back to 0.0 (empty-set convention)."""
+        sentinel = QuestionScore(
+            question_id="q-empty",
+            question_type=QuestionType.factual_lookup,
+            recall=0.0,
+            precision=0.5,
+            scorable=False,
+        )
+        summary = aggregate_scores([sentinel])
+        assert summary.mean_recall == pytest.approx(0.0)
+
+    def test_aggregate_precision_includes_non_scorable_in_mean(self) -> None:
+        """Precision uses denominator=|top_k| not |expected|, so it is always well-defined.
+
+        Non-scorable questions (empty expected) still produce meaningful precision=0.0
+        (no hits, but the retrieval window is non-empty). They ARE included in the precision
+        mean.  This test documents the asymmetric treatment: recall excludes sentinels,
+        precision does not.
+        """
+        real_score = QuestionScore(
+            question_id="q-real",
+            question_type=QuestionType.factual_lookup,
+            recall=1.0,
+            precision=1.0,
+            scorable=True,
+        )
+        sentinel_score = QuestionScore(
+            question_id="q-empty",
+            question_type=QuestionType.factual_lookup,
+            recall=0.0,
+            precision=0.0,
+            scorable=False,
+        )
+        summary = aggregate_scores([real_score, sentinel_score])
+        # Precision includes both: (1.0 + 0.0) / 2 = 0.5
+        assert summary.mean_precision == pytest.approx(0.5)
+
+    def test_scorable_flag_preserved_in_per_question(self) -> None:
+        """scorable flag must survive round-trip through aggregate_scores."""
+        real_score = QuestionScore(
+            question_id="q1",
+            question_type=QuestionType.factual_lookup,
+            recall=0.8,
+            precision=0.6,
+            scorable=True,
+        )
+        sentinel_score = QuestionScore(
+            question_id="q2",
+            question_type=QuestionType.factual_lookup,
+            recall=0.0,
+            precision=0.0,
+            scorable=False,
+        )
+        summary = aggregate_scores([real_score, sentinel_score])
+        assert summary.per_question[0].scorable is True
+        assert summary.per_question[1].scorable is False
+
+
+# ---------------------------------------------------------------------------
+# context_precision_at_k — Ruling 4: set semantics for duplicate ids
+# ---------------------------------------------------------------------------
+
+
+class TestContextPrecisionSetSemantics:
+    def test_duplicate_retrieved_ids_use_set_cardinality(self) -> None:
+        """RULING 4: precision numerator uses set cardinality — duplicate ids don't overcount.
+
+        precision(["a","a","b"], ["a","b"], k=3) == 2/3 (not 3/3).
+        |{a,a,b} ∩ {a,b}| = |{a,b}| = 2; denominator = min(k, |retrieved[:k]|) = 3.
+        """
+        result = context_precision_at_k(["a", "a", "b"], ["a", "b"], k=3)
+        assert result == pytest.approx(2 / 3)

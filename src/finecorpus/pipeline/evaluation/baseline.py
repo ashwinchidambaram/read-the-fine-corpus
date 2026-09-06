@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from typing import Any
 
 from finecorpus.contracts.ingestion_config import (
     ChunkingConfig,
@@ -61,7 +62,7 @@ _REF_RETRIEVAL_STRATEGY: RetrievalStrategy = RetrievalStrategy.dense
 # ---------------------------------------------------------------------------
 
 
-def reference_ingestion_config(embedding: EmbeddingConfig) -> dict[str, object]:
+def reference_ingestion_config(embedding: EmbeddingConfig) -> dict[str, Any]:
     """Return the build-affecting fields of the §9.3 pinned reference configuration.
 
     Because IngestionConfig requires many provenance/tenancy fields that are
@@ -147,18 +148,37 @@ def reference_fingerprint(embedding: EmbeddingConfig) -> str:
     reference and MUST be marked as such (§9.3).
 
     The fingerprint covers exactly the build-affecting fields returned by
-    reference_ingestion_config(): chunking, transformation, retrieval_strategy,
-    and embedding identity.  It is stable across Python runs and process restarts
-    because it is derived from canonical JSON (sorted keys, compact separators).
+    reference_ingestion_config() PLUS only the build-affecting subset of EmbeddingConfig:
+    provider, model, dimensions, and normalize.  The field supports_languages is
+    intentionally excluded because it governs language-support capability checks (§7.6)
+    at retrieval time and does NOT affect the produced vectors or chunk identity.
+    Including it would cause spurious M-049 false positives whenever an operator updates
+    the language-support metadata without changing the embedding model itself.
+
+    Build-affecting embedding fields: provider, model, dimensions, normalize.
+    Non-build-affecting (excluded): supports_languages.
+
+    It is stable across Python runs and process restarts because it is derived from
+    canonical JSON (sorted keys, compact separators).
 
     Args:
-        embedding: The KB's configured embedding model.  Changes to the embedding
-                   (provider, model, dimensions, normalize) change the fingerprint.
+        embedding: The KB's configured embedding model.  Changes to the build-affecting
+                   fields (provider, model, dimensions, normalize) change the fingerprint.
+                   Changes to supports_languages alone do NOT change the fingerprint.
 
     Returns:
         64-character lowercase hex sha256 digest.
     """
     config_fields = reference_ingestion_config(embedding)
+    # Override the embedding entry with only build-affecting fields to exclude
+    # supports_languages (non-build-affecting; must not cause M-049 false positives).
+    config_fields = dict(config_fields)
+    config_fields["embedding"] = {
+        "provider": embedding.provider,
+        "model": embedding.model,
+        "dimensions": embedding.dimensions,
+        "normalize": embedding.normalize,
+    }
     canonical = json.dumps(config_fields, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
