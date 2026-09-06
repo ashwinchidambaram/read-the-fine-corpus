@@ -518,6 +518,499 @@ def _cmd_pipeline_sweep(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# eval subcommand group (Phase 5 — eval-set lifecycle: generate/import/review/
+# sweep/status).  Thin wiring over pipeline.evaluation.generation,
+# control.eval_store, and services.eval_sweep (constraint C-5).
+# ---------------------------------------------------------------------------
+
+
+def _eval_engine_and_workspace(cfg: Any, kb_id: str) -> tuple[Any, str]:
+    """Build a control-plane engine (tables ensured) and resolve workspace_id.
+
+    Mirrors the session-building pattern in _cmd_pipeline_sweep and
+    _cmd_kb_status: prefer the configured Postgres DSN, fall back to an
+    in-memory SQLite so read-only commands still function in tests.
+    Returns (engine, workspace_id).
+    """
+    from sqlalchemy.orm import Session as _Session
+
+    from finecorpus.control.metadata import AliasRepository, create_tables
+    from finecorpus.control.metadata import create_engine as _fc_create_engine
+    from finecorpus.index.adapter import alias_name as _alias_name
+
+    dsn = cfg.storage.postgres.url or "sqlite:///:memory:"
+    engine = _fc_create_engine(dsn)
+    create_tables(engine)
+
+    workspace_id = "default"
+    with _Session(engine) as session:
+        alias_repo = AliasRepository(session)
+        record = alias_repo.get(_alias_name(kb_id))
+        if record is not None and getattr(record, "workspace_id", None):
+            workspace_id = record.workspace_id
+    return engine, workspace_id
+
+
+def _cmd_eval_generate(args: argparse.Namespace) -> int:
+    """Wire corpus eval generate → generation.generate_eval_set + eval_store.
+
+    Loads segments from the decompose artifact, builds the real LLM provider
+    from config (question_generation op), generates a stratified provisional
+    eval set, and persists it (set + questions) via EvalSetRepository.
+
+    FAIL CLOSED: if the LLM provider cannot be built (e.g. no API key), the
+    command exits non-zero with a descriptive message — no questions are ever
+    fabricated (contract §9.2 / §12).
+    """
+    from sqlalchemy.orm import Session as _Session
+
+    config_path = getattr(args, "config", None)
+    try:
+        from finecorpus.config.loader import load_config
+
+        cfg = load_config(config_path)
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: Could not load config — {exc}", file=sys.stderr)
+        return 1
+
+    kb_id: str = args.kb_id
+    artifacts_root: str | None = getattr(args, "artifacts", None)
+    run_id: str | None = getattr(args, "run_id", None)
+    count_per_type: int = int(getattr(args, "count_per_type", 5))
+
+    if not artifacts_root or not run_id:
+        print(
+            "ERROR: 'corpus eval generate' requires --artifacts and --run-id to load the "
+            "corpus segments from the decompose artifact.\n"
+            "  Run 'corpus pipeline run' first, then pass:\n"
+            "    corpus eval generate <KB_ID> --artifacts <DIR> --run-id <ID>",
+            file=sys.stderr,
+        )
+        return 1
+
+    # --- Load segments from the decompose artifact ---
+    from finecorpus.pipeline.artifact_store import ArtifactStore, ArtifactStoreError
+
+    try:
+        store = ArtifactStore(artifacts_root=artifacts_root, run_id=run_id)
+        decompose_raw = store.load("decompose")
+    except ArtifactStoreError as exc:
+        print(f"ERROR: Could not load decompose artifact — {exc}", file=sys.stderr)
+        return 1
+
+    segments: list[dict[str, Any]] = []
+    for ss in decompose_raw.get("segment_sets", []):
+        doc_id = ss.get("document_id", "")
+        for seg in ss.get("segments", []):
+            segments.append(
+                {
+                    "segment_id": seg.get("segment_id"),
+                    "segment_text": seg.get("text") or seg.get("segment_text") or "",
+                    "source_document_id": doc_id,
+                    "segment_type": seg.get("segment_type"),
+                    "structural_path": seg.get("structural_path", []),
+                }
+            )
+
+    if not segments:
+        print(
+            f"ERROR: No segments found in decompose artifact for run '{run_id}'. "
+            "Cannot generate an eval set from an empty corpus.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # --- Build the REAL LLM provider (FAIL CLOSED on missing key/config) ---
+    from finecorpus.llm.registry import build_llm_provider_from_config
+
+    try:
+        resolved = build_llm_provider_from_config(cfg, "question_generation")
+    except ValueError as exc:
+        print(
+            "ERROR: Could not build the LLM provider for question generation — "
+            f"{exc}\n"
+            "  An LLM provider (with credentials) is required to generate eval "
+            "questions. Eval questions are NEVER fabricated without one.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # --- Generate + persist ---
+    from finecorpus.pipeline.evaluation.generation import generate_eval_set
+
+    engine, workspace_id = _eval_engine_and_workspace(cfg, kb_id)
+
+    try:
+        eval_set, generated = generate_eval_set(
+            segments,
+            None,
+            llm_provider=resolved.provider,
+            op_config=resolved.op_config,
+            config=cfg,
+            kb_id=kb_id,
+            workspace_id=workspace_id,
+            count_per_type=count_per_type,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: Eval-set generation failed — {exc}", file=sys.stderr)
+        engine.dispose()
+        return 1
+
+    from finecorpus.control.eval_store import EvalSetRepository
+
+    try:
+        with _Session(engine) as session:
+            repo = EvalSetRepository(session)
+            repo.create(
+                eval_set_id=eval_set.eval_set_id,
+                kb_id=kb_id,
+                workspace_id=workspace_id,
+                schema_version=eval_set.schema_version,
+                origin=eval_set.origin.value,
+                confidence_level=eval_set.confidence_level.value,
+                baseline_ref=None,
+                created_at=eval_set.created_at,
+            )
+            gen_by_qid = {g.question.question_id: g for g in generated}
+            for q in eval_set.questions:
+                g = gen_by_qid.get(q.question_id)
+                repo.add_question(
+                    question_id=q.question_id,
+                    eval_set_id=eval_set.eval_set_id,
+                    kb_id=kb_id,
+                    text=q.text,
+                    question_type=q.question_type.value,
+                    generation_method=q.generation_method.value,
+                    review_status=q.review_status.value,
+                    source_segment_ids=q.source_segment_ids,
+                    source_unknown=q.source_unknown,
+                    expected_segment_ids=q.expected_segment_ids,
+                    injection_suspicion=(g.injection_suspicion_score if g else None),
+                    reviewed_by=q.reviewed_by,
+                    reviewed_at=q.reviewed_at,
+                    class_description_ref=q.class_description_ref,
+                )
+            session.commit()
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: Could not persist eval set — {exc}", file=sys.stderr)
+        engine.dispose()
+        return 1
+    finally:
+        engine.dispose()
+
+    n_unreviewed = sum(1 for q in eval_set.questions if q.review_status.value == "unreviewed")
+    print(f"Generated eval set {eval_set.eval_set_id} for KB '{kb_id}'.")
+    print(f"  questions       : {len(eval_set.questions)}")
+    print(f"  confidence_level: {eval_set.confidence_level.value}")
+
+    from finecorpus.pipeline.report import render_confidence_banner
+
+    print()
+    print(
+        render_confidence_banner(
+            confidence_level=eval_set.confidence_level,
+            n_total=len(eval_set.questions),
+            n_unreviewed=n_unreviewed,
+        )
+    )
+    return 0
+
+
+def _cmd_eval_import(args: argparse.Namespace) -> int:
+    """Wire corpus eval import → load an eval-set JSON file + persist.
+
+    Reads the eval-set JSON produced by the M-090 export (pipeline/export.py),
+    and persists the set + questions via EvalSetRepository.  Imported questions
+    RETAIN their review_status from the file; when a question omits review_status
+    it MUST be persisted as ``unreviewed`` (provisional) — review_status has no
+    default (eval_set.py contract, eval_store.add_question).
+    """
+    import json as _json
+    from pathlib import Path as _Path
+
+    from sqlalchemy.orm import Session as _Session
+
+    config_path = getattr(args, "config", None)
+    try:
+        from finecorpus.config.loader import load_config
+
+        cfg = load_config(config_path)
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: Could not load config — {exc}", file=sys.stderr)
+        return 1
+
+    kb_id: str = args.kb_id
+    file_path = _Path(args.file)
+    if not file_path.exists():
+        print(f"ERROR: Eval-set file not found: {file_path}", file=sys.stderr)
+        return 1
+
+    try:
+        data = _json.loads(file_path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: Could not parse eval-set file — {exc}", file=sys.stderr)
+        return 1
+
+    questions = data.get("questions", [])
+    if not isinstance(questions, list):
+        print("ERROR: Eval-set file has no 'questions' list.", file=sys.stderr)
+        return 1
+
+    from datetime import UTC, datetime
+
+    engine, workspace_id = _eval_engine_and_workspace(cfg, kb_id)
+    if data.get("workspace_id"):
+        workspace_id = data["workspace_id"]
+
+    from finecorpus.control.eval_store import EvalSetRepository
+
+    eval_set_id = data.get("eval_set_id") or ""
+    if not eval_set_id:
+        print("ERROR: Eval-set file has no 'eval_set_id'.", file=sys.stderr)
+        engine.dispose()
+        return 1
+
+    imported = 0
+    try:
+        with _Session(engine) as session:
+            repo = EvalSetRepository(session)
+            if repo.get(eval_set_id) is not None:
+                print(
+                    f"ERROR: Eval set '{eval_set_id}' already exists for this control plane.",
+                    file=sys.stderr,
+                )
+                engine.dispose()
+                return 1
+
+            # Imported origins supersede generation (§9.2). The file's origin is
+            # preserved when present; otherwise default to imported_eval_set.
+            origin = data.get("origin") or "imported_eval_set"
+            confidence_level = data.get("confidence_level") or "provisional"
+            repo.create(
+                eval_set_id=eval_set_id,
+                kb_id=kb_id,
+                workspace_id=workspace_id,
+                schema_version=data.get("schema_version", "1.0.0"),
+                origin=origin,
+                confidence_level=confidence_level,
+                baseline_ref=data.get("baseline_ref"),
+                created_at=datetime.now(tz=UTC),
+            )
+
+            for q in questions:
+                # review_status has NO DEFAULT in the contract: an absent value is
+                # persisted as unreviewed (provisional), never silently reviewed.
+                review_status = q.get("review_status") or "unreviewed"
+                reviewed_at_raw = q.get("reviewed_at")
+                reviewed_at = datetime.fromisoformat(reviewed_at_raw) if reviewed_at_raw else None
+                repo.add_question(
+                    question_id=q["question_id"],
+                    eval_set_id=eval_set_id,
+                    kb_id=kb_id,
+                    text=q.get("text", ""),
+                    question_type=q.get("question_type", "factual_lookup"),
+                    generation_method=q.get("generation_method", "imported"),
+                    review_status=review_status,
+                    source_segment_ids=q.get("source_segment_ids", []),
+                    source_unknown=q.get("source_unknown", True),
+                    expected_segment_ids=q.get("expected_segment_ids"),
+                    injection_suspicion=q.get("injection_suspicion"),
+                    reviewed_by=q.get("reviewed_by"),
+                    reviewed_at=reviewed_at,
+                    class_description_ref=q.get("class_description_ref"),
+                )
+                imported += 1
+            session.commit()
+    except KeyError as exc:
+        print(f"ERROR: Eval-set question missing required field {exc}", file=sys.stderr)
+        engine.dispose()
+        return 1
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: Could not import eval set — {exc}", file=sys.stderr)
+        engine.dispose()
+        return 1
+    finally:
+        engine.dispose()
+
+    print(f"Imported eval set {eval_set_id} for KB '{kb_id}' ({imported} question(s)).")
+    return 0
+
+
+def _cmd_eval_review(args: argparse.Namespace) -> int:
+    """Wire corpus eval review → EvalSetRepository.set_question_review.
+
+    Validates the requested status against the ReviewStatus enum (rejecting
+    invalid values with a clear error) and stamps reviewed_at with UTC now.
+    """
+    from datetime import UTC, datetime
+
+    from sqlalchemy.orm import Session as _Session
+
+    config_path = getattr(args, "config", None)
+    try:
+        from finecorpus.config.loader import load_config
+
+        cfg = load_config(config_path)
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: Could not load config — {exc}", file=sys.stderr)
+        return 1
+
+    from finecorpus.contracts.eval_set import ReviewStatus
+
+    status_raw: str = args.status
+    try:
+        status = ReviewStatus(status_raw)
+    except ValueError:
+        valid = ", ".join(s.value for s in ReviewStatus)
+        print(
+            f"ERROR: Invalid review status '{status_raw}'. Valid values: {valid}.",
+            file=sys.stderr,
+        )
+        return 1
+
+    kb_id: str = args.kb_id
+    engine, _workspace_id = _eval_engine_and_workspace(cfg, kb_id)
+
+    from finecorpus.control.eval_store import EvalSetRepository
+
+    try:
+        with _Session(engine) as session:
+            repo = EvalSetRepository(session)
+            try:
+                record = repo.set_question_review(
+                    args.question_id,
+                    status=status.value,
+                    reviewed_by=args.reviewer,
+                    at=datetime.now(tz=UTC),
+                )
+            except KeyError:
+                print(
+                    f"ERROR: Question '{args.question_id}' not found.",
+                    file=sys.stderr,
+                )
+                engine.dispose()
+                return 1
+            new_status = record.review_status
+            session.commit()
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: Could not update review status — {exc}", file=sys.stderr)
+        engine.dispose()
+        return 1
+    finally:
+        engine.dispose()
+
+    print(f"Question {args.question_id} review_status → {new_status} (reviewer: {args.reviewer}).")
+    return 0
+
+
+def _cmd_eval_sweep(args: argparse.Namespace) -> int:
+    """Wire corpus eval sweep → shared eval_sweep service (same as pipeline sweep).
+
+    This shares the exact sweep service used by 'corpus pipeline sweep': it
+    delegates to _cmd_pipeline_sweep, which calls estimate_sweep_cost /
+    run_sweep / render_ranked_table.  There is no duplicated sweep logic.
+    """
+    return _cmd_pipeline_sweep(args)
+
+
+def _cmd_eval_status(args: argparse.Namespace) -> int:
+    """Wire corpus eval status → read-only eval-substrate summary for a KB.
+
+    Prints eval-set counts, per-set question counts, confidence level, whether a
+    current baseline exists (recall/precision + scored_at), and recent sweep
+    runs.  For every provisional eval set the confidence banner is rendered
+    prominently (§9.2, §19 criterion 3).
+    """
+    from sqlalchemy.orm import Session as _Session
+
+    config_path = getattr(args, "config", None)
+    try:
+        from finecorpus.config.loader import load_config
+
+        cfg = load_config(config_path)
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: Could not load config — {exc}", file=sys.stderr)
+        return 1
+
+    kb_id: str = args.kb_id
+    engine, _workspace_id = _eval_engine_and_workspace(cfg, kb_id)
+
+    from finecorpus.contracts.eval_set import ConfidenceLevel
+    from finecorpus.control.eval_store import (
+        EvalBaselineRepository,
+        EvalSetRepository,
+        SweepRunRepository,
+    )
+    from finecorpus.pipeline.report import render_confidence_banner
+
+    try:
+        with _Session(engine) as session:
+            eval_repo = EvalSetRepository(session)
+            baseline_repo = EvalBaselineRepository(session)
+            sweep_repo = SweepRunRepository(session)
+
+            eval_sets = eval_repo.list_for_kb(kb_id)
+            current_baseline = baseline_repo.get_current(kb_id)
+            sweep_runs = sweep_repo.list_for_kb(kb_id)
+
+            print(f"Eval status: KB '{kb_id}'")
+            print(f"  eval sets: {len(eval_sets)}")
+            print()
+
+            for es in eval_sets:
+                questions = eval_repo.get_questions(es.eval_set_id)
+                n_total = len(questions)
+                n_unreviewed = sum(1 for q in questions if q.review_status == "unreviewed")
+                print(f"  Eval set {es.eval_set_id}")
+                print(f"    origin           : {es.origin}")
+                print(f"    confidence_level : {es.confidence_level}")
+                print(f"    questions        : {n_total} ({n_unreviewed} unreviewed)")
+
+                try:
+                    confidence_level = ConfidenceLevel(es.confidence_level)
+                except ValueError:
+                    confidence_level = ConfidenceLevel.provisional
+
+                if confidence_level == ConfidenceLevel.provisional or n_unreviewed > 0:
+                    print()
+                    print(
+                        render_confidence_banner(
+                            confidence_level=confidence_level,
+                            n_total=n_total,
+                            n_unreviewed=n_unreviewed,
+                        )
+                    )
+                print()
+
+            print("  Current baseline:")
+            if current_baseline is not None:
+                print(f"    recall    : {current_baseline.recall:.4f}")
+                print(f"    precision : {current_baseline.precision:.4f}")
+                print(f"    scored_at : {current_baseline.scored_at.isoformat()}")
+            else:
+                print("    (none — no baseline scored yet)")
+            print()
+
+            print(f"  Recent sweep runs ({len(sweep_runs)}):")
+            for run in sweep_runs[:10]:
+                print(
+                    f"    {run.id}  status={run.status}  "
+                    f"cost=${run.total_cost_usd:.4f}  "
+                    f"created_at={run.created_at.isoformat()}"
+                )
+            if not sweep_runs:
+                print("    (none)")
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: Could not read eval status — {exc}", file=sys.stderr)
+        engine.dispose()
+        return 1
+    finally:
+        engine.dispose()
+
+    return 0
+
+
 def _cmd_pipeline_run(args: argparse.Namespace) -> int:
     """Wire corpus pipeline run → finecorpus.pipeline.run_pipeline.
 
@@ -2203,6 +2696,153 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Pipeline run ID for artifact lookup (required when --artifacts is set).",
     )
 
+    # --- eval subcommand group (Phase 5: eval-set lifecycle) ---
+    eval_parser = sub.add_parser(
+        "eval",
+        help="Eval-set lifecycle — generate, import, review, sweep, status (§9)",
+    )
+    eval_sub = eval_parser.add_subparsers(dest="eval_command", metavar="<subcommand>")
+
+    # eval generate
+    eval_gen_parser = eval_sub.add_parser(
+        "generate",
+        help=(
+            "Generate a provisional eval set from corpus segments (§9.1, M-043). "
+            "Requires an LLM provider; questions are never fabricated without one."
+        ),
+    )
+    eval_gen_parser.add_argument("kb_id", metavar="KB_ID", help="Knowledge-base identifier.")
+    eval_gen_parser.add_argument(
+        "--artifacts",
+        metavar="DIR",
+        default=None,
+        help="Root directory for pipeline artifacts (decompose artifact holds segments).",
+    )
+    eval_gen_parser.add_argument(
+        "--run-id",
+        dest="run_id",
+        metavar="ID",
+        default=None,
+        help="Pipeline run ID whose decompose artifact provides the segments.",
+    )
+    eval_gen_parser.add_argument(
+        "--count-per-type",
+        dest="count_per_type",
+        type=int,
+        default=5,
+        metavar="N",
+        help="Questions to generate per QuestionType (default 5).",
+    )
+    eval_gen_parser.add_argument(
+        "--config",
+        metavar="FILE",
+        default=None,
+        help="Path to corpus.yaml (default: ./corpus.yaml).",
+    )
+
+    # eval import
+    eval_import_parser = eval_sub.add_parser(
+        "import",
+        help="Import an eval-set JSON file (M-090 export format) and persist it (§9.2).",
+    )
+    eval_import_parser.add_argument("kb_id", metavar="KB_ID", help="Knowledge-base identifier.")
+    eval_import_parser.add_argument(
+        "--file",
+        required=True,
+        metavar="PATH",
+        help="Path to the eval-set JSON file to import.",
+    )
+    eval_import_parser.add_argument(
+        "--config",
+        metavar="FILE",
+        default=None,
+        help="Path to corpus.yaml (default: ./corpus.yaml).",
+    )
+
+    # eval review
+    eval_review_parser = eval_sub.add_parser(
+        "review",
+        help="Set the review status of an eval question (§9.2, §12).",
+    )
+    eval_review_parser.add_argument("kb_id", metavar="KB_ID", help="Knowledge-base identifier.")
+    eval_review_parser.add_argument(
+        "--question-id",
+        dest="question_id",
+        required=True,
+        metavar="ID",
+        help="Question identifier to update.",
+    )
+    eval_review_parser.add_argument(
+        "--status",
+        required=True,
+        metavar="STATUS",
+        help=(
+            "New review status: unreviewed | reviewed_kept | reviewed_edited | reviewed_rejected."
+        ),
+    )
+    eval_review_parser.add_argument(
+        "--reviewer",
+        required=True,
+        metavar="NAME",
+        help="Reviewer identity.",
+    )
+    eval_review_parser.add_argument(
+        "--config",
+        metavar="FILE",
+        default=None,
+        help="Path to corpus.yaml (default: ./corpus.yaml).",
+    )
+
+    # eval sweep (shares the pipeline-sweep service — no duplicated logic)
+    eval_sweep_parser = eval_sub.add_parser(
+        "sweep",
+        help=(
+            "Run a configuration sweep for a knowledge base (§9.3). "
+            "Shares the same service as 'corpus pipeline sweep'."
+        ),
+    )
+    eval_sweep_parser.add_argument("kb_id", metavar="KB_ID", help="Knowledge-base identifier.")
+    eval_sweep_parser.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        default=False,
+        dest="yes",
+        help="Skip the sweep cost confirmation prompt (M-048).",
+    )
+    eval_sweep_parser.add_argument(
+        "--config",
+        metavar="FILE",
+        default=None,
+        help="Path to corpus.yaml (default: ./corpus.yaml).",
+    )
+    eval_sweep_parser.add_argument(
+        "--artifacts",
+        metavar="DIR",
+        default=None,
+        help="Root directory for pipeline artifacts (collect artifact holds the inventory).",
+    )
+    eval_sweep_parser.add_argument(
+        "--run-id",
+        dest="run_id",
+        metavar="ID",
+        default=None,
+        help="Pipeline run ID whose collect artifact to use (required with --artifacts).",
+    )
+
+    # eval status (read-only)
+    eval_status_parser = eval_sub.add_parser(
+        "status",
+        help="Show the eval substrate for a KB — sets, baseline, sweeps (read-only).",
+    )
+    eval_status_parser.add_argument("kb_id", metavar="KB_ID", help="Knowledge-base identifier.")
+    eval_status_parser.add_argument(
+        "--config",
+        metavar="FILE",
+        default=None,
+        help="Path to corpus.yaml (default: ./corpus.yaml).",
+    )
+
     # --- report subcommand (Phase 2: findings + exclusion reports) ---
     report_parser = sub.add_parser(
         "report",
@@ -2290,6 +2930,20 @@ def main() -> None:
             sys.exit(1)
     elif args.command == "plan":
         sys.exit(_cmd_plan(args))
+    elif args.command == "eval":
+        if args.eval_command == "generate":
+            sys.exit(_cmd_eval_generate(args))
+        elif args.eval_command == "import":
+            sys.exit(_cmd_eval_import(args))
+        elif args.eval_command == "review":
+            sys.exit(_cmd_eval_review(args))
+        elif args.eval_command == "sweep":
+            sys.exit(_cmd_eval_sweep(args))
+        elif args.eval_command == "status":
+            sys.exit(_cmd_eval_status(args))
+        else:
+            parser.print_help()
+            sys.exit(1)
     elif args.command == "kb":
         if args.kb_command == "delete-doc":
             sys.exit(_cmd_kb_delete_doc(args))
