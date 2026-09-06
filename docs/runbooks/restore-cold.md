@@ -18,7 +18,7 @@ Cold restore is substantially slower than an N-1 rollback (alias swap). It requi
 
 2. Identify the snapshot that predates the problem. Use the `created_at` timestamp and the control-plane audit log to correlate:
    ```
-   GET /admin/audit?kb_id=<kb_id>&limit=50
+   GET /v1/audit?kb_id=<kb_id>&limit=50
    ```
 
 3. Note the `snapshot_id` and `new_build_id` you will assign to the restored collection. The `new_build_id` must be higher than any existing build ID for the KB.
@@ -27,23 +27,25 @@ Cold restore is substantially slower than an N-1 rollback (alias swap). It requi
 
 ## Step 2 — Initiate restore
 
-Restore is performed via the lifecycle API. `restore_from_snapshot()` automatically:
+Restore is performed via the core library (`restore_from_snapshot()` in `finecorpus.index.lifecycle`). In Phase 4, this is a **library / admin-tooling operation** — there is no REST endpoint for restore. The function is invoked by admin scripts or directly by the operator via the Python library.
+
+`restore_from_snapshot()` automatically:
 1. Copies the snapshot data into a new shadow collection (`rtfc_<kb>_<new_build_id>`).
 2. Sets the `_restored_unreplayed_marker` on the collection metadata to `"true"`.
 3. Queries the tombstone log for all deletion events since the snapshot's creation.
 4. Replays each tombstone entry by calling `delete_by_document` on the restored collection.
 5. Clears the unreplayed marker to `"false"`.
 
-**Via control API:**
-```
-POST /v1/kb/<kb_id>/restore
-{
-  "snapshot_id": "<snapshot_id>",
-  "new_build_id": <N>
-}
+**Via admin tooling / library call:**
+```python
+from finecorpus.index.lifecycle import restore_from_snapshot
+
+restored_collection = restore_from_snapshot(
+    adapter=adapter, session=session, kb_id="<kb_id>", snapshot_id="<snapshot_id>", new_build_id=N
+)
 ```
 
-The operation returns the restored collection name.
+The function returns the restored collection name.
 
 ---
 
@@ -65,10 +67,14 @@ The status shows the restored shadow collection and its metadata. If `restored_u
 
 Before promotion, verify the restored collection is correct:
 
-1. Run a test query against the restored collection directly (before alias retarget):
-   ```
-   GET /v1/kb/<kb_id>/shadow/<restored_collection>/query
-   {"query": "sentinel content"}
+1. Run a test query against the restored collection directly (before alias retarget). Shadow-collection queries are **library/admin-tooling operations** — there is no REST shadow-query endpoint. Use the adapter directly:
+   ```python
+   results = adapter.search(
+       alias=restored_collection,  # collection name, not alias
+       query_vector=embed("sentinel content"),
+       top_k=5,
+       payload_filter=None,
+   )
    ```
 
 2. Confirm that any documents deleted after the snapshot creation are absent:
@@ -81,9 +87,12 @@ Before promotion, verify the restored collection is correct:
 
 ## Step 5 — Promote the restored collection
 
-```
-POST /v1/kb/<kb_id>/promote
-{"build_id": <N>}
+Promotion is a **library/admin-tooling operation** — there is no REST endpoint for promote. Call `promote()` via the core library or admin tooling:
+
+```python
+from finecorpus.index.lifecycle import promote
+
+promote(adapter=adapter, session=session, kb_id="<kb_id>", build_id=N)
 ```
 
 The promotion runs all four pre-promotion validation gates (Gate 1–4 from `index-lifecycle.md §5`). If validation fails, the alias is unchanged and the restored shadow is retained for inspection.

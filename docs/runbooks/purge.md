@@ -36,6 +36,13 @@ corpus kb purge-doc <kb_id> <doc_id> --confirm --actor <requester_id>
 
 The `--confirm` flag is required (prevents accidental use). The `--actor` is written to the audit trail and should identify who authorized the purge.
 
+For non-purge operational deletes (live + N-1 only; cold snapshots age out per retention policy), use:
+```
+corpus kb delete-doc <kb_id> <doc_id>
+```
+
+**Note:** Document delete and purge are **CLI / library operations only** in Phase 4. There is no REST endpoint for document delete or purge — use `corpus kb delete-doc` or `corpus kb purge-doc --confirm` from the CLI.
+
 **What the purge does:**
 1. Looks up the live collection and N-1 collection for the KB from the control-plane alias record.
 2. Calls `delete_by_document(collection, doc_id)` on the live collection — removes all chunks whose `provenance.source_document_id` matches.
@@ -57,12 +64,6 @@ purged from all copies — doc <doc_id> from kb <kb_id>
     - <snapshot_id_2>
 ```
 
-**Via control API:**
-```
-DELETE /v1/kb/<kb_id>/documents/<doc_id>?purge=true
-X-Actor: <requester_id>
-```
-
 ---
 
 ## Step 3 — Verify completeness
@@ -78,13 +79,13 @@ After the purge command returns:
 
 2. Confirm the tombstone record exists:
    ```
-   GET /admin/tombstones?kb_id=<kb_id>
+   GET /v1/kb/<kb_id>/tombstones
    ```
    Expect an entry with `kind="purge"` and `document_id="<doc_id>"`.
 
 3. Confirm the audit entry:
    ```
-   GET /admin/audit?kb_id=<kb_id>&limit=20
+   GET /v1/audit?kb_id=<kb_id>&limit=20
    ```
    Expect an entry with `entry_type="purge"`.
 

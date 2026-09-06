@@ -60,6 +60,11 @@ budgets:
 corpus jobs resume <job_id>
 ```
 
+Or via the control API:
+```
+POST /v1/jobs/<job_id>/resume
+```
+
 The `resume` command transitions the job from `paused_budget` back to `queued`, where it will be claimed by the next available ingest worker. The worker will continue from the last checkpoint (M-082: no duplication or loss).
 
 **Note:** If the job hits the cap again after resuming (because the remaining work still exceeds the budget), it will pause again.
@@ -86,10 +91,11 @@ Cancellation leaves the shadow collection in a partial state (not promoted). The
 
 When a scheduled reindex trigger repeatedly hits the budget cap:
 
-1. Check the `consecutive_cap_hits` count on the trigger record:
+1. Check the `consecutive_cap_hits` count on the trigger record by reviewing the job history:
    ```
-   GET /admin/reindex-triggers?kb_id=<kb_id>
+   corpus jobs list --kb <kb_id> --limit 10
    ```
+   The job records show `consecutive_cap_hits` in the job payload. Reindex trigger configuration (including the cron expression) is managed via `corpus.yaml` — there is no REST endpoint for reading or updating trigger records.
 
 2. Review recent reindex jobs to understand how much they cost and why:
    ```
@@ -103,11 +109,13 @@ When a scheduled reindex trigger repeatedly hits the budget cap:
 
 4. Resolution options:
    - **Raise the cap** as described above.
-   - **Reduce reindex frequency** — change the cron expression for the scheduled trigger:
+   - **Reduce reindex frequency** — change the cron expression for the scheduled trigger in `corpus.yaml`:
+     ```yaml
+     reindex_triggers:
+       - kind: scheduled
+         cron_expr: "0 3 * * 0"  # weekly instead of daily
      ```
-     PUT /admin/reindex-triggers/<trigger_id>
-     {"cron_expr": "0 3 * * 0"}  # weekly instead of daily
-     ```
+     Then reload the config and trigger a new evaluation.
    - **Switch to change-detected** — if the corpus is largely static, replace the scheduled trigger with a `change_detected` trigger so reindexes only fire when content actually changes.
 
 ---

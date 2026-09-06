@@ -19,7 +19,7 @@
 **Via control API:**
 ```
 POST /admin/break-glass/grant
-X-Admin-Id: <admin_principal_id>
+Authorization: Bearer <admin_api_key>
 Content-Type: application/json
 
 {
@@ -29,6 +29,8 @@ Content-Type: application/json
   "notified_principals": ["<workspace_owner_id>", "<kb_editor_id>"]
 }
 ```
+
+Admin identity is derived from the API key used to authenticate (the `Authorization` or `X-API-Key` header). There is no separate `X-Admin-Id` header — the key must be scoped `role=admin, scope_kind=global_` in the platform's key store.
 
 The `window_hours` field defaults to 4 hours (D-04 resolution). Any finite positive value is accepted; the default 4-hour window is enforced by `issue_grant()` with a `_validate_window()` call that rejects `None` (infinite) windows.
 
@@ -80,12 +82,12 @@ The grant and all reads under it are visible in the KB's audit log:
 **List active grants:**
 ```
 GET /admin/break-glass/active
-X-Admin-Id: <admin_id>
+Authorization: Bearer <admin_api_key>
 ```
 
 **View audit entries for a KB:**
 ```
-GET /admin/audit?kb_id=<kb_id>&limit=50
+GET /v1/audit?kb_id=<kb_id>&limit=50
 ```
 Filter for `entry_type="break_glass_grant"` and `entry_type="break_glass_read"`.
 
@@ -110,7 +112,7 @@ If break-glass access needs to be terminated before the grant expires:
 
 ```
 DELETE /admin/break-glass/<grant_id>
-X-Admin-Id: <admin_id>
+Authorization: Bearer <admin_api_key>
 ```
 
 After revocation, any query referencing the revoked `grant_id` returns `PERMISSION_DENIED`. Revocation is permanent — a revoked grant cannot be reinstated.

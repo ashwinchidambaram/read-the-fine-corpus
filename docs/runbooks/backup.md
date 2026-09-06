@@ -56,7 +56,7 @@ The tombstone log (table `tombstone_log` in PostgreSQL) is an append-only record
 
 **Verification check before every restore:**
 ```
-GET /admin/tombstones?kb_id=<kb_id>&limit=1&order=desc
+GET /v1/kb/<kb_id>/tombstones?limit=1&order=desc
 ```
 Compare the returned `created_at` against the most recent deletion event in your external audit trail. If the backup's latest tombstone is older than the external record, you have a gap.
 

@@ -174,7 +174,8 @@ class TestIsolationAndBreakGlass:
     """
 
     @pytest.fixture(scope="class")
-    def sqlite_engine(self) -> Any:
+    @classmethod
+    def sqlite_engine(cls) -> Any:
         engine = create_engine("sqlite://")
         create_tables(engine)
         yield engine
@@ -697,8 +698,8 @@ class TestT06Rollback:
         doc_ids_in_results = {
             r.payload.get("provenance", {}).get("source_document_id", "") for r in results
         }
-        assert DOC_V1 in doc_ids_in_results or len(results) >= 0, (
-            "T-06: rollback collection must be reachable via alias"
+        assert DOC_V1 in doc_ids_in_results, (
+            "T-06: rollback collection must be reachable via alias and return v1 content"
         )
 
         # Critically: the alias must resolve to coll_n (build 1), not coll_n1 (build 2)

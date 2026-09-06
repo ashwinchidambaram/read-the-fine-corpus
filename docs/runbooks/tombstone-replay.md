@@ -56,14 +56,18 @@ If the restored collection has the `_restored_unreplayed_marker = "false"` (repl
    - Appends a new tombstone entry to the tombstone log (ensuring future restores replay it).
    - Appends an audit entry with `entry_type=deletion`.
 
-2. **Verify the restored collection** is now correct by querying for each document that was manually deleted:
+2. **Verify the restored collection** is now correct by querying for each document that was manually deleted. Shadow-collection queries are a **library/admin-tooling operation** — there is no REST shadow-query endpoint. Use the adapter directly:
+   ```python
+   results = adapter.search(
+       alias=restored_collection,  # collection name, not alias
+       query_vector=embed("..."),
+       top_k=5,
+       payload_filter={"provenance.source_document_id": "<doc_id>"},
+   )
+   # Expected: len(results) == 0
    ```
-   POST /v1/kb/<kb_id>/shadow/<restored_collection>/query
-   {"query": "...", "filters": {"provenance.source_document_id": "<doc_id>"}}
-   ```
-   Expected: `result_status: "no_matches"`.
 
-3. **Promote the restored collection** only after verification.
+3. **Promote the restored collection** only after verification. Promotion is also a **library/admin-tooling operation** — call `promote()` via the core library (see `runbooks/restore-cold.md §Step 5`).
 
 ---
 

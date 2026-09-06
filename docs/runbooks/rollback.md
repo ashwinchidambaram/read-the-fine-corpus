@@ -27,21 +27,28 @@ Before rolling back, verify:
 
 ---
 
-## Step 2 — Initiate rollback via the control API
+## Step 2 — Initiate rollback via admin tooling
 
-Rollback is performed via the control-plane API. There is no dedicated `corpus rollback` CLI subcommand in Phase 4; the lifecycle function is called through the control API or directly.
+Rollback is performed via the core library (`rollback()` in `finecorpus.index.lifecycle`). In Phase 4, this is a **library/admin-tooling operation** — there is no REST endpoint for rollback. The function is invoked by admin scripts or directly by the operator via the Python library.
 
-**Via control API (preferred):**
+**Via admin tooling / library call:**
+```python
+from finecorpus.index.lifecycle import rollback
+
+reverted = rollback(
+    adapter=adapter,
+    session=session,
+    kb_id="<kb_id>",
+    available_model_providers=set(config.providers.embedding.keys()),
+)
 ```
-POST /v1/kb/<kb_id>/rollback
-```
-The control API calls `finecorpus.index.lifecycle.rollback()` which:
+`rollback()`:
 1. Reads the alias record to find the N-1 collection and its embedding provider.
 2. Validates that the N-1 provider is available in the current configuration (OQ-L-7).
 3. Phase 1: retargets the Qdrant alias to the N-1 collection (atomic swap).
 4. Phase 2: updates the control-plane alias record (swaps current and previous).
 
-The operation returns the N-1 collection name the alias now serves.
+The function returns the N-1 collection name the alias now serves.
 
 ---
 
@@ -63,7 +70,7 @@ After rollback completes:
 
 3. Review the control-plane audit log for the rollback event:
    ```
-   GET /admin/audit?kb_id=<kb_id>&limit=10
+   GET /v1/audit?kb_id=<kb_id>&limit=10
    ```
 
 ---
