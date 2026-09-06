@@ -84,6 +84,22 @@ class EnqueuedJobInfo:
 # ---------------------------------------------------------------------------
 
 
+def _active_job_id(session: Session, kb_id: str, dedupe_key: str) -> str | None:
+    """Return the job_id of an active job holding this dedupe key, if any."""
+    from sqlalchemy import select
+
+    from finecorpus.control.jobs import ACTIVE_STATES, JobRecord
+
+    stmt = (
+        select(JobRecord.job_id)
+        .where(JobRecord.kb_id == kb_id)
+        .where(JobRecord.dedupe_key == dedupe_key)
+        .where(JobRecord.state.in_(list(ACTIVE_STATES)))
+        .limit(1)
+    )
+    return session.execute(stmt).scalar_one_or_none()
+
+
 def trigger_manual_reindex(
     session: Session,
     kb_id: str,
@@ -124,6 +140,7 @@ def trigger_manual_reindex(
         payload["artifacts_root"] = artifacts_root
 
     repo = JobQueueRepository(session)
+    _pre_existing = _active_job_id(session, kb_id, dedupe_key)
     job = repo.enqueue(
         kb_id=kb_id,
         workspace_id=workspace_id,
@@ -134,7 +151,7 @@ def trigger_manual_reindex(
     )
     session.commit()
 
-    coalesced = job.dedupe_key == dedupe_key and job.state != "queued"
+    coalesced = _pre_existing is not None and job.job_id == _pre_existing
     logger.info(
         "trigger_manual_reindex: kb=%s job_id=%s type=%s coalesced=%s",
         kb_id,
@@ -347,14 +364,12 @@ def _evaluate_scheduled(
     now_naive = now.replace(tzinfo=None) if now.tzinfo else now
 
     if trigger.last_fired_at is None:
-        # Never fired — treat as due immediately
-        logger.debug(
-            "scheduled trigger %s: never fired — scheduling immediately",
-            trigger.trigger_id,
-        )
-        # Validate cron expression
+        # Never fired — ANCHOR, do not fire (M-2 ruling): a nightly cron
+        # enabled at noon must not reindex at noon. The anchoring write sets
+        # last_fired_at=now without enqueueing; subsequent evaluations fire
+        # when croniter says the schedule is due after the anchor.
         try:
-            croniter(cron_expr, now_naive)  # just validate
+            croniter(cron_expr, now_naive)  # validate expression
         except Exception as exc:
             logger.error(
                 "scheduled trigger %s: invalid cron_expr=%r: %s",
@@ -363,7 +378,17 @@ def _evaluate_scheduled(
                 exc,
             )
             return None
-        # Fall through to enqueue
+        from finecorpus.control.reindex import ReindexTriggerRepository
+
+        trigger_repo = ReindexTriggerRepository(session)
+        trigger_repo.record_fired(trigger.trigger_id, fired_at=now)
+        session.commit()
+        logger.info(
+            "scheduled trigger %s: anchored at %s (no job enqueued)",
+            trigger.trigger_id,
+            now.isoformat(),
+        )
+        return None
     else:
         base_dt = trigger.last_fired_at
         try:
@@ -394,6 +419,7 @@ def _evaluate_scheduled(
     current_config_version = _get_current_config_version(config)
     dedupe_key = f"{trigger.kb_id}:scheduled:{cron_expr}"
 
+    _pre_existing = _active_job_id(session, trigger.kb_id, dedupe_key)
     job = queue_repo.enqueue(
         kb_id=trigger.kb_id,
         workspace_id=workspace_id,
@@ -408,7 +434,7 @@ def _evaluate_scheduled(
     )
     session.commit()
 
-    coalesced = job.state != "queued"
+    coalesced = _pre_existing is not None and job.job_id == _pre_existing
 
     # Update trigger record
     trigger_repo.record_fired(
@@ -526,6 +552,7 @@ def _evaluate_change_detected(
     # Enqueue reindex_incremental (clone-and-swap per D-10)
     dedupe_key = f"{trigger.kb_id}:change_detected:{content_fingerprint[:16]}"
 
+    _pre_existing = _active_job_id(session, trigger.kb_id, dedupe_key)
     job = queue_repo.enqueue(
         kb_id=trigger.kb_id,
         workspace_id=workspace_id,
@@ -539,7 +566,7 @@ def _evaluate_change_detected(
     )
     session.commit()
 
-    coalesced = job.state != "queued"
+    coalesced = _pre_existing is not None and job.job_id == _pre_existing
 
     # Record the new fingerprint
     trigger_repo.record_fired(
@@ -612,6 +639,7 @@ def _evaluate_config_change(
     # M-053: config change → MUST use reindex_full (not incremental)
     dedupe_key = f"{trigger.kb_id}:config_change:{current_config_version[:16]}"
 
+    _pre_existing = _active_job_id(session, trigger.kb_id, dedupe_key)
     job = queue_repo.enqueue(
         kb_id=trigger.kb_id,
         workspace_id=workspace_id,
@@ -626,7 +654,7 @@ def _evaluate_config_change(
     )
     session.commit()
 
-    coalesced = job.state != "queued"
+    coalesced = _pre_existing is not None and job.job_id == _pre_existing
 
     trigger_repo.record_fired(
         trigger.trigger_id,
@@ -739,7 +767,7 @@ def record_budget_pause_for_trigger(
 ) -> None:
     """Increment cap_hits counter on a trigger after a budget pause.
 
-    Called by the worker loop after BudgetGuard pauses a scheduled job.
+    Called by JobRunner._check_budget_before_build after a budget pause.
     """
     from finecorpus.control.reindex import ReindexTriggerRepository
 

@@ -167,6 +167,7 @@ def _build_runner(
         ledger_repo=ledger_repo,
         audit_repo=audit_repo,
         budget_guard=budget_guard,
+        config=config,
         embedding_provider=embedding_provider,
         index_adapter=index_adapter,
         worker_id=worker_id,

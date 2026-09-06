@@ -10,14 +10,13 @@ Tests:
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
 from finecorpus.index.adapter import CollectionNotFoundError
-from finecorpus.index.lifecycle import GateStatus, ValidationResult, validate_shadow
+from finecorpus.index.lifecycle import GateStatus, validate_shadow
 from finecorpus.pipeline.plan.stage import StageError, check_permission_gap_gate
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -284,10 +283,12 @@ class TestD16PermissionGate:
         """Create segment_sets list with given permission_fidelity values."""
         sets = []
         for i, fidelity in enumerate(fidelities):
-            sets.append({
-                "document_id": f"doc-{i}",
-                "tenancy": {"permission_fidelity": fidelity},
-            })
+            sets.append(
+                {
+                    "document_id": f"doc-{i}",
+                    "tenancy": {"permission_fidelity": fidelity},
+                }
+            )
         return sets
 
     def test_d16_unacked_fails_closed(self):

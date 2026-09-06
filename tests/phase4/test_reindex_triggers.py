@@ -12,7 +12,6 @@ Tests:
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -20,15 +19,13 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from finecorpus.control.jobs import JobQueueRepository, JobState, JobType
-from finecorpus.control.metadata import Base, create_tables
-from finecorpus.control.reindex import ReindexTriggerRecord, ReindexTriggerRepository
+from finecorpus.control.metadata import create_tables
+from finecorpus.control.reindex import ReindexTriggerRepository
 from finecorpus.pipeline.reindex import (
-    EnqueuedJobInfo,
     assert_incremental_allowed,
     evaluate_triggers,
     trigger_manual_reindex,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -150,7 +147,7 @@ def test_change_detected_content_hash_change_enqueues(session, config, tmp_path)
     import json
 
     _make_job(session)
-    trig = _make_trigger(session, "change_detected")
+    _make_trigger(session, "change_detected")
 
     # Write a collect.json with content hashes
     run_dir = tmp_path / "run1"
@@ -184,7 +181,7 @@ def test_change_detected_same_content_hash_no_enqueue(session, config, tmp_path)
     import json
 
     _make_job(session)
-    trig = _make_trigger(session, "change_detected")
+    _make_trigger(session, "change_detected")
 
     # Write collect.json
     run_dir = tmp_path / "run1"
@@ -214,9 +211,7 @@ def test_change_detected_same_content_hash_no_enqueue(session, config, tmp_path)
     )
     # No new change_detected jobs (fingerprint unchanged)
     change_detected = [e for e in enqueued2 if e.trigger_type == "change_detected"]
-    assert len(change_detected) == 0, (
-        "Metadata-only change must not trigger reindex (M-052)"
-    )
+    assert len(change_detected) == 0, "Metadata-only change must not trigger reindex (M-052)"
 
 
 # ---------------------------------------------------------------------------
@@ -258,15 +253,21 @@ def test_scheduled_cron_not_due(session, config):
     assert len(scheduled) == 0
 
 
-def test_scheduled_cron_never_fired(session, config):
-    """Scheduled trigger that has never fired → fires immediately."""
+def test_scheduled_cron_never_fired_anchors(session, config):
+    """Never-fired scheduled trigger ANCHORS on first evaluation (no job);
+    fires on a later evaluation once the cron schedule is due (PR #34 M-2)."""
     _make_job(session)
     _make_trigger(session, "scheduled", cron_expr="*/1 * * * *")
 
-    now = datetime.now(tz=UTC)
+    now = datetime(2026, 9, 5, 12, 0, tzinfo=UTC)
     enqueued = evaluate_triggers(session=session, config=config, adapter=None, now=now)
     scheduled = [e for e in enqueued if e.trigger_type == "scheduled"]
-    assert len(scheduled) == 1
+    assert len(scheduled) == 0, "first evaluation anchors without firing"
+
+    later = datetime(2026, 9, 5, 12, 2, tzinfo=UTC)
+    enqueued = evaluate_triggers(session=session, config=config, adapter=None, now=later)
+    scheduled = [e for e in enqueued if e.trigger_type == "scheduled"]
+    assert len(scheduled) == 1, "anchored trigger fires once due"
 
 
 # ---------------------------------------------------------------------------
@@ -335,14 +336,10 @@ def test_cap_hit_alert_counter_triggers_at_threshold(session, config):
 
     config.budgets.scheduled_reindex_cap_hit_alert_count = 3
 
-    import logging
-
     with patch("finecorpus.pipeline.reindex.logger") as mock_log:
         evaluate_triggers(session=session, config=config, adapter=None, now=datetime.now(tz=UTC))
         # No alert yet (cap_hits=2 < threshold=3)
-        error_calls = [
-            c for c in mock_log.error.call_args_list if "ALERT" in str(c)
-        ]
+        error_calls = [c for c in mock_log.error.call_args_list if "ALERT" in str(c)]
         assert len(error_calls) == 0
 
 
@@ -362,7 +359,5 @@ def test_cap_hit_alert_at_threshold(session, config):
 
     with patch("finecorpus.pipeline.reindex.logger") as mock_log:
         evaluate_triggers(session=session, config=config, adapter=None, now=datetime.now(tz=UTC))
-        error_calls = [
-            c for c in mock_log.error.call_args_list if "ALERT" in str(c)
-        ]
+        error_calls = [c for c in mock_log.error.call_args_list if "ALERT" in str(c)]
         assert len(error_calls) >= 1
