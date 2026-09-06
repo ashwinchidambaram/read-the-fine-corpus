@@ -18,6 +18,12 @@ Test inventory:
     five Phase 5 tables.
   test_sweep_run_set_status — set_status updates status, cost, confirmed.
   test_eval_baseline_list_for_kb — list_for_kb returns all rows (newest first).
+  test_eval_baseline_orm_declares_partial_unique_index — unit assertion that
+    EvalBaselineRecord.__table_args__ declares the partial unique index
+    uq_eval_baselines_kb_current with postgresql_where clause (create_all path).
+  test_eval_baseline_upsert_current_single_is_current_sqlite — app-level
+    guarantee: repeated upsert_current keeps exactly one is_current=True row
+    across many upserts (SQLite path, no DB-level partial unique enforcement).
 """
 
 from __future__ import annotations
@@ -25,7 +31,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import Index, create_engine, inspect
 from sqlalchemy.orm import Session
 
 from finecorpus.control.eval_store import (
@@ -720,3 +726,94 @@ def test_eval_baseline_list_for_kb(baseline_repo, eval_repo, session):
     # Only the last one is current
     assert sum(1 for r in all_rows if r.is_current) == 1
     assert all_rows[0].is_current is True
+
+
+# ---------------------------------------------------------------------------
+# Tests — MINOR-1: partial unique index defense-in-depth (is_current per kb_id)
+# ---------------------------------------------------------------------------
+
+
+def test_eval_baseline_orm_declares_partial_unique_index():
+    """ORM __table_args__ declares uq_eval_baselines_kb_current with postgresql_where.
+
+    This is a unit assertion against the ORM metadata — it verifies the
+    create_all() path (used in integration tests and create_tables()) would
+    emit the partial unique index on PostgreSQL, without requiring a live PG
+    connection.
+
+    The index must:
+    - Have the name 'uq_eval_baselines_kb_current'
+    - Be marked unique=True
+    - Have a postgresql_where dialect option (the partial predicate)
+    """
+    from finecorpus.control.eval_store import EvalBaselineRecord
+
+    table_args = EvalBaselineRecord.__table_args__
+    assert isinstance(table_args, tuple), "Expected __table_args__ to be a tuple"
+
+    # Find the partial unique index by name
+    partial_unique = None
+    for arg in table_args:
+        if isinstance(arg, Index) and arg.name == "uq_eval_baselines_kb_current":
+            partial_unique = arg
+            break
+
+    assert partial_unique is not None, (
+        "uq_eval_baselines_kb_current index not found in EvalBaselineRecord.__table_args__; "
+        "create_all() path would not emit the partial unique index on PostgreSQL"
+    )
+    assert partial_unique.unique is True, "uq_eval_baselines_kb_current must be unique=True"
+    # Verify the postgresql_where dialect kwarg is present (the partial predicate)
+    pg_where = partial_unique.dialect_options.get("postgresql", {}).get("where", None)
+    assert pg_where is not None, (
+        "uq_eval_baselines_kb_current is missing postgresql_where; "
+        "the partial predicate would not be emitted on PostgreSQL"
+    )
+
+
+def test_eval_baseline_upsert_current_single_is_current_sqlite(baseline_repo, eval_repo, session):
+    """App-level guarantee: upsert_current always leaves exactly one is_current row.
+
+    On SQLite (no DB-level partial unique index enforcement), the app-level
+    demotion logic in upsert_current() is the sole guarantee that at most one
+    is_current=True row exists per kb_id.  This test exercises that guarantee
+    across five sequential upserts with different fingerprints.
+
+    Verifies:
+    - Exactly one is_current=True row after each upsert.
+    - The current row is the most recently written one.
+    - Prior rows are all demoted (is_current=False).
+    """
+    _make_eval_set(eval_repo)
+    session.flush()
+
+    upserted_ids = []
+    for i in range(1, 6):
+        row = baseline_repo.upsert_current(
+            kb_id="kb-A",
+            reference_id=f"ref-v{i}",
+            reference_fingerprint=f"fp-v{i}",
+            eval_set_id="es-001",
+            recall=0.70 + i * 0.02,
+            precision=0.65 + i * 0.02,
+            scored_at=_NOW,
+        )
+        session.flush()
+        upserted_ids.append(row.id)
+
+        # After each upsert: exactly one is_current=True row for kb-A
+        all_rows = baseline_repo.list_for_kb("kb-A")
+        current_rows = [r for r in all_rows if r.is_current]
+        assert len(current_rows) == 1, (
+            f"After upsert #{i}: expected exactly 1 is_current=True row, got {len(current_rows)}"
+        )
+        assert current_rows[0].id == row.id, (
+            f"After upsert #{i}: current row id mismatch; "
+            f"expected {row.id!r}, got {current_rows[0].id!r}"
+        )
+
+    # Final state: 5 rows total, only the last is current
+    final_rows = baseline_repo.list_for_kb("kb-A")
+    assert len(final_rows) == 5
+    assert sum(1 for r in final_rows if r.is_current) == 1
+    assert baseline_repo.get_current("kb-A").id == upserted_ids[-1]

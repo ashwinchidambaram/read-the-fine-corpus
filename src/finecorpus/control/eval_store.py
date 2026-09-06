@@ -44,6 +44,7 @@ from sqlalchemy import (
     select,
 )
 from sqlalchemy.orm import Mapped, Session, mapped_column
+from sqlalchemy.sql.expression import text as sa_text
 
 from finecorpus.control.metadata import Base
 
@@ -179,6 +180,23 @@ class EvalBaselineRecord(Base):
         Index("ix_eval_baselines_kb_id", "kb_id"),
         Index("ix_eval_baselines_reference_fingerprint", "reference_fingerprint"),
         Index("ix_eval_baselines_eval_set_id", "eval_set_id"),
+        # Defense-in-depth: at most one is_current=True row per kb_id enforced
+        # at the DB level via a partial unique index.  This prevents a concurrent
+        # upsert_current race from leaving two current rows, which would corrupt
+        # M-049 marking and M-100 drift-baseline selection.
+        #
+        # The index is declared with both postgresql_where and sqlite_where so
+        # that create_all() (used by create_tables() and integration tests) emits
+        # the correct WHERE-guarded DDL on both backends.  The migration 0003
+        # upgrade() path also creates it (PG-guarded op.execute) for the Alembic
+        # path — parity with the Phase-4 job_queue dedupe-index lesson (PR #30).
+        Index(
+            "uq_eval_baselines_kb_current",
+            "kb_id",
+            unique=True,
+            postgresql_where=sa_text("is_current"),
+            sqlite_where=sa_text("is_current = 1"),
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)

@@ -121,6 +121,22 @@ def upgrade() -> None:
         ["reference_fingerprint"],
     )
     op.create_index("ix_eval_baselines_eval_set_id", "eval_baselines", ["eval_set_id"])
+    # Defense-in-depth: at most one is_current=True row per kb_id.
+    # Prevents concurrent upsert_current races from leaving two current rows,
+    # which would corrupt M-049 marking and M-100 drift-baseline selection.
+    # Matches the partial-unique pattern used for job_queue dedupe in 0002.
+    #
+    # Migration path: op.execute() is PG-only here (SQLite WHERE syntax on
+    # TRUE vs 1 differs; and Alembic's op.execute is not dialect-guarded for
+    # SQLite).  The ORM __table_args__ declaration in eval_store.py uses both
+    # postgresql_where and sqlite_where so that create_tables() (create_all)
+    # emits the correct WHERE-guarded DDL on both backends.  The migration
+    # path is only exercised against real PostgreSQL.
+    if is_pg:
+        op.execute(
+            "CREATE UNIQUE INDEX uq_eval_baselines_kb_current "
+            "ON eval_baselines (kb_id) WHERE is_current = TRUE"
+        )
 
     # ------------------------------------------------------------------
     # 4. sweep_runs
@@ -166,6 +182,9 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Drop Phase 5 eval tables (reverse order)."""
+    bind = op.get_bind()
+    is_pg = bind.dialect.name == "postgresql"
+
     op.drop_index("ix_sweep_ranking_rows_sweep_run_id", "sweep_ranking_rows")
     op.drop_table("sweep_ranking_rows")
 
@@ -173,6 +192,8 @@ def downgrade() -> None:
     op.drop_index("ix_sweep_runs_kb_id", "sweep_runs")
     op.drop_table("sweep_runs")
 
+    if is_pg:
+        op.execute("DROP INDEX IF EXISTS uq_eval_baselines_kb_current")
     op.drop_index("ix_eval_baselines_eval_set_id", "eval_baselines")
     op.drop_index("ix_eval_baselines_reference_fingerprint", "eval_baselines")
     op.drop_index("ix_eval_baselines_kb_id", "eval_baselines")
