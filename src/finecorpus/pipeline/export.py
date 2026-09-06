@@ -50,6 +50,8 @@ class ExportManifest:
         chunk_count: Total number of chunk records written to chunks/.
         file_hashes: Dict mapping relative file path → SHA-256 hex digest.
         eval_sets_note: Advisory note about eval-set availability.
+        eval_set_count: Number of eval sets exported (0 when none configured).
+        eval_question_count: Total questions across all exported eval sets.
         out_dir: Absolute path to the export directory.
     """
 
@@ -57,10 +59,9 @@ class ExportManifest:
     exported_at: datetime
     chunk_count: int
     file_hashes: dict[str, str] = field(default_factory=dict)
-    eval_sets_note: str = (
-        "[STUB — Phase 5] Eval sets are not yet populated. "
-        "Use 'corpus eval import' after Phase 5 to add curated (query, chunk) pairs."
-    )
+    eval_sets_note: str = ""
+    eval_set_count: int = 0
+    eval_question_count: int = 0
     out_dir: pathlib.Path = field(default_factory=pathlib.Path)
 
     def to_dict(self) -> dict[str, Any]:
@@ -71,6 +72,8 @@ class ExportManifest:
             "chunk_count": self.chunk_count,
             "file_hashes": self.file_hashes,
             "eval_sets_note": self.eval_sets_note,
+            "eval_set_count": self.eval_set_count,
+            "eval_question_count": self.eval_question_count,
             "out_dir": str(self.out_dir),
         }
 
@@ -259,17 +262,101 @@ def export_kb(
     logger.info("Exported %d chunks in %d batch file(s)", chunk_count, batch_num)
 
     # ------------------------------------------------------------------
-    # 5. Eval sets stub
+    # 5. Eval sets (M-090) — serialize each eval set to eval_sets/<id>.json
     # ------------------------------------------------------------------
     eval_dir = out_path / "eval_sets"
     eval_dir.mkdir(exist_ok=True)
-    readme = eval_dir / "README.txt"
-    readme.write_text(
-        "[STUB — Phase 5] Eval sets are not yet populated. "
-        "Use 'corpus eval import' after Phase 5 to add curated (query, chunk) pairs.\n",
-        encoding="utf-8",
+
+    eval_set_count = 0
+    eval_question_count = 0
+    eval_sets_note = ""
+
+    try:
+        from finecorpus.control.eval_store import EvalSetRepository  # noqa: PLC0415
+
+        eval_repo = EvalSetRepository(session)
+        eval_set_records = eval_repo.list_for_kb(kb_id)
+
+        if eval_set_records:
+            for es_record in eval_set_records:
+                questions = eval_repo.get_questions(es_record.eval_set_id)
+                eval_set_export = {
+                    "eval_set_id": es_record.eval_set_id,
+                    "kb_id": es_record.kb_id,
+                    "workspace_id": es_record.workspace_id,
+                    "schema_version": es_record.schema_version,
+                    "origin": es_record.origin,
+                    "confidence_level": es_record.confidence_level,
+                    "baseline_ref": es_record.baseline_ref,
+                    "created_at": es_record.created_at.isoformat()
+                    if es_record.created_at
+                    else None,
+                    "question_count": len(questions),
+                    "questions": [
+                        {
+                            "question_id": q.question_id,
+                            "text": q.text,
+                            "question_type": q.question_type,
+                            "generation_method": q.generation_method,
+                            "review_status": q.review_status,
+                            "source_segment_ids": q.source_segment_ids,
+                            "source_unknown": q.source_unknown,
+                            "expected_segment_ids": q.expected_segment_ids,
+                            "injection_suspicion": q.injection_suspicion,
+                            "reviewed_by": q.reviewed_by,
+                            "reviewed_at": q.reviewed_at.isoformat() if q.reviewed_at else None,
+                            "class_description_ref": q.class_description_ref,
+                        }
+                        for q in questions
+                    ],
+                }
+
+                es_path = eval_dir / f"{es_record.eval_set_id}.json"
+                es_path.write_text(
+                    json.dumps(eval_set_export, indent=2, default=str), encoding="utf-8"
+                )
+                rel_path = f"eval_sets/{es_record.eval_set_id}.json"
+                file_hashes[rel_path] = _sha256_file(es_path)
+
+                eval_set_count += 1
+                eval_question_count += len(questions)
+                logger.info(
+                    "Exported eval set %s with %d questions → %s",
+                    es_record.eval_set_id,
+                    len(questions),
+                    es_path,
+                )
+
+            eval_sets_note = (
+                f"Exported {eval_set_count} eval set(s) with "
+                f"{eval_question_count} total question(s)."
+            )
+        else:
+            eval_sets_note = "No eval sets configured for this knowledge base."
+            # Write an informative README for empty eval_sets/ directory
+            readme = eval_dir / "README.txt"
+            readme.write_text(
+                "No eval sets are configured for this knowledge base.\n"
+                "Use 'corpus eval import' to add curated (query, chunk) pairs.\n",
+                encoding="utf-8",
+            )
+            file_hashes["eval_sets/README.txt"] = _sha256_file(readme)
+
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Eval set export failed: %s", exc)
+        eval_sets_note = f"Eval set export failed: {exc}"
+        # Ensure the directory exists with a fallback README
+        readme = eval_dir / "README.txt"
+        if not readme.exists():
+            readme.write_text(
+                f"Eval set export encountered an error: {exc}\n",
+                encoding="utf-8",
+            )
+            file_hashes["eval_sets/README.txt"] = _sha256_file(readme)
+
+    logger.info(
+        "Exported %d eval set(s) with %d total question(s)", eval_set_count, eval_question_count
     )
-    file_hashes["eval_sets/README.txt"] = _sha256_file(readme)
 
     # ------------------------------------------------------------------
     # 6. Manifest
@@ -280,6 +367,9 @@ def export_kb(
         exported_at=exported_at,
         chunk_count=chunk_count,
         file_hashes=file_hashes,
+        eval_sets_note=eval_sets_note,
+        eval_set_count=eval_set_count,
+        eval_question_count=eval_question_count,
         out_dir=out_path,
     )
     manifest_path = out_path / "manifest.json"

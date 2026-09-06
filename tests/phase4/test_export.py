@@ -191,10 +191,13 @@ def test_kb_export_complete_m090(tmp_path):
     first_line = json.loads(first_file.read_text().splitlines()[0])
     assert "trust_level" in first_line
 
-    # 4. Eval sets stub present
-    eval_readme = out_dir / "eval_sets" / "README.txt"
-    assert eval_readme.exists(), "eval_sets/README.txt stub must exist"
-    assert "STUB" in eval_readme.read_text()
+    # 4. Eval sets directory present (Phase 5: real export; README when no sets configured)
+    eval_dir = out_dir / "eval_sets"
+    assert eval_dir.exists(), "eval_sets/ directory must exist"
+    # When no eval sets are configured, a README is written instead.
+    # The directory must exist and either contain a README or eval set JSON files.
+    dir_contents = list(eval_dir.iterdir())
+    assert len(dir_contents) >= 1, "eval_sets/ must contain at least a README or eval set files"
 
     # 5. File hashes in manifest match actual files
     for rel_path, expected_hash in manifest_data["file_hashes"].items():

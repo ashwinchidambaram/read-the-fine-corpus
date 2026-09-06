@@ -41,11 +41,37 @@ def _handle_sigterm(signum: int, frame: Any) -> None:
     _SHUTDOWN = True
 
 
+def _is_drift_cron_due(cron_expr: str | None, now: Any = None) -> bool:
+    """Return True when a drift-detection cron run is due right now.
+
+    Uses a simple stub implementation: fires on every call when the cron_expr
+    is set (non-None, non-empty).  In production, replace with croniter or
+    similar to honour the actual cron schedule.
+
+    Args:
+        cron_expr: Cron expression string, or None/empty to disable.
+        now: Current UTC datetime (unused by stub; reserved for testing).
+
+    Returns:
+        True when a drift run is due.
+    """
+    if not cron_expr:
+        return False
+    # Stub: fires whenever cron is set.  A real implementation would use
+    # croniter to evaluate whether the expression is satisfied at ``now``.
+    return True
+
+
 def scheduler_tick(
     session: Any = None,
     config: Any = None,
+    adapter: Any = None,
+    provider: Any = None,
 ) -> None:
     """Evaluate reindex triggers and enqueue reindex jobs as needed.
+
+    Also runs cron-driven drift detection (§9.4) when
+    observability.drift_detection_cron is set.
 
     Called once per worker loop iteration, before job claim.  Failure-isolated:
     any exception is caught and logged; the worker loop continues.
@@ -56,11 +82,17 @@ def scheduler_tick(
     Args:
         session: Optional SQLAlchemy Session for the control-plane DB.
         config: Optional platform config (CorpusConfig).
+        adapter: Optional IndexAdapter for drift scoring.  When None, cron drift
+            is skipped (no-op) — the adapter is only available in the full
+            worker context.
+        provider: Optional EmbeddingProvider for drift scoring.  When None,
+            cron drift is skipped.
     """
     if session is None or config is None:
         # Called without args from the legacy loop path — no-op.
         return
 
+    # ---- Reindex trigger evaluation ----
     try:
         from finecorpus.pipeline.reindex import evaluate_triggers
 
@@ -71,6 +103,90 @@ def scheduler_tick(
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("ingest-worker: scheduler_tick error: %s", exc, exc_info=True)
+
+    # ---- Cron drift detection (§9.4) ----
+    try:
+        drift_cron: str | None = None
+        try:
+            drift_cron = config.observability.drift_detection_cron
+        except AttributeError:
+            pass
+
+        if drift_cron and adapter is not None and provider is not None:
+            if _is_drift_cron_due(drift_cron):
+                _run_cron_drift_checks(
+                    session=session,
+                    config=config,
+                    adapter=adapter,
+                    provider=provider,
+                )
+        elif drift_cron:
+            logger.debug(
+                "ingest-worker: drift_detection_cron is set but adapter/provider "
+                "not available — cron drift check skipped this tick"
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ingest-worker: cron drift check error: %s", exc, exc_info=True)
+
+
+def _run_cron_drift_checks(
+    *,
+    session: Any,
+    config: Any,
+    adapter: Any,
+    provider: Any,
+) -> None:
+    """Run drift checks for all active KBs (cron path).
+
+    Iterates over all alias records and runs run_drift_check for each KB
+    that has a retained current baseline.  Failure-isolated per KB.
+
+    Args:
+        session: SQLAlchemy Session.
+        config: CorpusConfig.
+        adapter: IndexAdapter.
+        provider: EmbeddingProvider.
+    """
+    from sqlalchemy import select as _select  # noqa: PLC0415
+
+    from finecorpus.control.eval_store import EvalBaselineRepository  # noqa: PLC0415
+    from finecorpus.control.metadata import AliasRecord  # noqa: PLC0415
+    from finecorpus.services.eval_drift import run_drift_check  # noqa: PLC0415
+
+    # Enumerate all registered KBs via alias records.
+    try:
+        all_aliases = list(session.execute(_select(AliasRecord)).scalars())
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("ingest-worker: could not enumerate alias records for cron drift: %s", exc)
+        return
+
+    baseline_repo = EvalBaselineRepository(session)
+    for alias_record in all_aliases:
+        kb_id = alias_record.kb_id
+        try:
+            baseline = baseline_repo.get_current(kb_id)
+            if baseline is None:
+                continue
+            result = run_drift_check(
+                kb_id=kb_id,
+                session=session,
+                adapter=adapter,
+                provider=provider,
+                config=config,
+            )
+            logger.info(
+                "ingest-worker: cron drift check for kb=%r → status=%s regressed=%s",
+                kb_id,
+                result.status,
+                result.regressed,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "ingest-worker: cron drift check failed for kb=%r: %s",
+                kb_id,
+                exc,
+                exc_info=True,
+            )
 
 
 def _touch_heartbeat() -> None:

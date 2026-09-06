@@ -122,6 +122,8 @@ class JobRunner:
                 self._run_ingest(job)
             elif job_type == str(JobType.eval_sweep):
                 self._run_eval_sweep(job)
+            elif job_type == str(JobType.eval_drift):
+                self._run_eval_drift(job)
             elif job_type in (str(JobType.restore), str(JobType.purge)):
                 raise NotImplementedError(
                     f"job_type={job_type!r} is not yet implemented; a sibling unit will land it."
@@ -210,6 +212,42 @@ class JobRunner:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("cap-hit reset failed for %s: %s", trigger_id, exc)
         logger.info("job_runner: job %s completed total_cost=%.6f", job.job_id, total_cost)
+
+        # §9.4 post-reindex drift intent: enqueue a drift-check job to record
+        # that a drift check should run after this reindex.  The pipeline layer
+        # cannot score (C-5); the actual scored check runs from the services
+        # layer (scheduler_tick or CLI).  Enqueue is best-effort (failure MUST
+        # NOT fail the reindex — isolation).
+        try:
+            from finecorpus.control.jobs import JobQueueRepository, JobType  # noqa: PLC0415
+
+            drift_repo = JobQueueRepository(self._session)
+            drift_repo.enqueue(
+                kb_id=job.kb_id,
+                workspace_id=job.workspace_id,
+                job_type=JobType.eval_drift,
+                payload={
+                    "trigger": "post_reindex",
+                    "parent_job_id": job.job_id,
+                    "run_id": run_id,
+                },
+                dedupe_key=f"drift_{job.kb_id}",
+                priority=0,
+            )
+            self._session.commit()
+            logger.info(
+                "job_runner: enqueued eval_drift intent job for kb=%s after reindex %s",
+                job.kb_id,
+                job.job_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Drift enqueue failures are strictly non-fatal.
+            logger.warning(
+                "job_runner: could not enqueue eval_drift intent for kb=%s: %s "
+                "(non-fatal; drift check will run via cron if configured)",
+                job.kb_id,
+                exc,
+            )
 
     def _run_pre_build_stages(
         self,
@@ -362,6 +400,46 @@ class JobRunner:
         self._session.commit()
 
         logger.info("job_runner: job %s build complete cost=%.6f", job.job_id, actual_cost)
+
+    # ------------------------------------------------------------------
+    # eval_drift execution (additive arm — PR-8 dispatch)
+    # ------------------------------------------------------------------
+
+    def _run_eval_drift(self, job: JobRecord) -> None:
+        """Run an eval_drift job — FAIL LOUDLY (PR-7 fail-loud precedent).
+
+        Layer constraint (C-5): pipeline jobs may NOT import from the services
+        layer.  Retrieval-quality scoring (services.eval_drift.run_drift_check)
+        cannot be performed here.  Persisting a "completed" drift result with
+        all-zero scores would be actively misleading.
+
+        This arm therefore FAILS LOUDLY with a clear descriptive error so no
+        fake drift result is ever committed.
+
+        Architecture: the eval_drift job is ENQUEUED by the post-reindex hook
+        (services/ingest_worker.py after _run_ingest) to record intent in the
+        audit trail.  The ACTUAL SCORED DRIFT CHECK runs from the services
+        layer: either via scheduler_tick (cron) or directly from the services
+        entrypoint (``corpus pipeline drift-check <kb_id>``).
+
+        The queue-mode eval_drift job arm exists ONLY to record intent and
+        fail loud — it never produces scored results.
+        """
+        _FAIL_MSG = (
+            "eval_drift must run via the services entrypoint "
+            "(corpus pipeline drift-check <kb_id>) or via scheduler_tick cron; "
+            "the queue worker sits in the pipeline layer and cannot score retrieval. "
+            "Queue-driven scored drift is deferred."
+        )
+
+        logger.error(
+            "job_runner: eval_drift job %s cannot be scored via the queue worker — %s",
+            job.job_id,
+            _FAIL_MSG,
+        )
+        self._queue.fail(job.job_id, error_msg=_FAIL_MSG)
+        self._session.commit()
+        raise ValueError(_FAIL_MSG)
 
     # ------------------------------------------------------------------
     # eval_sweep execution (additive arm — PR-7 dispatch)
