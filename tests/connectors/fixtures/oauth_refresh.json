@@ -1,0 +1,15 @@
+[
+  {
+    "match": {"method": "POST", "url": "https://provider.example/oauth/token"},
+    "response": {
+      "status_code": 200,
+      "json": {
+        "access_token": "new-access-token-abc",
+        "refresh_token": "new-refresh-token-xyz",
+        "token_type": "Bearer",
+        "expires_in": 3600,
+        "scope": "read.documents read.permissions"
+      }
+    }
+  }
+]
