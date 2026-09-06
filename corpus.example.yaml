@@ -285,10 +285,23 @@ assessment:
   # Default: 0.05
   eval_regression_threshold: 0.05
 
+  # D-22: generated eval questions with injection-suspicion score above this
+  # threshold are forced to review_status=unreviewed.  Range [0.0, 1.0].
+  # Default: 0.5
+  eval_injection_suspicion_threshold: 0.5
+
   # Below this document count, the platform declines to run a configuration
-  # sweep.  Executor-proposed; pending Phase 5.  (§9.3)
-  # Default: (none — pending executor design)
-  sweep_min_corpus_docs:
+  # sweep and applies the reference configuration.  (§9.3, M-050, D-07)
+  # Default: 50
+  sweep_min_corpus_docs: 50
+
+  # Maximum candidate configurations evaluated per sweep iteration.  (D-07)
+  # Default: 40
+  sweep_candidate_budget: 40
+
+  # Initial candidate pool multiplier: pool = sweep_candidate_budget * factor.  (D-07)
+  # Default: 2
+  sweep_sample_factor: 2
 
 # ---------------------------------------------------------------------------
 # §2.5 Ingestion

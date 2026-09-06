@@ -74,11 +74,13 @@ ACTIVE_STATES: frozenset[str] = frozenset(
 class JobType(StrEnum):
     """Valid job types."""
 
+    eval_drift = "eval_drift"
+    eval_sweep = "eval_sweep"
     ingest = "ingest"
+    purge = "purge"
     reindex_full = "reindex_full"
     reindex_incremental = "reindex_incremental"
     restore = "restore"
-    purge = "purge"
 
 
 # ---------------------------------------------------------------------------

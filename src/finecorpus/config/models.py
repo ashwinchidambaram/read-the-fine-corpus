@@ -567,12 +567,45 @@ class AssessmentConfig(BaseModel):
             "**(proposed)**"
         ),
     )
-    sweep_min_corpus_docs: int | None = Field(
-        default=None,
+    eval_injection_suspicion_threshold: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
         description=(
-            "§9.3 — Below this document count, the platform declines to run a "
-            "configuration sweep. Executor-proposed; must be documented before Phase 5. "
-            "**(proposed — pending executor design)**"
+            "D-22 — Generated eval questions whose injection-suspicion score exceeds "
+            "this threshold are forced to ``review_status=unreviewed`` rather than "
+            "being auto-accepted. Range [0.0, 1.0]; lower values are more conservative "
+            "(more questions flagged). **(proposed)**"
+        ),
+    )
+    sweep_min_corpus_docs: int = Field(
+        default=50,
+        ge=1,
+        description=(
+            "§9.3, M-050, D-07 — Below this document count the platform declines to "
+            "run a configuration sweep and applies the reference configuration instead. "
+            "Type is ``int`` (not ``int | None``) because the field always has a "
+            "meaningful value after Phase 5; callers need not guard against None. "
+            "Minimum 1. **(proposed)**"
+        ),
+    )
+    sweep_candidate_budget: int = Field(
+        default=40,
+        ge=1,
+        description=(
+            "D-07 — Maximum number of candidate configurations evaluated per "
+            "evolutionary-search sweep iteration. Keeps sweep cost bounded. "
+            "Minimum 1. **(proposed)**"
+        ),
+    )
+    sweep_sample_factor: int = Field(
+        default=2,
+        ge=1,
+        description=(
+            "D-07 — Multiplier applied to ``sweep_candidate_budget`` when sampling "
+            "the initial candidate pool (initial pool = sweep_candidate_budget * "
+            "sweep_sample_factor). Allows a larger exploration space before culling "
+            "to the budget. Minimum 1. **(proposed)**"
         ),
     )
 
