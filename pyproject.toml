@@ -78,7 +78,7 @@ layers = [
     "finecorpus.services",
     "finecorpus.retrieval | finecorpus.pipeline",
     "finecorpus.config | finecorpus.index",
-    "finecorpus.embedding | finecorpus.llm",
+    "finecorpus.embedding | finecorpus.llm | finecorpus.connectors",
     "finecorpus.control | finecorpus.contracts",
 ]
 exhaustive = false
