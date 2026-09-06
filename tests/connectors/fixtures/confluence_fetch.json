@@ -1,0 +1,16 @@
+[
+  {
+    "match": {
+      "method": "GET",
+      "url": "https://acme.atlassian.net/wiki/rest/api/content/page-1?expand=body.storage"
+    },
+    "response": {
+      "status_code": 200,
+      "json": {
+        "id": "page-1",
+        "title": "Onboarding Guide",
+        "body": {"storage": {"value": "<p>Welcome to the team.</p>", "representation": "storage"}}
+      }
+    }
+  }
+]

@@ -25,7 +25,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from finecorpus.contracts.inventory import SourceKind, SourcePermissions
+from finecorpus.connectors.gate import enforce_permission_fidelity
+from finecorpus.contracts.inventory import SourceKind, SourcePermissions, SourceRun
 from finecorpus.contracts.shared.blocks import PermissionFidelity
 
 # ---------------------------------------------------------------------------
@@ -156,17 +157,73 @@ class PermissionRecord(BaseModel):
         description="Verbatim source ACL payload retained for audit.",
     )
 
-    def to_source_permissions(self) -> SourcePermissions:
+    def to_source_permissions(
+        self,
+        *,
+        connector_id: str,
+        source_run: SourceRun,
+    ) -> SourcePermissions:
         """Convert into the contract ``SourcePermissions`` carried by the Inventory.
 
         This is the single seam where connector permission data enters the
         existing §14.3 machinery — nothing is re-modelled.
+
+        D-42 (structural gate for the connector path): this conversion REQUIRES
+        the run context and runs :func:`enforce_permission_fidelity` FIRST. There
+        is therefore no argument-free path from connector permission data to a
+        contract ``SourcePermissions``: a connector cannot mint a
+        ``SourcePermissions`` for ``unavailable`` fidelity via this converter
+        without an acknowledged gap. (This scopes to the connector framework;
+        the ``SourcePermissions`` model itself is still freely constructible by
+        non-connector pipeline stages such as assess/plan may — by design.)
+
+        Parameters
+        ----------
+        connector_id:
+            Identifies the connector for the §14.3 error message. Never a secret.
+        source_run:
+            The Collect run record carrying ``acknowledged_permission_gap``.
+
+        Raises
+        ------
+        PermissionFidelityError
+            When ``fidelity`` is ``unavailable`` and the run has not
+            acknowledged the gap (§14.3).
         """
+        enforce_permission_fidelity(
+            connector_id=connector_id,
+            fidelity=self.fidelity,
+            source_run=source_run,
+        )
         return SourcePermissions(
             principals_read=list(self.principals_read),
             fidelity=self.fidelity,
             raw=self.raw,
         )
+
+
+# ---------------------------------------------------------------------------
+# Collected item — the framework-owned collect loop's output (D-42)
+# ---------------------------------------------------------------------------
+
+
+class CollectedItem(BaseModel):
+    """One ingestable document plus its GATED contract permissions (§14.3, D-42).
+
+    Produced ONLY by :meth:`finecorpus.connectors.base.Connector.collect`. It
+    carries a contract ``SourcePermissions`` — not a raw ``PermissionRecord`` —
+    because the only way to obtain a ``SourcePermissions`` from connector data
+    is through the gated ``PermissionRecord.to_source_permissions``. A connector
+    therefore cannot hand the pipeline a ``CollectedItem`` whose permissions
+    skipped the §14.3 check.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    document: RawDocument = Field(description="The raw document bytes + metadata to inventory.")
+    permissions: SourcePermissions = Field(
+        description="Gated source-side ACLs (already passed the §14.3 fidelity check)."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -221,5 +278,6 @@ __all__ = [
     "SyncCursor",
     "DocumentPage",
     "PermissionRecord",
+    "CollectedItem",
     "ConnectorConfig",
 ]

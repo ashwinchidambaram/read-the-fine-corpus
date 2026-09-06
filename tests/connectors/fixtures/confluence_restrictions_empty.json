@@ -1,0 +1,18 @@
+[
+  {
+    "match": {
+      "method": "GET",
+      "url": "https://acme.atlassian.net/wiki/rest/api/content/page-1/restriction/byOperation/read"
+    },
+    "response": {
+      "status_code": 200,
+      "json": {
+        "operation": "read",
+        "restrictions": {
+          "user": {"results": []},
+          "group": {"results": []}
+        }
+      }
+    }
+  }
+]

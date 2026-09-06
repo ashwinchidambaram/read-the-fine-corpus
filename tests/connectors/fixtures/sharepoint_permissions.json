@@ -1,0 +1,25 @@
+[
+  {
+    "match": {
+      "method": "GET",
+      "url": "https://graph.microsoft.com/v1.0/drives/drive-1/items/item-1/permissions"
+    },
+    "response": {
+      "status_code": 200,
+      "json": {
+        "value": [
+          {
+            "id": "perm-1",
+            "roles": ["read"],
+            "grantedToV2": {"user": {"id": "user-guid-alice", "displayName": "Alice"}}
+          },
+          {
+            "id": "perm-2",
+            "roles": ["write"],
+            "grantedToV2": {"group": {"id": "group-guid-eng", "displayName": "Engineering"}}
+          }
+        ]
+      }
+    }
+  }
+]

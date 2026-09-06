@@ -1,0 +1,20 @@
+[
+  {
+    "match": {
+      "method": "GET",
+      "url": "https://acme.atlassian.net/rest/api/2/search?jql=order+by+created&startAt=0&maxResults=50"
+    },
+    "response": {
+      "status_code": 200,
+      "json": {
+        "startAt": 0,
+        "maxResults": 50,
+        "total": 2,
+        "issues": [
+          {"key": "PROJ-1", "fields": {"summary": "Login bug", "updated": "2026-05-01T08:00:00Z"}},
+          {"key": "PROJ-2", "fields": {"summary": "Add SSO", "updated": "2026-05-02T08:00:00Z"}}
+        ]
+      }
+    }
+  }
+]

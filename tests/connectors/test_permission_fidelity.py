@@ -61,21 +61,23 @@ def test_reliable_fidelity_always_proceeds(fidelity: PermissionFidelity) -> None
     )
 
 
-def test_connector_guard_blocks_unavailable() -> None:
+def test_connector_collect_blocks_unavailable() -> None:
+    # The framework-owned collect loop is the SINGLE enforcement entry point
+    # (guard_permissions was removed in favour of one narrative — D-42/m-3).
     conn = FakeConnector(fidelity=PermissionFidelity.unavailable, connector_id="sharepoint")
+    with pytest.raises(PermissionFidelityError):
+        list(conn.collect(_run(ack=None)))
+
+
+def test_connector_gated_converter_allows_authoritative_and_threads_into_contract() -> None:
+    conn = FakeConnector(fidelity=PermissionFidelity.authoritative, connector_id="sharepoint")
+    run = _run(ack=None)
     doc = conn.list_documents().documents[0]
     perms = conn.fetch_permissions(doc)
-    with pytest.raises(PermissionFidelityError):
-        conn.guard_permissions(perms, _run(ack=None))
-
-
-def test_connector_guard_allows_authoritative_and_threads_into_contract() -> None:
-    conn = FakeConnector(fidelity=PermissionFidelity.authoritative, connector_id="sharepoint")
-    doc = conn.list_documents().documents[0]
-    perms = conn.guard_permissions(conn.fetch_permissions(doc), _run(ack=None))
 
     # Thread into the EXISTING contract model — no parallel permission model.
-    source_perms = perms.to_source_permissions()
+    # D-42: to_source_permissions REQUIRES the run context and runs the gate.
+    source_perms = perms.to_source_permissions(connector_id="sharepoint", source_run=run)
     assert isinstance(source_perms, SourcePermissions)
     assert source_perms.fidelity is PermissionFidelity.authoritative
     assert source_perms.principals_read == ["user:alice"]

@@ -20,21 +20,41 @@ connector that simply never calls the check would silently launder
 permissions.  Encoding it once here gives every connector a single, tested
 gate to route through.
 
-Honesty note (do not overstate): today the gate is *enforced-if-called* — a
-caller that invokes ``PermissionRecord.to_source_permissions`` directly, or a
-Collect loop that forgets ``guard_permissions``, can still bypass it.  Making
-the guarantee truly structural requires wiring this gate into the single
-ingestion seam so the only path from a connector's permission data to a
-contract ``SourcePermissions`` passes through the check — that wiring lands
-with the concrete connectors (decision-ledger D-42).
+D-42 — the guarantee, stated accurately (scoped to the connector framework):
+
+Within the connector framework, :meth:`Connector.collect` is the SOLE producer
+of ingested items and is override-proof (``@typing.final`` plus an
+``__init_subclass__`` guard that raises ``TypeError`` if a subclass tries to
+define its own ``collect``). It ALWAYS routes permission data through
+:func:`~finecorpus.connectors.gate.enforce_permission_fidelity` (via the gated
+:meth:`PermissionRecord.to_source_permissions` converter) before fetching
+content. A concrete connector implements only ``list_documents`` /
+``fetch_document`` / ``fetch_permissions``; it never produces a
+``SourcePermissions`` itself, and it cannot skip the gate by overriding
+``collect``.
+
+The ``SourcePermissions`` contract model itself remains freely constructible by
+design, because non-connector pipeline stages (e.g. ``assess/stage.py``,
+``plan/stage.py``) may legitimately produce it. So the gate is structural for
+the connector ingestion path — not a global constructor lock on
+``SourcePermissions``. A hand-built ``SourcePermissions`` outside the framework
+is possible and is out of this framework's control; that is by design, not a
+hole.
 """
 
 from __future__ import annotations
 
 import abc
+import typing
+from collections.abc import Iterator
 from dataclasses import dataclass
 
+from finecorpus.connectors.gate import (
+    PermissionFidelityError,
+    enforce_permission_fidelity,
+)
 from finecorpus.connectors.models import (
+    CollectedItem,
     ConnectorConfig,
     DocumentPage,
     DocumentRef,
@@ -108,62 +128,12 @@ class TokenStore(abc.ABC):
 # ---------------------------------------------------------------------------
 # §14.3 fail-closed permission gate
 # ---------------------------------------------------------------------------
-
-
-class PermissionFidelityError(Exception):
-    """Raised when §14.3 blocks ingestion for unreliable permission data.
-
-    The platform refuses to ingest source content whose ACLs it cannot trust,
-    unless an operator has explicitly acknowledged the gap. MUST NOT include
-    any credential material (§14.2).
-    """
-
-    def __init__(self, connector_id: str, fidelity: PermissionFidelity) -> None:
-        super().__init__(
-            f"Connector '{connector_id}' reported permission_fidelity="
-            f"'{fidelity.value}', which cannot be mirrored into filterable "
-            f"permission fields. Per §14.3 the platform refuses to ingest "
-            f"restricted content as public. Set "
-            f"SourceRun.acknowledged_permission_gap=True to ingest anyway "
-            f"(the run is then recorded as an acknowledged gap)."
-        )
-        self.connector_id = connector_id
-        self.fidelity = fidelity
-
-
-def enforce_permission_fidelity(
-    *,
-    connector_id: str,
-    fidelity: PermissionFidelity,
-    source_run: SourceRun,
-) -> None:
-    """Fail closed when permission data is unreliable and unacknowledged (§14.3).
-
-    This is the single hard check the whole framework routes through. It is a
-    pure function so it is trivial to unit-test and impossible to bypass by a
-    connector that "forgets" to guard.
-
-    Rule (§14.3):
-    - ``authoritative`` / ``best_effort`` → allowed (mirrorable ACL data).
-    - ``unavailable`` → allowed ONLY if
-      ``source_run.acknowledged_permission_gap is True``; otherwise BLOCKED.
-
-    Parameters
-    ----------
-    connector_id:
-        For the error message; never a secret.
-    fidelity:
-        The fidelity the connector achieved for this run/document.
-    source_run:
-        The Collect run record carrying ``acknowledged_permission_gap``.
-
-    Raises
-    ------
-    PermissionFidelityError
-        When fidelity is ``unavailable`` and the run has not acknowledged it.
-    """
-    if fidelity is PermissionFidelity.unavailable and not source_run.acknowledged_permission_gap:
-        raise PermissionFidelityError(connector_id=connector_id, fidelity=fidelity)
+#
+# The gate itself (``enforce_permission_fidelity`` + ``PermissionFidelityError``)
+# lives in the leaf module :mod:`finecorpus.connectors.gate` so that both the
+# data models and this base can route through it without an import cycle. They
+# are re-exported here for backward compatibility (existing imports from
+# ``finecorpus.connectors.base`` keep working).
 
 
 # ---------------------------------------------------------------------------
@@ -182,13 +152,33 @@ class Connector(abc.ABC):
     2. ``list_documents`` paginated (optionally from a delta cursor).
     3. ``fetch_permissions`` then ``fetch_document`` per document.
 
-    Permission fidelity is enforced by the framework via ``guard_permissions``,
-    which routes through :func:`enforce_permission_fidelity`. Concrete
-    connectors (or the Collect stage on their behalf) MUST call
-    ``guard_permissions`` for every document; the gate is enforced-if-called,
-    not yet structurally unbypassable (see the module docstring and D-42) —
-    the concrete-connector wiring makes it the single ingestion path.
+    Permission fidelity is enforced by the framework in a SINGLE place:
+    :meth:`collect`, the framework-owned, override-proof ingestion loop. It
+    routes every document's permissions through the gated
+    :meth:`PermissionRecord.to_source_permissions` converter (which calls
+    :func:`enforce_permission_fidelity`) BEFORE fetching bytes. A concrete
+    connector implements only ``list_documents`` / ``fetch_document`` /
+    ``fetch_permissions`` and never produces a ``SourcePermissions`` itself.
+    Because :meth:`collect` is ``@typing.final`` and guarded by
+    :meth:`__init_subclass__`, a subclass cannot override it to skip the gate.
     """
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        """Reject any subclass that tries to define its own ``collect`` (D-42).
+
+        :meth:`collect` is the framework's sole, gated ingestion path.
+        ``@typing.final`` documents that at type-check time; this guard makes it
+        a RUNTIME fact: defining ``collect`` in a subclass raises ``TypeError``
+        at class-definition time, so a connector cannot bypass the §14.3 gate by
+        overriding the loop.
+        """
+        super().__init_subclass__(**kwargs)
+        if "collect" in cls.__dict__:
+            raise TypeError(
+                f"{cls.__name__} may not override Connector.collect: it is the "
+                "framework-owned, §14.3-gated ingestion path (D-42). Implement "
+                "list_documents / fetch_document / fetch_permissions instead."
+            )
 
     @property
     @abc.abstractmethod
@@ -235,27 +225,66 @@ class Connector(abc.ABC):
         return page.incremental_cursor
 
     # ------------------------------------------------------------------
-    # Framework-enforced §14.3 gate — connectors route through this.
+    # D-42: framework-owned collect loop — the SOLE producer of ingestable
+    # (RawDocument, SourcePermissions) pairs and the SINGLE §14.3 enforcement
+    # entry point. Concrete connectors NEVER build a SourcePermissions
+    # themselves; they implement only list/fetch/permissions. This loop routes
+    # every item through the gated converter, and it is override-proof
+    # (@typing.final + __init_subclass__ guard), so the §14.3 check is
+    # structurally on the only path from a connector into the inventory.
     # ------------------------------------------------------------------
 
-    def guard_permissions(
+    @typing.final
+    def collect(
         self,
-        permissions: PermissionRecord,
         source_run: SourceRun,
-    ) -> PermissionRecord:
-        """Apply the §14.3 fail-closed check, then return the record unchanged.
+        *,
+        cursor: SyncCursor | None = None,
+    ) -> Iterator[CollectedItem]:
+        """Yield gated ``(RawDocument, SourcePermissions)`` pairs for a run.
 
-        Call this on every ``fetch_permissions`` result before ingesting the
-        corresponding document. It raises :class:`PermissionFidelityError` when
-        the record is ``unavailable`` fidelity and the run has not acknowledged
-        the gap — so a connector cannot launder restricted content as public.
+        This is the framework-owned ingestion seam. It paginates
+        ``list_documents`` (starting from ``cursor`` for delta sync), and for
+        each document fetches permissions FIRST and converts them through
+        :meth:`PermissionRecord.to_source_permissions` — which runs the §14.3
+        gate. Only after the gate passes does it fetch the document bytes and
+        yield a :class:`CollectedItem`.
+
+        Because :class:`CollectedItem` carries a contract ``SourcePermissions``
+        (not a raw ``PermissionRecord``), and the only way to obtain one is via
+        the gated converter, a connector that implements the abstract methods
+        STILL cannot emit restricted content as public: the gate is on the sole
+        path. This method is ``@typing.final`` and guarded by
+        :meth:`__init_subclass__`, so a subclass cannot override it to route
+        around the gate. Fetching bytes only after the gate also means blocked
+        documents are never downloaded.
+
+        Raises
+        ------
+        PermissionFidelityError
+            The first time a document's permissions are ``unavailable`` and the
+            run has not acknowledged the gap — the run fails closed (§14.3).
         """
-        enforce_permission_fidelity(
-            connector_id=self.capabilities.connector_id,
-            fidelity=permissions.fidelity,
-            source_run=source_run,
-        )
-        return permissions
+        connector_id = self.capabilities.connector_id
+        page: DocumentPage | None = self.list_documents(cursor=cursor)
+        while page is not None:
+            for doc_ref in page.documents:
+                record = self.fetch_permissions(doc_ref)
+                # Gated conversion — raises PermissionFidelityError on an
+                # unacknowledged unavailable-fidelity document. Runs BEFORE the
+                # (potentially expensive) byte fetch, so blocked docs are never
+                # downloaded.
+                source_permissions = record.to_source_permissions(
+                    connector_id=connector_id,
+                    source_run=source_run,
+                )
+                raw = self.fetch_document(doc_ref)
+                yield CollectedItem(document=raw, permissions=source_permissions)
+            page = (
+                self.list_documents(cursor=page.next_cursor)
+                if page.next_cursor is not None
+                else None
+            )
 
     def __repr__(self) -> str:
         """Safe repr — never includes credential material (§14.2)."""
@@ -274,4 +303,5 @@ __all__ = [
     "PermissionFidelityError",
     "enforce_permission_fidelity",
     "Connector",
+    "CollectedItem",
 ]

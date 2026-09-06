@@ -1,0 +1,55 @@
+[
+  {
+    "match": {
+      "method": "GET",
+      "url": "https://graph.microsoft.com/v1.0/drives/drive-1/root/delta"
+    },
+    "response": {
+      "status_code": 200,
+      "json": {
+        "@odata.nextLink": "https://graph.microsoft.com/v1.0/drives/drive-1/root/delta?token=P2",
+        "value": [
+          {
+            "id": "item-1",
+            "name": "Policy.docx",
+            "webUrl": "https://contoso.sharepoint.com/Policy.docx",
+            "lastModifiedDateTime": "2026-07-01T09:00:00Z",
+            "file": {"mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
+          },
+          {
+            "id": "folder-x",
+            "name": "Archive",
+            "folder": {"childCount": 3}
+          }
+        ]
+      }
+    }
+  },
+  {
+    "match": {
+      "method": "GET",
+      "url": "https://graph.microsoft.com/v1.0/drives/drive-1/root/delta?token=P2"
+    },
+    "response": {
+      "status_code": 200,
+      "json": {
+        "@odata.deltaLink": "https://graph.microsoft.com/v1.0/drives/drive-1/root/delta?token=DELTA9",
+        "value": [
+          {
+            "id": "item-2",
+            "name": "Budget.xlsx",
+            "webUrl": "https://contoso.sharepoint.com/Budget.xlsx",
+            "lastModifiedDateTime": "2026-07-02T10:00:00Z",
+            "file": {"mimeType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}
+          },
+          {
+            "id": "item-deleted",
+            "name": "Old.docx",
+            "file": {"mimeType": "x"},
+            "deleted": {"state": "deleted"}
+          }
+        ]
+      }
+    }
+  }
+]

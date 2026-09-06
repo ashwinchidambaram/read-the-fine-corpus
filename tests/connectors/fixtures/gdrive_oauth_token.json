@@ -1,0 +1,15 @@
+[
+  {
+    "match": {"method": "POST", "url": "https://oauth2.googleapis.com/token"},
+    "response": {
+      "status_code": 200,
+      "json": {
+        "access_token": "ya29.drive-access-token",
+        "refresh_token": "1//drive-refresh",
+        "token_type": "Bearer",
+        "expires_in": 3599,
+        "scope": "https://www.googleapis.com/auth/drive.readonly"
+      }
+    }
+  }
+]

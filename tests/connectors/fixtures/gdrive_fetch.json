@@ -1,0 +1,13 @@
+[
+  {
+    "match": {
+      "method": "GET",
+      "url": "https://www.googleapis.com/drive/v3/files/file-a?alt=media"
+    },
+    "response": {
+      "status_code": 200,
+      "headers": {"Content-Type": "text/plain"},
+      "body": "quarterly plan body bytes"
+    }
+  }
+]

@@ -1,0 +1,12 @@
+[
+  {
+    "match": {
+      "method": "GET",
+      "url": "https://acme.atlassian.net/wiki/rest/api/content/page-1/restriction/byOperation/read"
+    },
+    "response": {
+      "status_code": 403,
+      "json": {"message": "Current user not permitted to view restrictions"}
+    }
+  }
+]

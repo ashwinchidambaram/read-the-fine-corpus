@@ -25,6 +25,9 @@ Public surface
 - Test harness: :class:`RecordedHTTPClient` (see :mod:`finecorpus.connectors.fixtures`).
 """
 
+# Concrete connectors register themselves at import time (name -> factory).
+# Importing them here makes `import finecorpus.connectors` populate the registry.
+from finecorpus.connectors.atlassian import AtlassianConnector
 from finecorpus.connectors.base import (
     Connector,
     ConnectorCapabilities,
@@ -33,8 +36,10 @@ from finecorpus.connectors.base import (
     enforce_permission_fidelity,
 )
 from finecorpus.connectors.fixtures import RecordedHTTPClient
+from finecorpus.connectors.gdrive import GoogleDriveConnector
 from finecorpus.connectors.http import HTTPClient, HTTPResponse, HttpxClient
 from finecorpus.connectors.models import (
+    CollectedItem,
     ConnectorConfig,
     DocumentPage,
     DocumentRef,
@@ -50,6 +55,7 @@ from finecorpus.connectors.registry import (
     registered_connectors,
     unregister_connector,
 )
+from finecorpus.connectors.sharepoint import SharePointConnector
 
 __all__ = [
     # base
@@ -63,6 +69,7 @@ __all__ = [
     "DocumentPage",
     "DocumentRef",
     "PermissionRecord",
+    "CollectedItem",
     "SyncCursor",
     "ConnectorConfig",
     # oauth
@@ -80,6 +87,10 @@ __all__ = [
     "registered_connectors",
     "build_connector",
     "ConnectorFactory",
+    # concrete connectors
+    "GoogleDriveConnector",
+    "SharePointConnector",
+    "AtlassianConnector",
     # test harness
     "RecordedHTTPClient",
 ]

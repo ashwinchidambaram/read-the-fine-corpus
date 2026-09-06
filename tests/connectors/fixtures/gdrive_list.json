@@ -1,0 +1,42 @@
+[
+  {
+    "match": {
+      "method": "GET",
+      "url": "https://www.googleapis.com/drive/v3/files?fields=nextPageToken%2Cfiles%28id%2Cname%2CmimeType%2CmodifiedTime%29&pageSize=100&q=%27folder-root%27+in+parents"
+    },
+    "response": {
+      "status_code": 200,
+      "json": {
+        "nextPageToken": "PAGE2",
+        "files": [
+          {
+            "id": "file-a",
+            "name": "Quarterly Plan.docx",
+            "mimeType": "application/vnd.google-apps.document",
+            "modifiedTime": "2026-08-01T10:00:00Z"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "match": {
+      "method": "GET",
+      "url": "https://www.googleapis.com/drive/v3/files?fields=nextPageToken%2Cfiles%28id%2Cname%2CmimeType%2CmodifiedTime%29&pageSize=100&q=%27folder-root%27+in+parents&pageToken=PAGE2"
+    },
+    "response": {
+      "status_code": 200,
+      "json": {
+        "newStartPageToken": "delta-500",
+        "files": [
+          {
+            "id": "file-b",
+            "name": "Roadmap.pdf",
+            "mimeType": "application/pdf",
+            "modifiedTime": "2026-08-02T11:00:00Z"
+          }
+        ]
+      }
+    }
+  }
+]

@@ -1,0 +1,12 @@
+[
+  {
+    "match": {
+      "method": "GET",
+      "url": "https://graph.microsoft.com/v1.0/drives/drive-1/items/item-1/permissions"
+    },
+    "response": {
+      "status_code": 403,
+      "json": {"error": {"code": "accessDenied", "message": "Access denied"}}
+    }
+  }
+]
