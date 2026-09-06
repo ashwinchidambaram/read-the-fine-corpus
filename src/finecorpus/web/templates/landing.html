@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Home — Read The Fine Corpus{% endblock %}
+{% block content %}
+<section class="card">
+  <header class="topbar">
+    <h1>Read The Fine Corpus</h1>
+    <form method="post" action="/logout" class="logout-form">
+      <button type="submit" class="secondary">Sign out</button>
+    </form>
+  </header>
+  <p>Signed in as <strong>{{ username }}</strong>.</p>
+  <p class="muted">Web UI foundation (v{{ version }}). The knowledge-base flows arrive in a later work unit.</p>
+</section>
+{% endblock %}
