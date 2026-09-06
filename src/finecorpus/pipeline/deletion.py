@@ -137,6 +137,8 @@ class DeletionReport:
         llm_cache_action: Description of llm_cache.json action taken (purge only).
             One of: "surgical:<N>_entries_removed", "whole_file_deleted",
             "no_cache_file", "deferred_non_purge", or "none".
+        eval_questions_removed: Number of eval questions removed from all eval sets
+            for this KB because they were derived from deleted segments (M-086).
     """
 
     kb_id: str
@@ -150,6 +152,7 @@ class DeletionReport:
     deleted_at: datetime = field(default_factory=lambda: datetime.now(tz=UTC))
     summary: str = ""
     llm_cache_action: str = "none"
+    eval_questions_removed: int = 0
 
     def __post_init__(self) -> None:
         if not self.summary:
@@ -451,6 +454,70 @@ def scan_orphans(
     return sorted(orphan_ids)
 
 
+def collect_document_segment_ids(
+    adapter: IndexAdapter,
+    collection: str,
+    document_id: str,
+    *,
+    scroll_batch: int = 10000,
+) -> set[str]:
+    """Collect the chunk/segment IDs of ``document_id`` from ``collection``.
+
+    Production-real, adapter-agnostic path (works for QdrantAdapter AND the
+    test FakeAdapter): create a temporary alias to the collection, run a
+    payload-filtered search for ``provenance.source_document_id == document_id``,
+    and collect each matching point's ``chunk_id`` and ``provenance.segment_path``.
+
+    This deliberately does NOT read a FakeAdapter-only ``.collections`` dict —
+    the whole point (M-086) is that the same code path runs in production. Eval
+    questions store real segment/chunk IDs in ``source_segment_ids`` (never the
+    document_id), so removal MUST be keyed on the document's actual segment IDs.
+
+    Must be called BEFORE ``delete_by_document`` removes the points.
+    """
+    segment_ids: set[str] = set()
+    temp_alias = f"_rtfc_evdel_scan_{collection}"
+    try:
+        adapter.create_alias(temp_alias, collection)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "collect_document_segment_ids: temp alias failed for '%s': %s", collection, exc
+        )
+        return segment_ids
+
+    try:
+        try:
+            info = adapter.get_collection_info(collection)
+            dims = max(info.vector_size, 1)
+        except Exception:  # noqa: BLE001
+            dims = 1
+        results = adapter.search(
+            alias=temp_alias,
+            query_vector=[0.0] * dims,
+            top_k=scroll_batch,
+            payload_filter={"provenance.source_document_id": document_id},
+        )
+        for r in results:
+            prov = r.payload.get("provenance", {})
+            if prov.get("source_document_id") != document_id:
+                continue
+            chunk_id = r.payload.get("chunk_id")
+            if chunk_id:
+                segment_ids.add(chunk_id)
+            seg_path = prov.get("segment_path")
+            if seg_path:
+                segment_ids.add(seg_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("collect_document_segment_ids: search failed on '%s': %s", collection, exc)
+    finally:
+        try:
+            adapter.delete_alias(temp_alias)
+        except Exception:  # noqa: BLE001
+            pass
+
+    return segment_ids
+
+
 # ---------------------------------------------------------------------------
 # Core deletion function
 # ---------------------------------------------------------------------------
@@ -566,6 +633,32 @@ def delete_document(
     live_collection = alias_record.collection_name if alias_record else None
     n1_collection = alias_record.previous_collection if alias_record else None
 
+    # M-086: collect the document's real chunk/segment IDs from the index BEFORE
+    # delete_by_document removes the points.  Uses the same production search path
+    # for every IndexAdapter (no FakeAdapter-only branch); see collect_document_segment_ids.
+    segment_ids_for_doc: set[str] = set()
+    for _coll in (live_collection, n1_collection):
+        if not _coll:
+            continue
+        try:
+            if adapter.collection_exists(_coll):
+                segment_ids_for_doc |= collect_document_segment_ids(adapter, _coll, document_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "delete_document: segment-ID collection failed on '%s': %s "
+                "(M-086 eval linkage may be incomplete)",
+                _coll,
+                exc,
+            )
+    if not segment_ids_for_doc:
+        logger.warning(
+            "delete_document: no index segment IDs resolved for doc '%s' in kb '%s' "
+            "(no live/N-1 collection or document absent); M-086 eval-question removal "
+            "will match nothing.",
+            document_id,
+            kb_id,
+        )
+
     live_removed = 0
     n1_removed = 0
 
@@ -624,11 +717,42 @@ def delete_document(
             artifacts_removed,
         )
 
-    # Stub hook: eval-question removal (Phase 5)
-    # eval_questions_removed = _remove_eval_questions_for_document(kb_id, document_id, session)
-    # This is intentionally left as a named stub; wired in Phase 5 when the eval-set
-    # repository is implemented (§9.1, M-086 completeness for eval data).
-    logger.debug("delete_document: eval-question removal stub (Phase 5) — doc '%s'", document_id)
+    # M-086 Deletion linkage: remove eval questions derived from this document's segments.
+    # EvalSetRepository.remove_questions_for_segments deletes questions whose
+    # source_segment_ids intersect the deleted document's segment IDs.  The segment
+    # IDs were collected in Step 2 via the production search path (collect_document_
+    # segment_ids) BEFORE delete_by_document removed the points — the same code path
+    # runs for the real QdrantAdapter and the test FakeAdapter (no fake-only branch).
+    eval_questions_removed = 0
+    try:
+        from finecorpus.control.eval_store import EvalSetRepository  # noqa: PLC0415
+
+        eval_repo = EvalSetRepository(session)
+        if segment_ids_for_doc:
+            eval_questions_removed = eval_repo.remove_questions_for_segments(
+                kb_id, segment_ids_for_doc
+            )
+            if eval_questions_removed:
+                logger.info(
+                    "M-086 eval-question removal: removed %d eval question(s) "
+                    "derived from document '%s' in kb '%s'",
+                    eval_questions_removed,
+                    document_id,
+                    kb_id,
+                )
+            else:
+                logger.debug(
+                    "delete_document: no eval questions to remove for doc '%s'",
+                    document_id,
+                )
+    except Exception as exc:  # noqa: BLE001
+        # Non-fatal: log and continue — index deletion must not fail due to eval cleanup.
+        logger.warning(
+            "delete_document: M-086 eval-question removal failed for doc '%s': %s "
+            "(non-fatal; index deletion continues)",
+            document_id,
+            exc,
+        )
 
     # ------------------------------------------------------------------
     # Step 3b (purge only): Purge llm_cache.json (§17, Ruling 2)
@@ -663,6 +787,7 @@ def delete_document(
                 "artifacts_removed": artifacts_removed,
                 "reason": reason,
                 "llm_cache_action": llm_cache_action,
+                "eval_questions_removed": eval_questions_removed,
             },
             created_at=deleted_at,
         )
@@ -757,6 +882,7 @@ def delete_document(
         tombstone_entry_id=tombstone_entry_id,
         deleted_at=deleted_at,
         llm_cache_action=llm_cache_action,
+        eval_questions_removed=eval_questions_removed,
     )
     return report
 
