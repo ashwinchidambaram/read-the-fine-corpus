@@ -22,6 +22,8 @@ def test_five_domains_present_m102():
     """
     import prometheus_client
 
+    import finecorpus.telemetry  # noqa: F401 — importing registers all metric objects
+
     # Importing telemetry registers all metrics
 
     # Collect all registered metric names
