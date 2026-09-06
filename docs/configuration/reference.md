@@ -63,6 +63,7 @@ are secret-free by construction (§14.2): provider names appear, credential valu
 | `platform.airgap` | bool | `false` | §4.3, §7.2 | Equivalent to `RTFC_AIRGAP=true`. Blocks all outbound HTTP before any provider call. All providers must have `is_local: true`. In airgap mode, pricing-fetch is unconditionally skipped and cost estimates use declared `cost_per_1k_tokens` (null for local providers). |
 | `platform.log_level` | enum `{debug,info,warn,error}` | `"info"` | §13 | Structured log level for all services. |
 | `platform.config_distribution_poll_interval_seconds` | int | `30` **(proposed)** | §4.6, ADR-0005 | How often services poll the control-plane database for config changes. A config change takes effect within one poll interval without a restart. Setting to `0` disables polling (restart required for config changes). |
+| `auth.enabled` | bool | `true` | §11.4, §2.3 | Enables key-based authentication and tenancy enforcement at all service boundaries. When `false`, all requests are treated as unauthenticated (single-tenant mode for local development only). **Must be `true` in production.** Setting `false` disables break-glass enforcement and tenancy filters. |
 
 ### 2.2 Storage backends
 
@@ -172,7 +173,7 @@ These govern the Assess (Stage 2) and Decompose (Stage 3) stages. They are platf
 | `index_lifecycle.pricing_stale_warn_days` | int | `90` **(proposed)** | §16 | Platform warns if `providers.embedding.cloud.pricing_as_of` is older than this many days. | provider-abstraction.md OQ-P-5 |
 | `index_lifecycle.scheduled_reindex_cron` | string | — | §10.3 | Default cron expression for scheduled reindex trigger. Per-KB override available via the UI/API. Empty string disables scheduled reindex at platform level. | index-lifecycle.md §7.3 |
 | `index_lifecycle.config_distribution_poll_interval_seconds` | int | `30` **(proposed)** | ADR-0005 | (Aliases `platform.config_distribution_poll_interval_seconds` — same setting.) | ADR-0005 Consequences |
-| `index_lifecycle.break_glass_grant_window_hours` | int | — | §2.3 | Default time-bound window for a Platform Admin break-glass content-read grant. Value is executor-proposed (Open Decision #4). Must be finite. **(pending Open Decision #4)** | spec §2.3, Open Decision #4 |
+| `index_lifecycle.break_glass_grant_window_hours` | int | `4` | §2.3, D-04 | Default time-bound window in hours for a Platform Admin break-glass content-read grant. **Default 4 hours per D-04 ruling.** Must be finite — `_validate_window()` rejects `None` (indefinite) values. Per-grant override available in the API request body. | spec §2.3, D-04 |
 | `index_lifecycle.snapshot_retention_period_days` | int | `90` | §17.1, D-05 | Maximum age of a cold snapshot before it is eligible for automatic purge (bounds deleted-content persistence). **Default 90 days per D-05 ruling.** This is the erasure-SLA bound (M-088): a document deleted (not purged) may remain in cold snapshots up to this many days after deletion. Use `corpus kb purge-doc` for immediate erasure across all copies (M-089). OQ-C-3 closed. | spec §17.1, D-05 |
 
 ### 2.7 Query embedding cache
@@ -191,7 +192,7 @@ These govern the Assess (Stage 2) and Decompose (Stage 3) stages. They are platf
 | `retrieval.max_top_k` | int | `100` **(proposed)** | §11.2 | Maximum top-k a caller may request. |
 | `retrieval.default_strategy` | enum `{dense,sparse,hybrid}` | `"hybrid"` **(proposed)** | §11.2 | Default retrieval strategy at KB level. Per-class and per-request overrides available. |
 | `retrieval.supporting_tier_weight` | float | `0.7` **(proposed)** | §11.2, segment-taxonomy.md §3.1 | Score weighting applied to `supporting`-tier chunks relative to `primary` chunks. Configurable at KB level; caller may override per query. |
-| `retrieval.rate_limit.queries_per_second_per_tenant` | int | — | §11.3 | Per-tenant query rate limit. Executor-proposed value pending Phase 4 design. **(proposed — pending executor design)** | spec §11.3 |
+| `retrieval.rate_limit.queries_per_second_per_tenant` | int | `10` **(proposed)** | §11.3, D-37 | Per-tenant query rate limit enforced by `TokenBucketLimiter` (ADR-0008). Requests exceeding this rate receive HTTP 429 with `Retry-After` header. `null` disables rate limiting. In-process per replica (D-37: single-process scope acknowledged). | spec §11.3, ADR-0008 |
 
 ### 2.9 Budgets and cost governance
 
@@ -304,8 +305,8 @@ resolved silently.
 | ID | Question | Source |
 |---|---|---|
 | OQ-C-1 | The query-embedding cache backing store (O-R6 in the operability review) is unresolved: Redis (an undeclared fourth service) vs. PostgreSQL (consistent with ADR-0003 "boring and inspectable") vs. in-process per replica. The `storage.cache` key above is a placeholder pending this decision. Resolution needed before Phase 4. | review-operability.md O-R6, provider-abstraction.md §5.1 |
-| OQ-C-2 | `index_lifecycle.break_glass_grant_window_hours` is pending Open Decision #4 (spec §20). The default must be finite per §2.3. | spec §2.3, §20 decision #4 |
-| OQ-C-3 | `index_lifecycle.snapshot_retention_period_days` is pending Open Decision #5 (spec §20). This value bounds how long deleted content can persist in cold storage, which has regulatory implications. | spec §17.1, §20 decision #5 |
-| OQ-C-4 | `assessment.sweep_min_corpus_docs` and `retrieval.rate_limit.queries_per_second_per_tenant` and `cache.query_embedding.max_entries` are executor-proposed values that must be filled with evidence-backed numbers before Phase 4/5. | spec §9.3, §11.3 |
+| OQ-C-2 | **CLOSED (D-04, Phase 4).** `index_lifecycle.break_glass_grant_window_hours` defaulted to `4` hours. `_validate_window()` enforces finiteness. | spec §2.3, D-04 |
+| OQ-C-3 | **CLOSED (D-05, Phase 4).** `index_lifecycle.snapshot_retention_period_days` defaulted to `90` days. Purge (`corpus kb purge-doc --confirm`) destroys snapshots immediately. | spec §17.1, D-05 |
+| OQ-C-4 | `assessment.sweep_min_corpus_docs` and `cache.query_embedding.max_entries` are executor-proposed values that must be filled with evidence-backed numbers before Phase 5. `retrieval.rate_limit.queries_per_second_per_tenant` proposed as `10` in Phase 4 (ADR-0008). | spec §9.3, §11.3 |
 | OQ-C-5 | ADR-0005 notes config distribution is poll-based with periodic refresh or restart. The poll interval (`platform.config_distribution_poll_interval_seconds`) requires evidence from load testing to confirm it does not produce inconsistent behaviour across replicas during rolling config changes. If services require a restart after certain config changes (e.g., changing the embedding model), the list of restart-required fields must be documented here. | review-operability.md O-R16, ADR-0005 |
 | OQ-C-6 | The `retrieval.supporting_tier_weight` is listed as a platform-level default, but segment-taxonomy.md §3.1 states it is configurable at KB level. The mechanism for KB-level override (via the UI/API, written back into what artifact) is not specified in the design. This must be resolved so operators know where to change it and what triggers a rebuild (if any). | segment-taxonomy.md §3.1 |

@@ -125,6 +125,68 @@ cannot broaden scope and the query returns no cross-tenant content. A raw vector
 bypasses the retrieval service is the only way to see cross-tenant content, confirming enforcement
 lives in the service (C-2 keeps the vector DB private to `index/` and `retrieval-api`).
 
+### Key-bound roles and capability matrix
+
+Access decisions are made against the authenticated principal's key record from the platform key
+store. Each key carries a `role` and a `scope_kind`. The following capabilities are derived
+server-side and cannot be overridden by request parameters:
+
+| Role | Scope | Read own KB | Read other KB | Issue break-glass grant | Admin operations |
+|---|---|---|---|---|---|
+| `reader` | `kb_` | Yes | No | No | No |
+| `editor` | `kb_` | Yes | No | No | No |
+| `owner` | `workspace_` | Yes (within workspace) | No | No | No |
+| `admin` | `global_` | Yes | No (requires grant) | Yes | Yes |
+
+Break-glass grants extend the `admin` role's read access to a specific KB for a finite time
+window (default 4 hours, D-04). The grant requires a non-empty reason (M-001) and fires a
+notification at grant time (M-004). Every content read under a grant produces an immutable
+audit record before the content is served; if the audit write fails, the read is denied
+(M-003, D-38 — fail-closed).
+
+### Job orchestration
+
+Ingestion and reindex jobs are managed through a persistent queue in PostgreSQL. Job states:
+
+| State | Meaning |
+|---|---|
+| `queued` | Job is waiting for an available ingest worker. |
+| `running` | A worker has claimed the job and is executing. |
+| `paused` | Job is paused due to provider unavailability; auto-resumes when provider recovers. |
+| `paused_budget` | Job has hit a per-KB or per-workspace budget cap. Requires manual `corpus jobs resume` after operator action (raise cap or accept cost). |
+| `completed` | Job finished successfully; shadow collection is promoted or ready for promotion. |
+| `failed` | Job failed due to an unrecoverable error. |
+
+Four reindex triggers can be configured per knowledge base (§7 of `index-lifecycle.md`):
+- **manual** — explicit API or CLI invocation.
+- **scheduled** — cron expression with anchor-then-fire semantics.
+- **change-detected** — content hash comparison fires `reindex_incremental`.
+- **config-change** — config version mismatch fires `reindex_full`, guarded by `acknowledged_permission_gap` (D-16).
+
+Budget cap hits accumulate `consecutive_cap_hits` on the trigger record; an alert is emitted
+when the count reaches `budgets.scheduled_reindex_cap_hit_alert_count` (default: 3, M-085).
+
+### Deletion lifecycle
+
+Document deletion is a two-phase process: **soft delete** (removed from service) and **purge**
+(removed from all copies, including cold snapshots).
+
+- **`delete_document()`** removes the document's chunks from the live and N-1 collections,
+  appends a tombstone record, removes augmentation fields and LLM cache entries, and sweeps
+  artifact files (M-086). Content is gone from live queries immediately.
+- **`snapshot_cold()` and retention sweep** — cold snapshots are retained for
+  `index_lifecycle.snapshot_retention_period_days` days (default: 90, D-05). Restoring a snapshot
+  replays the tombstone log before the collection is eligible for promotion (M-087,
+  `_RESTORED_UNREPLAYED_MARKER_KEY`). A snapshot restored without completing tombstone replay
+  blocks promotion with `RestoredUnreplayedError`.
+- **Purge** (`corpus kb purge-doc --confirm`) additionally destroys all cold snapshots
+  containing the document immediately (D-05). Use when right-to-erasure requires complete
+  removal before the 90-day retention window. The delete-vs-purge distinction is surfaced
+  via `DeletionReport.summary` (M-089).
+
+See `runbooks/purge.md`, `runbooks/restore-cold.md`, `runbooks/tombstone-replay.md`, and
+`index-lifecycle.md §12` for full details.
+
 ## Proposed stack (ADR-0003)
 
 Python ≥3.12 managed by uv · FastAPI + pydantic v2 · qdrant-client · SQLAlchemy + Alembic
