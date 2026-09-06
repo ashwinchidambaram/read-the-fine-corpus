@@ -216,6 +216,11 @@ def validate_shadow(
     previous_chunks_by_class: dict[str, int] | None = None,
     current_chunks_by_class: dict[str, int] | None = None,
     chunk_count_tolerance_pct: float = 20.0,
+    shadow_eval_score: float | None = None,
+    live_baseline_score: float | None = None,
+    eval_regression_threshold: float | None = None,
+    eval_configured: bool = False,
+    scoring_error: str | None = None,
 ) -> ValidationResult:
     """Run pre-promotion validation gates on a shadow collection (M-054, §5).
 
@@ -227,8 +232,11 @@ def validate_shadow(
        of the PREVIOUS collection's count (when previous_chunk_count is supplied).
     5. no_class_zero_regression (M-054 Gate 2) — no segment class that produced chunks
        before produces ZERO now (uses previous_chunks_by_class if supplied).
-    6. eval_baseline (M-054 Gate 3) — STUB returning SKIPPED ("phase5-eval-integration").
-    7. regression_threshold (M-054 Gate 4) — STUB returning SKIPPED ("phase5-eval-integration").
+    6. eval_baseline (M-054 Gate 3) — SKIPPED when no eval configured; PASSED when a
+       score is injected; FAILED when eval is configured but score is unavailable.
+    7. regression_threshold (M-054 Gate 4) — FAILED when both scores present and
+       (live_baseline_score - shadow_eval_score) > eval_regression_threshold; else PASSED.
+       SKIPPED when scores not available.
     8. tier_shift_warning (D-20) — non-blocking WARNING comparing salience-tier distribution.
 
     Gate source for per-class counts (Gate 5):
@@ -240,6 +248,22 @@ def validate_shadow(
     - The build artifact is the most consistent source since it reflects exactly
       what was written to the shadow collection in this run.
     This is documented as the "build-result stats" strategy (chosen over scroll).
+
+    Injected-score gate semantics (Layer legality):
+    Gates 3 and 4 receive scores via injected parameters so that the index layer
+    NEVER imports retrieval or services.  The services layer (services/promotion.py)
+    scores the eval set and passes the results here.  This keeps lifecycle layer-legal.
+
+    eval_baseline gate semantics:
+    - eval_configured=False → SKIPPED (no eval set configured for this KB).
+    - eval_configured=True and shadow_eval_score is not None → PASSED (scored OK).
+    - eval_configured=True and shadow_eval_score is None → FAILED (eval configured
+      but scoring failed or was not performed; scoring_error carries the reason).
+
+    regression_threshold gate semantics (§10.4):
+    - Both shadow_eval_score and live_baseline_score present → compare.
+      FAILED if (live_baseline_score - shadow_eval_score) > eval_regression_threshold.
+    - Either score absent → SKIPPED (no comparison possible).
 
     Args:
         adapter: IndexAdapter instance.
@@ -254,6 +278,17 @@ def validate_shadow(
             used for Gate 5 class-zero-regression check.  None skips the gate.
         chunk_count_tolerance_pct: Maximum percentage deviation from previous_chunk_count
             before Gate 4 fails (default 20%).
+        shadow_eval_score: Injected recall score for the shadow collection's eval set.
+            None when eval is not configured or scoring failed.
+        live_baseline_score: Injected recall score for the current live baseline.
+            None when no baseline has been scored yet.
+        eval_regression_threshold: Maximum allowed regression (live - shadow) before
+            Gate 4 blocks promotion.  None defaults to 0.05.
+        eval_configured: True when the KB has an eval set configured.  Controls whether
+            None shadow_eval_score is SKIPPED (not configured) or FAILED (configured but
+            scoring unavailable).
+        scoring_error: Human-readable scoring failure reason, when eval_configured=True
+            and shadow_eval_score is None.  Included in the FAILED gate reason.
 
     Returns:
         ValidationResult with ``passed=True`` or the failing gate details, plus
@@ -468,28 +503,149 @@ def validate_shadow(
         )
 
     # ------------------------------------------------------------------
-    # Gate: eval_baseline (M-054 Gate 3) — STUB (phase5-eval-integration)
+    # Gate: eval_baseline (M-054 Gate 3)
+    #
+    # Semantics:
+    #   eval_configured=False → SKIPPED (no eval set for this KB; not a failure).
+    #   eval_configured=True and shadow_eval_score is not None → PASSED.
+    #   eval_configured=True and shadow_eval_score is None → FAILED (eval configured
+    #     but scoring failed or was never performed before promotion).
+    #
+    # Layer legality: lifecycle never imports retrieval/services.  The score is
+    # injected by services/promotion.py before calling validate_shadow.
     # ------------------------------------------------------------------
-    gate_results.append(
-        GateResult(
-            gate="eval_baseline",
-            status=GateStatus.SKIPPED,
-            reason="phase5-eval-integration",
+    if not eval_configured:
+        gate_results.append(
+            GateResult(
+                gate="eval_baseline",
+                status=GateStatus.SKIPPED,
+                reason="no eval set configured for this KB — gate skipped (not a failure)",
+            )
         )
-    )
-    logger.debug("validate_shadow: eval_baseline gate SKIPPED (phase5-eval-integration)")
+        logger.debug("validate_shadow: eval_baseline gate SKIPPED (no eval configured)")
+    elif shadow_eval_score is not None:
+        gate_results.append(
+            GateResult(
+                gate="eval_baseline",
+                status=GateStatus.PASSED,
+                reason=(
+                    f"M-054 Gate 3: eval baseline scored successfully "
+                    f"(recall={shadow_eval_score:.4f})"
+                ),
+            )
+        )
+        logger.debug(
+            "validate_shadow: eval_baseline gate PASSED for '%s' (recall=%.4f)",
+            shadow_collection,
+            shadow_eval_score,
+        )
+    else:
+        # eval_configured but no score available — scoring failed or was skipped.
+        err_detail = f": {scoring_error}" if scoring_error else ""
+        gr = GateResult(
+            gate="eval_baseline",
+            status=GateStatus.FAILED,
+            reason=(
+                f"M-054 Gate 3: eval set is configured for this KB but scoring "
+                f"did not produce a score before promotion{err_detail}. "
+                "Run score_and_validate_shadow to score the eval set first."
+            ),
+        )
+        gate_results.append(gr)
+        logger.error(
+            "validate_shadow: eval_baseline gate FAILED for '%s'%s",
+            shadow_collection,
+            err_detail,
+        )
+        return ValidationResult(
+            passed=False,
+            gate="eval_baseline",
+            detail=gr.reason,
+            warnings=warnings,
+            gate_results=[r.to_dict() for r in gate_results],
+        )
 
     # ------------------------------------------------------------------
-    # Gate: regression_threshold (M-054 Gate 4) — STUB (phase5-eval-integration)
+    # Gate: regression_threshold (M-054 Gate 4, §10.4)
+    #
+    # Semantics:
+    #   Both shadow_eval_score and live_baseline_score present:
+    #     FAILED if (live_baseline_score - shadow_eval_score) > threshold.
+    #     PASSED otherwise.
+    #   Either absent → SKIPPED (no regression comparison possible).
+    #
+    # Layer legality: same injected-score pattern as Gate 3.
     # ------------------------------------------------------------------
-    gate_results.append(
-        GateResult(
-            gate="regression_threshold",
-            status=GateStatus.SKIPPED,
-            reason="phase5-eval-integration",
+    _threshold = eval_regression_threshold if eval_regression_threshold is not None else 0.05
+    if shadow_eval_score is not None and live_baseline_score is not None:
+        regression = live_baseline_score - shadow_eval_score
+        if regression > _threshold:
+            gr = GateResult(
+                gate="regression_threshold",
+                status=GateStatus.FAILED,
+                reason=(
+                    f"M-054 Gate 4 (§10.4): recall regression {regression:.4f} "
+                    f"exceeds threshold {_threshold:.4f} "
+                    f"(live_baseline={live_baseline_score:.4f}, "
+                    f"shadow={shadow_eval_score:.4f}). "
+                    "Promotion blocked to prevent quality regression."
+                ),
+            )
+            gate_results.append(gr)
+            logger.error(
+                "validate_shadow: regression_threshold FAILED for '%s': "
+                "regression=%.4f threshold=%.4f live=%.4f shadow=%.4f",
+                shadow_collection,
+                regression,
+                _threshold,
+                live_baseline_score,
+                shadow_eval_score,
+            )
+            return ValidationResult(
+                passed=False,
+                gate="regression_threshold",
+                detail=gr.reason,
+                warnings=warnings,
+                gate_results=[r.to_dict() for r in gate_results],
+            )
+        else:
+            gate_results.append(
+                GateResult(
+                    gate="regression_threshold",
+                    status=GateStatus.PASSED,
+                    reason=(
+                        f"M-054 Gate 4: regression {regression:.4f} within "
+                        f"threshold {_threshold:.4f} "
+                        f"(live_baseline={live_baseline_score:.4f}, "
+                        f"shadow={shadow_eval_score:.4f})"
+                    ),
+                )
+            )
+            logger.debug(
+                "validate_shadow: regression_threshold PASSED for '%s' "
+                "(regression=%.4f <= threshold=%.4f)",
+                shadow_collection,
+                regression,
+                _threshold,
+            )
+    else:
+        skip_reason_parts = []
+        if shadow_eval_score is None:
+            skip_reason_parts.append("shadow eval score not available")
+        if live_baseline_score is None:
+            skip_reason_parts.append("no live baseline exists yet")
+        gate_results.append(
+            GateResult(
+                gate="regression_threshold",
+                status=GateStatus.SKIPPED,
+                reason=("regression threshold gate skipped: " + "; ".join(skip_reason_parts)),
+            )
         )
-    )
-    logger.debug("validate_shadow: regression_threshold gate SKIPPED (phase5-eval-integration)")
+        logger.debug(
+            "validate_shadow: regression_threshold gate SKIPPED for '%s' (%s)",
+            shadow_collection,
+            "; ".join(skip_reason_parts),
+        )
 
     # ------------------------------------------------------------------
     # D-20: tier-shift WARNING gate (non-blocking)
