@@ -179,6 +179,7 @@ def _ensure_all_models_imported() -> None:
     import finecorpus.control.auth  # noqa: F401
     import finecorpus.control.break_glass  # noqa: F401
     import finecorpus.control.cost_ledger  # noqa: F401
+    import finecorpus.control.eval_store  # noqa: F401
     import finecorpus.control.jobs  # noqa: F401
     import finecorpus.control.reindex  # noqa: F401
     import finecorpus.control.tombstone  # noqa: F401
