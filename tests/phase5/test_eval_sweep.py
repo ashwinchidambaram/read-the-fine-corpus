@@ -1862,3 +1862,278 @@ class TestCliSweepRuling3:
         assert not result.declined
         assert not result.needs_confirmation
         assert len(result.ranked_rows) > 0
+
+
+# ---------------------------------------------------------------------------
+# PR #46 latent bug: _ingest_sample_to_scratch writes incomplete payload
+# ---------------------------------------------------------------------------
+
+
+class TestIngestScratchFullProvenance:
+    """_ingest_sample_to_scratch must write schema-valid payloads so the
+    collection_override scoring path does not hit PAYLOAD_CORRUPT.
+
+    The bug: the old implementation wrote only {chunk_id, tenancy.kb_id, text},
+    omitting provenance.source_document_id / source_document_version.
+    retrieval.service._provenance_from_payload then raised _PayloadCorruptError,
+    causing an _error_response (empty results) → recall silently = 0.0.
+
+    The test_corrupt_payload_yields_zero_recall test directly injects the CURRENT
+    broken payload shape (what _ingest_sample_to_scratch wrote before the fix)
+    into a FakeAdapter and verifies the scoring path returns 0.0 — proving the
+    PAYLOAD_CORRUPT code path really fires for that payload shape.
+
+    The test_ingest_scratch_then_score_returns_nonzero_recall test uses the
+    REAL _ingest_sample_to_scratch (no pre-seeding) and asserts recall > 0.0
+    after fix; before fix it would return 0.0 (no chunks ingested or corrupt payload).
+
+    The test_run_sweep_ingest_then_score_no_payload_corrupt test drives the full
+    run_sweep path with real doc content and no pre-seeding, verifying the entire
+    ingest→score pipeline works without PAYLOAD_CORRUPT.
+    """
+
+    def _make_doc(self, doc_id: str, display_text: str = "") -> InventoryItem:
+        """Build an InventoryItem whose display_name carries text for ingestion."""
+        import hashlib as _hlib
+        from datetime import UTC as _UTC
+        from datetime import datetime as _dt
+
+        return InventoryItem(
+            document_id=doc_id,
+            content_hash=_hlib.sha256(doc_id.encode()).hexdigest(),
+            source_path=f"/corpus/{doc_id}",
+            display_name=display_text or doc_id,
+            media_type="text/plain",
+            size_bytes=len(display_text or doc_id),
+            source_metadata={"raw_text": display_text} if display_text else {},
+            discovered_at=_dt.now(tz=_UTC),
+            dedup_role=DedupRole.unique,
+            collect_status=CollectStatus.collected,
+            document_status=DocumentStatus.active,
+        )
+
+    def test_corrupt_payload_yields_zero_recall(self) -> None:
+        """Directly inject the OLD broken payload shape into FakeAdapter, then score.
+
+        This is the EVIDENCE test: it proves that the PAYLOAD_CORRUPT code path
+        really fires for the minimal payload {chunk_id, tenancy.kb_id, text} that
+        _ingest_sample_to_scratch used to write.  Score → 0.0.
+
+        This test passes BEFORE and AFTER the fix (it's testing the retrieval
+        service's fail-closed behaviour, not the ingest fix).  It documents the
+        breaking payload shape so the regression is visible.
+        """
+        from finecorpus.contracts.eval_set import ConfidenceLevel
+        from finecorpus.services.eval_scoring import score_eval_set
+
+        scratch_collection = "sweep_scratch_kb-sweep-test_corrupt"
+        chunk_id = "chk-corrupt-000"
+
+        # The OLD broken payload — missing provenance block entirely
+        broken_point = {
+            "id": chunk_id,
+            "score": 0.99,
+            "payload": {
+                "chunk_id": chunk_id,
+                "tenancy": {"kb_id": scratch_collection},  # passes tenancy filter
+                "text": "The sky is blue.",
+                # NO provenance block → _provenance_from_payload raises _PayloadCorruptError
+            },
+        }
+
+        adapter = FakeAdapter()
+        adapter.upsert_points(collection=scratch_collection, points=[broken_point])
+
+        provider = _make_provider()
+        engine, session = _make_db_session()
+        try:
+            question = _make_question(
+                "q-corrupt-1",
+                text="What color is the sky?",
+                expected_ids=[chunk_id],
+            )
+            result = score_eval_set(
+                [question],
+                kb_id=KB_ID,
+                adapter=adapter,
+                provider=provider,
+                session=session,
+                k=10,
+                confidence_level=ConfidenceLevel.reviewed,
+                collection_override=scratch_collection,
+            )
+        finally:
+            session.close()
+            engine.dispose()
+
+        # PAYLOAD_CORRUPT path returns an _error_response → no results → recall = 0.0
+        assert result.recall == pytest.approx(0.0), (
+            f"Expected recall=0.0 for broken payload (PAYLOAD_CORRUPT), got {result.recall}. "
+            "The retrieval service should return an empty error response when provenance "
+            "fields are missing — evidencing why the fix is necessary."
+        )
+
+    def test_ingest_scratch_then_score_returns_nonzero_recall(self) -> None:
+        """FAILING BEFORE FIX: _ingest_sample_to_scratch writes corrupt payload → recall=0.0.
+
+        Steps:
+          1. Build an InventoryItem with a known display_name used as chunk text.
+          2. Call _ingest_sample_to_scratch — no pre-seeding.
+          3. The chunk_id is deterministic: "{doc_id}_0".
+          4. Create an eval question whose expected_segment_ids = [chunk_id].
+          5. Call score_eval_set with collection_override=scratch_collection.
+          6. Before fix: recall = 0.0 (corrupt payload → PAYLOAD_CORRUPT → empty results).
+          7. After fix: recall = 1.0 (full provenance payload, chunk found).
+        """
+        from finecorpus.contracts.eval_set import ConfidenceLevel
+        from finecorpus.services.eval_scoring import score_eval_set
+        from finecorpus.services.eval_sweep import _ingest_sample_to_scratch
+
+        doc_id = "doc-provtest-0"
+        # display_name provides the text that _ingest_sample_to_scratch reads
+        display_text = "The sky is blue and the ocean is deep. " * 5
+        doc = self._make_doc(doc_id, display_text)
+
+        # chunk_id is deterministically "{doc_id}_0" (first chunk from _ingest_sample_to_scratch)
+        expected_chunk_id = f"{doc_id}_0"
+        scratch_collection = "sweep_scratch_kb-sweep-test_99"
+
+        base_config = _make_ingestion_config()
+        provider = _make_provider()
+        adapter = FakeAdapter()
+
+        engine, session = _make_db_session()
+        try:
+            # STEP 1: real ingestion via _ingest_sample_to_scratch (no pre-seeding)
+            n_upserted = _ingest_sample_to_scratch(
+                scratch_collection=scratch_collection,
+                sampled_docs=[doc],
+                candidate_config=base_config,
+                adapter=adapter,
+                provider=provider,
+            )
+            assert n_upserted > 0, (
+                "Expected at least one chunk to be upserted. "
+                "_ingest_sample_to_scratch must extract text from the doc "
+                "(display_name / source_metadata['raw_text'] fallback)."
+            )
+
+            # STEP 2: score against the scratch collection
+            question = _make_question(
+                "q-provtest-1",
+                text="What color is the sky?",
+                expected_ids=[expected_chunk_id],
+            )
+            result = score_eval_set(
+                [question],
+                kb_id=KB_ID,
+                adapter=adapter,
+                provider=provider,
+                session=session,
+                k=10,
+                confidence_level=ConfidenceLevel.reviewed,
+                collection_override=scratch_collection,
+            )
+        finally:
+            session.close()
+            engine.dispose()
+
+        # Before fix: 0.0 (corrupt payload → PAYLOAD_CORRUPT → empty results)
+        # After fix: 1.0 (full provenance payload, chunk_id matches)
+        assert result.recall > 0.0, (
+            f"recall={result.recall} — PAYLOAD_CORRUPT path returned empty results. "
+            "The scratch payload is missing provenance.source_document_id / "
+            "source_document_version. Fix _ingest_sample_to_scratch to write full provenance."
+        )
+        assert result.recall == pytest.approx(1.0), (
+            f"Expected recall=1.0 (chunk found in scratch collection), got {result.recall}."
+        )
+
+    def test_run_sweep_ingest_then_score_no_payload_corrupt(self) -> None:
+        """run_sweep → _ingest_sample_to_scratch → score_eval_set with NO pre-seeding.
+
+        Drives the full run_sweep path with real doc content and NO pre-seeded scratch
+        collections.  After fix: the reference candidate ingest→scores without PAYLOAD_CORRUPT,
+        and recall > 0.0 when the eval question targets the known chunk_id.
+
+        Before fix: _ingest_sample_to_scratch wrote a corrupt payload (no provenance) →
+        retrieval service returns _error_response → recall = 0.0 for ALL candidates.
+
+        Config: sweep_sample_factor=10 ensures all docs are sampled (min(5*10, 5)=5)
+        so doc-sweep-real-0 is definitely in the sampled set.
+        """
+        engine, session = _make_db_session()
+        provider = _make_provider()
+        alias_record = _make_alias_record_for_kb()
+        # Use 5 docs and sample_factor=10 → target = min(5*10, 5) = 5 (all sampled)
+        cfg = _make_config(
+            sweep_min_corpus_docs=5, sweep_candidate_budget=2, sweep_sample_factor=10
+        )
+        base_config = _make_ingestion_config()
+
+        # Small corpus — all 5 docs will be sampled (target >= corpus size)
+        doc_id_0 = "doc-sweep-real-0"
+        display_text_0 = "The quick brown fox jumps over the lazy dog. " * 5
+        doc_0 = self._make_doc(doc_id_0, display_text_0)
+
+        documents = [doc_0] + [
+            self._make_doc(f"doc-sweep-real-{i}", f"Document {i} content. " * 10)
+            for i in range(1, 5)
+        ]
+
+        # The chunk_id for doc-sweep-real-0's first chunk is "doc-sweep-real-0_0"
+        expected_chunk_id = f"{doc_id_0}_0"
+        questions = [
+            _make_question(
+                "q-sweep-real-1",
+                text="What did the fox do?",
+                expected_ids=[expected_chunk_id],
+            )
+        ]
+
+        adapter = FakeAdapter()
+
+        try:
+            with _patch_alias_repo(alias_record):
+                result = run_sweep(
+                    KB_ID,
+                    base_config,
+                    documents,
+                    questions,
+                    session=session,
+                    config=cfg,
+                    adapter=adapter,
+                    provider=provider,
+                    confirmed=True,
+                    workspace_id=WS_ID,
+                )
+        finally:
+            session.close()
+            engine.dispose()
+
+        assert result.declined is False, f"Sweep declined unexpectedly: {result.reason}"
+        assert result.needs_confirmation is False
+        assert len(result.ranked_rows) > 0, "No ranked rows produced"
+
+        ref_rows = [r for r in result.ranked_rows if r.is_reference]
+        assert len(ref_rows) == 1
+        # Reference delta must be 0 (it IS the baseline)
+        assert ref_rows[0].recall_delta == pytest.approx(0.0)
+
+        # All recall values must be in [0, 1]
+        for row in result.ranked_rows:
+            assert 0.0 <= row.recall <= 1.0, f"recall={row.recall} out of range"
+            assert 0.0 <= row.precision <= 1.0, f"precision={row.precision} out of range"
+
+        # Key assertion: the reference candidate MUST have recall > 0.0.
+        # Before fix: corrupt payload → PAYLOAD_CORRUPT → 0.0.
+        # After fix: full provenance payload → chunk found → recall > 0.0.
+        ref_recall = ref_rows[0].recall
+        assert ref_recall > 0.0, (
+            f"Reference candidate recall={ref_recall}. "
+            "Expected recall > 0.0 after real ingestion of a doc whose chunk_id "
+            f"matches the eval question's expected_segment_ids=[{expected_chunk_id!r}]. "
+            "This means _ingest_sample_to_scratch wrote a corrupt payload "
+            "(missing provenance.source_document_id / source_document_version) "
+            "causing the retrieval service to return an empty PAYLOAD_CORRUPT response."
+        )

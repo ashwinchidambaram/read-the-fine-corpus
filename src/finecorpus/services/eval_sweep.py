@@ -926,19 +926,77 @@ def _ingest_sample_to_scratch(
     and upserts them into the scratch collection.  It uses the candidate config's
     chunking parameters to produce chunks via the recursive-char split_text helper.
 
+    Payload contract (PR #46 fix):
+        Every point written to the scratch collection MUST carry a full,
+        schema-valid payload as produced by ``index.adapter.build_point_payload``:
+
+        - ``provenance.source_document_id``   ← InventoryItem.document_id
+        - ``provenance.source_document_version`` ← InventoryItem.content_hash
+        - ``provenance.structural_path``, ``segment_type``, ``salience_tier``,
+          ``source_location``, ``trust_level``, etc. — all required by
+          ``retrieval.service._provenance_from_payload``.
+        - ``tenancy.kb_id = scratch_collection`` — matches the collection_override
+          tenancy filter applied by retrieval.service.query.
+        - ``embedding_ref`` — model identity fields.
+
+        Without a full provenance block, ``_provenance_from_payload`` raises
+        ``_PayloadCorruptError``, causing retrieval.service.query to return an
+        ``_error_response`` (empty results) and score_eval_set to silently
+        return recall=0.0 for every candidate — breaking §19 criterion 1.
+
+    Text extraction order:
+        1. ``source_metadata.get("raw_text")`` — explicit text in metadata.
+        2. ``display_name`` — human-facing name (always set on InventoryItem).
+        3. ``document_id`` — last-resort fallback so we always produce a chunk.
+
     Returns:
         Number of vectors upserted (index_size).
     """
     import uuid as _uuid
 
+    from finecorpus.index.adapter import build_point_payload
     from finecorpus.pipeline.build.chunker import split_text
 
     chunks_upserted = 0
 
+    embed_cfg = candidate_config.embedding
+    model_id = embed_cfg.model
+    embed_provider_id = embed_cfg.provider
+    embed_dimensions = embed_cfg.dimensions
+    config_version = getattr(candidate_config, "config_version", "scratch")
+
+    embedding_ref = {
+        "provider": embed_provider_id,
+        "model": model_id,
+        "dimensions": embed_dimensions,
+        "config_version": config_version,
+    }
+
+    # Tenancy block: kb_id = scratch_collection so the collection_override
+    # tenancy filter (keyed on tenancy.kb_id) matches these payloads.
+    tenancy_template: dict[str, Any] = {
+        "workspace_id": candidate_config.tenancy.workspace_id,
+        "kb_id": scratch_collection,
+        "permission_mode": candidate_config.tenancy.permission_mode.value,
+        "permission_principals": [],
+        "permission_source": candidate_config.tenancy.permission_source.value,
+        "permission_fidelity": candidate_config.tenancy.permission_fidelity.value,
+        "permission_resolved_at": None,
+    }
+
     for doc in sampled_docs:
-        text = getattr(doc, "raw_text", None) or getattr(doc, "title", "") or ""
+        # Text extraction: source_metadata["raw_text"] → display_name → document_id
+        source_meta = getattr(doc, "source_metadata", {}) or {}
+        text = (
+            source_meta.get("raw_text")
+            or getattr(doc, "display_name", None)
+            or getattr(doc, "document_id", "doc")
+        )
         if not text:
             continue
+
+        doc_id: str = getattr(doc, "document_id", "doc")
+        content_hash: str = getattr(doc, "content_hash", doc_id)
 
         chunking = candidate_config.default_rule.chunking
         spans = split_text(
@@ -952,27 +1010,61 @@ def _ingest_sample_to_scratch(
             continue
 
         try:
-            model_id = candidate_config.embedding.model
             embed_results = provider.embed_batch(chunk_texts, model_id)
             vectors = embed_results.embeddings  # list[list[float]]
         except Exception as exc:  # noqa: BLE001
             logger.debug(
                 "_ingest_sample_to_scratch: embed failed for doc %r: %s",
-                getattr(doc, "document_id", "?"),
+                doc_id,
                 exc,
             )
             continue
 
         points = []
         for i, (chunk_t, vector) in enumerate(zip(chunk_texts, vectors, strict=False)):
-            doc_id = getattr(doc, "document_id", "doc")
             chunk_id = f"{doc_id}_{i}"
             point_id = str(_uuid.uuid5(_uuid.NAMESPACE_OID, chunk_id))
-            payload = {
-                "chunk_id": chunk_id,
-                "tenancy": {"kb_id": scratch_collection},
-                "text": chunk_t[:500],
+
+            # Full §8 provenance block — required by _provenance_from_payload.
+            # source_document_id and source_document_version are mandatory; the
+            # rest use safe defaults appropriate for a scratch eval ingestion.
+            provenance: dict[str, Any] = {
+                "source_document_id": doc_id,
+                "source_document_version": content_hash,
+                "source_location": {
+                    "locator_kind": "char_range",
+                    "char_start": spans[i][0] if i < len(spans) else 0,
+                    "char_end": spans[i][1] if i < len(spans) else len(chunk_t),
+                },
+                "structural_path": [],
+                "transformations": [],
+                "confidence": 1.0,
+                "ocr_confidence": None,
+                "segment_type": "prose",
+                "salience_tier": "primary",
+                "salience_basis": "default",
+                "salience_signals": [
+                    {
+                        "kind": "default",
+                        "implied_tier": "supporting",
+                        "won": True,
+                        "detail": "sweep-scratch-ingestion",
+                    }
+                ],
+                "language": "en",
+                "injection_suspicion": 0.0,
+                "invisible_content_flags": [],
+                "sensitivity_flags": [],
+                "trust_level": "untrusted_ingested",
             }
+
+            payload = build_point_payload(
+                chunk_id=chunk_id,
+                provenance=provenance,
+                tenancy=tenancy_template,
+                text=chunk_t,
+                embedding_ref=embedding_ref,
+            )
             points.append({"id": point_id, "vector": vector, "payload": payload})
 
         try:
@@ -984,7 +1076,7 @@ def _ingest_sample_to_scratch(
         except Exception as exc:  # noqa: BLE001
             logger.debug(
                 "_ingest_sample_to_scratch: upsert failed for doc %r: %s",
-                getattr(doc, "document_id", "?"),
+                doc_id,
                 exc,
             )
 
