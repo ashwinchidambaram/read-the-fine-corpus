@@ -159,10 +159,18 @@ class TestFourGatesM054:
 
 
 class TestGates34Stubbed:
-    """M-054 Gates 3+4 are stubbed — must report SKIPPED with phase5-eval-integration."""
+    """M-054 Gates 3+4 — Phase 5 eval integration complete.
 
-    def test_gate3_eval_baseline_is_skipped(self):
-        """Gate 3 (eval_baseline) reports SKIPPED with phase5-eval-integration."""
+    Gates 3+4 now have real semantics (Phase 5):
+    - eval_baseline: SKIPPED when no eval configured; PASSED/FAILED with injected scores.
+    - regression_threshold: SKIPPED when no scores available; PASSED/FAILED with both scores.
+
+    When called without eval context (old Phase 4 call-site style), both gates SKIPPED —
+    this is the correct backward-compat behavior.
+    """
+
+    def test_gate3_eval_baseline_is_skipped_when_no_eval_configured(self):
+        """Gate 3 (eval_baseline) reports SKIPPED when no eval configured (old call style)."""
         adapter = _make_adapter(100)
         result = validate_shadow(
             adapter=adapter,
@@ -174,10 +182,11 @@ class TestGates34Stubbed:
         g3 = gate_names.get("eval_baseline")
         assert g3 is not None
         assert g3["status"] == str(GateStatus.SKIPPED)
-        assert "phase5-eval-integration" in g3["reason"]
+        # Phase 5: reason reflects "no eval configured" instead of stub placeholder
+        assert "no eval" in g3["reason"].lower() or "not configured" in g3["reason"].lower()
 
-    def test_gate4_regression_threshold_is_skipped(self):
-        """Gate 4 (regression_threshold) reports SKIPPED with phase5-eval-integration."""
+    def test_gate4_regression_threshold_is_skipped_when_no_scores(self):
+        """Gate 4 (regression_threshold) reports SKIPPED when no eval scores available."""
         adapter = _make_adapter(100)
         result = validate_shadow(
             adapter=adapter,
@@ -189,7 +198,6 @@ class TestGates34Stubbed:
         g4 = gate_names.get("regression_threshold")
         assert g4 is not None
         assert g4["status"] == str(GateStatus.SKIPPED)
-        assert "phase5-eval-integration" in g4["reason"]
 
     def test_both_stubs_visible_in_gate_results(self):
         """Both gate 3 and gate 4 are visible in gate_results."""
