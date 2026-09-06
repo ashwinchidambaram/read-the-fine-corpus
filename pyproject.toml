@@ -73,10 +73,14 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
-name = "C-5: layers — web/cli above services above retrieval/pipeline above config/index above embedding above control/contracts"
+name = "C-5: layers — cli above web above services above retrieval/pipeline above config/index above embedding above control/contracts"
 type = "layers"
 layers = [
-    "finecorpus.web | finecorpus.cli",
+    # cli is the process entry point; it may launch the web subsystem
+    # (`corpus web` → web.create_app, M-1). web must not import cli (enforced by
+    # this ordering). Both still sit above services and below nothing else.
+    "finecorpus.cli",
+    "finecorpus.web",
     "finecorpus.services",
     "finecorpus.retrieval | finecorpus.pipeline",
     "finecorpus.config | finecorpus.index",

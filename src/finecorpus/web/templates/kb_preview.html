@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Preview — {{ mode|capitalize }} mode{% endblock %}
+{% block content %}
+<section class="card">
+  <header class="topbar">
+    <h1>Preview for “{{ kb_id }}”</h1>
+    <span class="mode-badge" data-testid="mode-badge">{{ mode|capitalize }} mode</span>
+  </header>
+  <p class="muted">
+    A sample of the chunks we will build ({{ preview.total }} chunk(s) total). Nothing has
+    been indexed yet — this is a dry run.
+  </p>
+
+  <div class="preview-chunks" data-testid="preview-chunks">
+    {% for c in preview.chunks %}
+    <article class="chunk">
+      <header>{{ c.document_id }} · chunk {{ c.chunk_index }} · {{ c.token_count }} tokens</header>
+      <pre>{{ c.text[:400] }}{% if c.text|length > 400 %} …{% endif %}</pre>
+    </article>
+    {% else %}
+    <p>No chunks were produced from these documents.</p>
+    {% endfor %}
+  </div>
+
+  <form method="post" action="/kb/{{ kb_id }}/ingest">
+    <input type="hidden" name="mode" value="{{ mode }}" />
+    <button type="submit" data-testid="ingest-button">Build the index and get my endpoint</button>
+  </form>
+
+  <p class="switch"><a href="/kb/{{ kb_id }}/plan?mode={{ mode }}">Back to the plan</a></p>
+</section>
+{% endblock %}

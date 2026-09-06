@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Removal result — {{ kb_id }}{% endblock %}
+{% block content %}
+<section class="card">
+  <header class="topbar"><h1>Removal complete</h1></header>
+  <p class="deletion-summary" data-testid="deletion-summary"><strong>{{ report.summary }}</strong></p>
+  <ul class="muted">
+    <li>Live chunks removed: {{ report.live_chunks_removed }}</li>
+    <li>Previous-index chunks removed: {{ report.n1_chunks_removed }}</li>
+    {% if report.purge %}
+    <li>Snapshots destroyed: {{ report.snapshots_destroyed|length }}</li>
+    {% endif %}
+  </ul>
+  <p><a href="/kb/{{ kb_id }}/endpoint">Back to the knowledge base</a></p>
+</section>
+{% endblock %}

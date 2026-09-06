@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Manage documents — {{ kb_id }}{% endblock %}
+{% block content %}
+<section class="card">
+  <header class="topbar"><h1>Manage documents in “{{ kb_id }}”</h1></header>
+
+  <p class="muted">There are two different removals (M-089). Choose carefully.</p>
+
+  <form method="post" action="/kb/{{ kb_id }}/delete">
+    <label>Document ID
+      <input type="text" name="document_id" required />
+    </label>
+
+    <fieldset class="deletion-choice" data-testid="deletion-choice">
+      <label>
+        <input type="radio" name="action" value="delete" checked />
+        <strong data-testid="label-delete">Delete from service</strong>
+        <span class="muted">— removes the document from the live and previous indexes.
+        Cold snapshots still hold a copy and age out on their retention schedule.</span>
+      </label>
+      <label>
+        <input type="radio" name="action" value="purge" />
+        <strong data-testid="label-purge">Purge from all copies</strong>
+        <span class="muted">— destroys every copy immediately, including cold snapshots.
+        This cannot be undone.</span>
+      </label>
+    </fieldset>
+
+    <button type="submit">Apply</button>
+  </form>
+</section>
+{% endblock %}

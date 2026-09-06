@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Evaluation — {{ kb_id }}{% endblock %}
+{% block content %}
+<section class="card">
+  <header class="topbar"><h1>Evaluation baselines for “{{ kb_id }}”</h1></header>
+
+  {% if baselines %}
+  {% for b in baselines %}
+  <article class="eval-set {% if b.provisional %}provisional{% else %}reviewed{% endif %}"
+           data-testid="eval-set-{{ b.eval_set_id }}"
+           data-provisional="{{ 'true' if b.provisional else 'false' }}">
+    <header>Eval set {{ b.eval_set_id }} — {{ b.confidence_level }}
+      ({{ b.n_unreviewed }} of {{ b.n_total }} unreviewed)</header>
+    <pre class="confidence-banner" data-testid="confidence-banner">{{ b.banner }}</pre>
+  </article>
+  {% endfor %}
+  {% else %}
+  <p class="muted">No evaluation sets yet.</p>
+  {% endif %}
+  <p><a href="/kb/{{ kb_id }}/endpoint">Back to the knowledge base</a></p>
+</section>
+{% endblock %}

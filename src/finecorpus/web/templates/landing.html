@@ -9,6 +9,10 @@
     </form>
   </header>
   <p>Signed in as <strong>{{ username }}</strong>.</p>
-  <p class="muted">Web UI foundation (v{{ version }}). The knowledge-base flows arrive in a later work unit.</p>
+  <p class="muted">Read The Fine Corpus web UI (v{{ version }}).</p>
+  <nav class="actions">
+    <a class="button" href="/kb/new?mode=easy">Create a knowledge base (Easy)</a>
+    <a class="button secondary" href="/kb/new?mode=proficient">Create a knowledge base (Proficient)</a>
+  </nav>
 </section>
 {% endblock %}

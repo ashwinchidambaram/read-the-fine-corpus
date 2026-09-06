@@ -1,0 +1,17 @@
+<div class="query-results" data-testid="query-results">
+  <p class="muted">Results for “{{ query }}” — status: <strong>{{ response.result_status }}</strong></p>
+  {% if response.results %}
+  <ol>
+    {% for r in response.results %}
+    <li>
+      <div class="score">score {{ "%.3f"|format(r.score) }}</div>
+      <p>{{ r.text[:300] }}{% if r.text|length > 300 %} …{% endif %}</p>
+    </li>
+    {% endfor %}
+  </ol>
+  {% elif response.error %}
+  <p class="error">Error: {{ response.error.code }} — {{ response.error.message }}</p>
+  {% else %}
+  <p>No matching content.</p>
+  {% endif %}
+</div>

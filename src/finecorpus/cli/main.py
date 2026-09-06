@@ -2173,6 +2173,46 @@ def _cmd_reindex(args: argparse.Namespace) -> int:
         engine.dispose()
 
 
+def _cmd_web(args: argparse.Namespace) -> int:
+    """Wire ``corpus web`` → serve the web UI via uvicorn.
+
+    Loads config, builds the ASGI app (``finecorpus.web.create_app(config)``,
+    which constructs the production ``EngineContext`` from ``config`` — Qdrant +
+    Postgres + the configured embedding provider), and runs it under uvicorn on
+    ``config.web.host``/``config.web.port``.  uvicorn is imported lazily so the
+    rest of the CLI does not pay its import cost; it is FastAPI's standard ASGI
+    server and is already a project dependency.
+    """
+    from finecorpus.config.loader import load_config
+
+    try:
+        config = load_config(getattr(args, "config", None))
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: Could not load config — {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        import uvicorn  # noqa: PLC0415  (lazy: only needed to serve)
+
+        from finecorpus.web import create_app
+
+        app = create_app(config)
+    except Exception as exc:  # noqa: BLE001
+        print(f"ERROR: Could not build the web app — {exc}", file=sys.stderr)
+        print(
+            "Ensure storage.postgres.url and storage.qdrant.url are configured "
+            "and reachable (the web UI drives the same engine as the CLI).",
+            file=sys.stderr,
+        )
+        return 1
+
+    host = config.web.host
+    port = config.web.port
+    print(f"Serving Read The Fine Corpus web UI on http://{host}:{port}")
+    uvicorn.run(app, host=host, port=port)
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="corpus",
@@ -2896,6 +2936,19 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    # --- web subcommand (Phase 6: serve the Easy/Proficient web UI) ---
+    web_parser = sub.add_parser(
+        "web",
+        help="Serve the web UI (Easy/Proficient KB flow) over the same engine as the CLI",
+    )
+    web_parser.add_argument(
+        "--config",
+        dest="config",
+        metavar="PATH",
+        default=None,
+        help="Path to corpus.yaml (default: ./corpus.yaml). Provides web.host/web.port + storage.",
+    )
+
     return parser
 
 
@@ -2962,6 +3015,8 @@ def main() -> None:
         sys.exit(_cmd_report(args))
     elif args.command == "reindex":
         sys.exit(_cmd_reindex(args))
+    elif args.command == "web":
+        sys.exit(_cmd_web(args))
     elif args.command == "jobs":
         if args.jobs_command == "enqueue":
             sys.exit(_cmd_jobs_enqueue(args))
