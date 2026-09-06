@@ -634,23 +634,11 @@ class QdrantAdapter(IndexAdapter):
                 "exists.  Restore always goes INTO a new collection — never in place."
             )
 
-        # Qdrant's recover_snapshot requires the collection to exist first.
-        # We create it here with the minimum viable vector config; the recovered
-        # data will overwrite the config via the snapshot content.
-        # We use a sentinel dimension of 1 — it will be replaced by the snapshot.
-        # Note: if the Qdrant version does not support creation-then-recover flow, this
-        # may fail; callers should check the Qdrant version compatibility.
-        try:
-            self._client.create_collection(
-                collection_name=new_collection_name,
-                vectors_config=qm.VectorParams(size=1, distance=qm.Distance.COSINE),
-            )
-        except Exception as exc:
-            raise SnapshotError(
-                f"Failed to create target collection '{new_collection_name}' "
-                f"before snapshot restore: {exc}"
-            ) from exc
-
+        # Qdrant recovers a snapshot into a collection that it creates from the
+        # snapshot's own config when the target does not pre-exist. Pre-creating
+        # the collection (esp. with a mismatched sentinel dim) makes the server
+        # reject the cross-collection file recovery with 400. So we recover
+        # directly into the (non-existent) target.
         try:
             self._client.recover_snapshot(
                 collection_name=new_collection_name,
