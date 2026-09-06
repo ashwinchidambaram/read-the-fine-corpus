@@ -128,6 +128,7 @@ def score_eval_set(
     confidence_level: ConfidenceLevel = ConfidenceLevel.provisional,
     principal: Principal | None = None,
     auth_enabled: bool = False,
+    collection_override: str | None = None,
 ) -> ScoreResult:
     """Score an eval set by running each usable question through retrieval.
 
@@ -151,6 +152,12 @@ def score_eval_set(
         principal: Optional authenticated principal.  For offline eval, pass None
             and leave auth_enabled=False (KB tenancy filter still applied).
         auth_enabled: When False (default), only the kb_id tenancy filter is applied.
+        collection_override: When set, each retrieval query searches this collection
+            directly instead of resolving the KB alias.  Used by the eval sweep to
+            score candidates against their own scratch collections.  The tenancy filter
+            is still applied (using the collection name as the filter scope so it
+            matches the payloads written during scratch ingestion).  Normal callers
+            must leave this as None.
 
     Returns:
         ScoreResult with aggregated recall/precision, confidence_level, and counts.
@@ -174,6 +181,8 @@ def score_eval_set(
         scorable = bool(expected_ids)
 
         # Run retrieval with explain=True to get candidate chunk IDs.
+        # When collection_override is set, retrieval queries that collection
+        # directly (bypass alias resolution) but still applies tenancy filter.
         response = _retrieval_query(
             kb_id=kb_id,
             query_text=q.text,
@@ -184,6 +193,7 @@ def score_eval_set(
             explain=True,
             principal=principal,
             auth_enabled=auth_enabled,
+            collection_override=collection_override,
         )
 
         # Extract retrieved chunk IDs in score order from explain block.

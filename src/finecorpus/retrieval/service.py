@@ -501,6 +501,7 @@ def query(
     auth_enabled: bool = False,
     explain: bool = False,
     break_glass_grant_id: str | None = None,
+    collection_override: str | None = None,
 ) -> RetrievalResponse:
     """Execute a dense retrieval query with optional auth enforcement.
 
@@ -571,6 +572,14 @@ def query(
         break_glass_grant_id: Optional break-glass grant ID for admin content
             reads (§2.3).  When provided and valid, bypasses the
             permission_principals clause (but not kb/workspace tenancy).
+        collection_override: When set, search this collection name directly
+            instead of resolving the KB alias.  The server-side tenancy payload
+            filter is still applied (tenancy is NOT bypassed — only the
+            alias→collection resolution step is skipped).  Used by the eval
+            sweep to score each candidate against its own scratch collection
+            rather than the live production alias.  Normal callers must leave
+            this as None (alias resolution is the correct path for all
+            production queries).
 
     Returns:
         RetrievalResponse per the retrieval-response contract.
@@ -754,6 +763,136 @@ def query(
         tenancy_filter = _build_tenancy_filter(scope)
     tenancy_af = _tenancy_applied_filter(scope)
     filters_applied = [tenancy_af]
+
+    # -----------------------------------------------------------------------
+    # collection_override: skip alias resolution + mismatch check.
+    # When set, search the named collection directly (not via the production
+    # alias).  Tenancy is still applied — using the collection name as the
+    # kb_id scope so the filter matches the payload written during scratch
+    # ingestion (which stores tenancy.kb_id = scratch_collection_name).
+    # Only the eval_sweep uses this path; all production callers use None.
+    # -----------------------------------------------------------------------
+    if collection_override is not None:
+        logger.debug(
+            "query: collection_override=%r — bypassing alias resolution for kb=%r",
+            collection_override,
+            kb_id,
+        )
+        # Build tenancy filter scoped to the scratch collection name (the
+        # scratch ingest writes tenancy.kb_id = collection_override, not kb_id).
+        override_scope = TenancyScope(kb_id=collection_override)
+        override_tenancy_filter = _build_tenancy_filter(override_scope)
+        override_af = _tenancy_applied_filter(override_scope)
+        override_filters_applied = [override_af]
+
+        caps = provider.capabilities
+
+        # Embed query
+        query_vector_ov: list[float] | None = cache.get(
+            model_id=caps.model_id,
+            vector_dimensions=caps.vector_dimensions,
+            api_version=caps.api_version,
+            query_text=query_text,
+        )
+        if query_vector_ov is None:
+            try:
+                embed_result_ov = provider.embed_batch([query_text], model_id=caps.model_id)
+            except ProviderUnavailableError as exc:
+                logger.warning(
+                    "Embedding provider '%s' unavailable (collection_override path): %s",
+                    caps.provider_id,
+                    exc,
+                )
+                return _error_response(
+                    query_text,
+                    override_filters_applied,
+                    ErrorCode.PROVIDER_UNAVAILABLE,
+                    f"Embedding provider '{caps.provider_id}' is unavailable.",
+                    retriable=True,
+                )
+            query_vector_ov = embed_result_ov.embeddings[0]
+            cache.put(
+                model_id=caps.model_id,
+                vector_dimensions=caps.vector_dimensions,
+                api_version=caps.api_version,
+                query_text=query_text,
+                embedding=query_vector_ov,
+            )
+
+        ov_search_top_k = (
+            min(top_k * _OVER_FETCH_MULTIPLIER, _OVER_FETCH_CAP)
+            if explain or score_threshold
+            else top_k
+        )
+        try:
+            ov_raw_results = adapter.search(
+                alias=collection_override,
+                query_vector=query_vector_ov,
+                top_k=ov_search_top_k,
+                payload_filter=override_tenancy_filter,
+            )
+        except (IndexError, AliasNotFoundError) as exc:
+            logger.warning(
+                "Vector DB search failed for collection_override=%r: %s",
+                collection_override,
+                exc,
+            )
+            return _error_response(
+                query_text,
+                override_filters_applied,
+                ErrorCode.VECTOR_DB_UNAVAILABLE,
+                f"Scratch collection '{collection_override}' not found or unavailable.",
+                retriable=True,
+            )
+
+        # Build a minimal matches/no_matches response (explain not needed for sweep scoring)
+        if not ov_raw_results:
+            return RetrievalResponse(
+                schema_version=_SCHEMA_VERSION,
+                request_echo=RequestEcho(
+                    query=query_text, filters_applied=override_filters_applied
+                ),
+                result_status=ResultStatus.no_matches,
+                results=[],
+            )
+
+        kept_ov = ov_raw_results[:top_k]
+        ov_results: list[RetrievalResult] = []
+        for sr in kept_ov:
+            payload = sr.payload or {}
+            text = payload.get("text", "")
+            try:
+                provenance = _provenance_from_payload(payload, chunk_id=sr.chunk_id)
+            except _PayloadCorruptError as exc:
+                logger.error(
+                    "PAYLOAD_CORRUPT in scratch collection %r: chunk=%r missing %s",
+                    collection_override,
+                    sr.chunk_id,
+                    exc.missing,
+                )
+                return _error_response(
+                    query_text,
+                    override_filters_applied,
+                    ErrorCode.PAYLOAD_CORRUPT,
+                    f"Scratch collection payload corrupt: missing provenance.{exc.missing}.",
+                    retriable=False,
+                )
+            ov_results.append(
+                RetrievalResult(
+                    chunk_id=sr.chunk_id,
+                    text=text,
+                    provenance=provenance,
+                    score=sr.score,
+                    scores=Scores(raw=sr.score),
+                    trust_level=TrustLevel.untrusted_ingested,
+                )
+            )
+        return RetrievalResponse(
+            schema_version=_SCHEMA_VERSION,
+            request_echo=RequestEcho(query=query_text, filters_applied=override_filters_applied),
+            result_status=ResultStatus.matches,
+            results=ov_results,
+        )
 
     # -----------------------------------------------------------------------
     # Step 1: resolve alias record from control plane

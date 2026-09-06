@@ -120,6 +120,8 @@ class JobRunner:
                 str(JobType.reindex_incremental),
             ):
                 self._run_ingest(job)
+            elif job_type == str(JobType.eval_sweep):
+                self._run_eval_sweep(job)
             elif job_type in (str(JobType.restore), str(JobType.purge)):
                 raise NotImplementedError(
                     f"job_type={job_type!r} is not yet implemented; a sibling unit will land it."
@@ -360,6 +362,44 @@ class JobRunner:
         self._session.commit()
 
         logger.info("job_runner: job %s build complete cost=%.6f", job.job_id, actual_cost)
+
+    # ------------------------------------------------------------------
+    # eval_sweep execution (additive arm — PR-7 dispatch)
+    # ------------------------------------------------------------------
+
+    def _run_eval_sweep(self, job: JobRecord) -> None:
+        """Run an eval_sweep job — FAIL LOUDLY (Ruling 2).
+
+        Layer constraint (C-5): pipeline jobs may NOT import from the services
+        layer.  Retrieval-quality scoring (services.eval_scoring.score_eval_set)
+        cannot be performed here.  Persisting a "completed" SweepRunRecord with
+        all-0.0 scores would be actively misleading — operators would see a zeros
+        table that looks like a real sweep result.
+
+        This arm therefore FAILS LOUDLY with a clear descriptive error so no
+        zeros table is ever committed as if it were a real scored sweep.
+
+        Deferral: queue-driven scored sweeps require a services-layer worker
+        that can import retrieval.service and services.eval_scoring.  That
+        architecture is out of scope for Phase 5.  Operators MUST use the CLI
+        entrypoint (``corpus pipeline sweep <kb_id>``) which calls
+        ``services.eval_sweep.run_sweep`` directly from the services layer.
+        """
+        _FAIL_MSG = (
+            "eval_sweep must run via the services entrypoint "
+            "(corpus pipeline sweep <kb_id>); "
+            "the queue worker sits in the pipeline layer and cannot score. "
+            "Queue-driven scored sweep is deferred."
+        )
+
+        logger.error(
+            "job_runner: eval_sweep job %s cannot be scored via the queue worker — %s",
+            job.job_id,
+            _FAIL_MSG,
+        )
+        self._queue.fail(job.job_id, error_msg=_FAIL_MSG)
+        self._session.commit()
+        raise ValueError(_FAIL_MSG)
 
     # ------------------------------------------------------------------
     # Budget enforcement
