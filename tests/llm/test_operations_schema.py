@@ -291,18 +291,22 @@ class TestSchemaValidation:
 
 
 class TestDeferredOperations:
-    """question_generation and rewriting raise OperationNotImplementedError."""
+    """question_generation is implemented in Phase 5; rewriting raises NotImplementedError."""
 
-    def test_question_generation_raises(self) -> None:
+    def test_question_generation_implemented_phase5(self) -> None:
+        """run_question_generation is now implemented in Phase 5 — returns QuestionGenOutput."""
+        from finecorpus.llm.operations import QuestionGenOutput
+
         provider = FakeLLMProvider()
         inp = QuestionGenInput(
             segments=[QuestionGenSegment(segment_text="text", source_document_id="doc-1")],
             question_types=[QuestionType.factual_lookup],
             count_per_type=1,
         )
-        with pytest.raises(OperationNotImplementedError) as exc_info:
-            run_question_generation(provider, DEFAULT_OP_CONFIG, inp)
-        assert "Phase 5" in str(exc_info.value)
+        # Phase 5: no longer raises — returns a valid QuestionGenOutput
+        result = run_question_generation(provider, DEFAULT_OP_CONFIG, inp)
+        assert isinstance(result, QuestionGenOutput)
+        assert len(result.questions) >= 1
 
     def test_rewriting_raises(self) -> None:
         provider = FakeLLMProvider()
