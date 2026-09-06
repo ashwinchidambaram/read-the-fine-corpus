@@ -71,10 +71,11 @@ forbidden_modules = [
 ]
 
 [[tool.importlinter.contracts]]
-name = "C-5: layers — cli/services above retrieval/pipeline above config/index above embedding above control/contracts"
+name = "C-5: layers — cli above services above retrieval/pipeline above config/index above embedding above control/contracts"
 type = "layers"
 layers = [
-    "finecorpus.cli | finecorpus.services",
+    "finecorpus.cli",
+    "finecorpus.services",
     "finecorpus.retrieval | finecorpus.pipeline",
     "finecorpus.config | finecorpus.index",
     "finecorpus.embedding | finecorpus.llm",
