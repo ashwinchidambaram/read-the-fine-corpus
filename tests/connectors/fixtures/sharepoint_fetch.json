@@ -1,0 +1,13 @@
+[
+  {
+    "match": {
+      "method": "GET",
+      "url": "https://graph.microsoft.com/v1.0/drives/drive-1/items/item-1/content"
+    },
+    "response": {
+      "status_code": 200,
+      "headers": {"Content-Type": "application/octet-stream"},
+      "body": "policy document bytes"
+    }
+  }
+]

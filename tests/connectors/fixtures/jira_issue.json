@@ -1,0 +1,15 @@
+[
+  {
+    "match": {
+      "method": "GET",
+      "url": "https://acme.atlassian.net/rest/api/2/issue/PROJ-1"
+    },
+    "response": {
+      "status_code": 200,
+      "json": {
+        "key": "PROJ-1",
+        "fields": {"summary": "Login bug", "description": "Users cannot log in."}
+      }
+    }
+  }
+]

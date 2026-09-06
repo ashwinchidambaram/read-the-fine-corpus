@@ -1,0 +1,18 @@
+[
+  {
+    "match": {
+      "method": "GET",
+      "url": "https://www.googleapis.com/drive/v3/files/file-a/permissions?fields=permissions%28id%2Ctype%2CemailAddress%2Cdomain%2Crole%29"
+    },
+    "response": {
+      "status_code": 200,
+      "json": {
+        "permissions": [
+          {"id": "p1", "type": "user", "emailAddress": "alice@example.com", "role": "writer"},
+          {"id": "p2", "type": "group", "emailAddress": "eng@example.com", "role": "reader"},
+          {"id": "p3", "type": "domain", "domain": "example.com", "role": "reader"}
+        ]
+      }
+    }
+  }
+]

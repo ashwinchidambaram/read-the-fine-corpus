@@ -1,0 +1,12 @@
+[
+  {
+    "match": {
+      "method": "GET",
+      "url": "https://www.googleapis.com/drive/v3/files/file-a/permissions?fields=permissions%28id%2Ctype%2CemailAddress%2Cdomain%2Crole%29"
+    },
+    "response": {
+      "status_code": 403,
+      "json": {"error": {"code": 403, "message": "Insufficient permission scope"}}
+    }
+  }
+]
