@@ -21,9 +21,10 @@ never written to config or logged. If unset, an ephemeral per-process secret is
 generated (sessions will not survive a restart, which is acceptable for the
 in-memory default store).
 
-Import-linter: ``finecorpus.web`` is a top-layer entry surface (sibling of
-``finecorpus.cli``). It may import config/services/retrieval/etc. but must not
-be imported by any of them.
+Import-linter: ``finecorpus.web`` is an entry surface just below
+``finecorpus.cli`` (C-5). It may import config/services/retrieval/etc. and is
+launched by the ``corpus web`` subcommand (``cli`` → ``web``); it must not
+import ``finecorpus.cli`` in return, and must not be imported by the core.
 
 Spec references: §14.2 (auth, secrets), §6.2 (no credential leakage).
 """
@@ -44,6 +45,7 @@ from finecorpus.web.auth import AuthProvider, LocalAccountsAuthProvider, Session
 
 if TYPE_CHECKING:
     from finecorpus.config import Config
+    from finecorpus.web.engine import EngineContext
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +78,7 @@ def create_app(
     config: "Config | None" = None,
     *,
     auth_provider: AuthProvider | None = None,
+    engine: "EngineContext | None" = None,
 ) -> FastAPI:
     """Build and return the web ASGI application.
 
@@ -86,7 +89,37 @@ def create_app(
             ``LocalAccountsAuthProvider`` (local username/password accounts).
             Injecting an ``OIDCAuthProvider`` here later requires no route
             changes — routes depend only on the ``AuthProvider`` protocol.
+        engine: The :class:`~finecorpus.web.engine.EngineContext` the KB routes
+            drive. In production it is built from ``config`` (Qdrant + Postgres +
+            the configured embedding provider); tests inject an in-process
+            context. When ``engine`` is ``None`` but a ``config`` is supplied,
+            the engine is built via ``EngineContext.from_config(config)`` so a
+            production ``create_app(config)`` yields a working app (not a 503
+            surface). When both are ``None`` the KB routes are still registered
+            but return 503 until an engine is configured (the auth foundation
+            still works — e.g. login-only smoke deployments).
     """
+    # Production wiring: build the engine from config when one wasn't injected.
+    # Best-effort (mirrors services.ingest_worker._build_adapter_provider): if
+    # the infra deps can't be constructed (misconfigured/unreachable Qdrant /
+    # Postgres / embedding provider), the app still boots with the auth
+    # foundation working and the KB routes fail closed with 503 until an engine
+    # is configured — rather than crashing app construction. The failure cause
+    # is logged (never a secret).
+    if engine is None and config is not None:
+        from finecorpus.web.engine import EngineContext
+
+        try:
+            engine = EngineContext.from_config(config)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "web: could not build KB engine from config: %s "
+                "(KB routes return 503 until storage.postgres + storage.qdrant + "
+                "embedding provider are configured and reachable)",
+                exc,
+            )
+            engine = None
+
     ttl = config.web.session_ttl_seconds if config is not None else 60 * 60 * 8
     cookie_secure = config.web.cookie_secure if config is not None else False
     provider: AuthProvider = auth_provider or LocalAccountsAuthProvider(session_ttl_seconds=ttl)
@@ -106,6 +139,7 @@ def create_app(
         ),
     )
     app.state.auth_provider = provider
+    app.state.engine = engine
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
     # -- auth dependency (fail-closed) --------------------------------------
@@ -205,6 +239,21 @@ def create_app(
             "landing.html",
             {"username": session.username, "version": finecorpus.__version__},
         )
+
+    # -- KB flow routes (Easy/Proficient over the same engine) --------------
+
+    from fastapi import HTTPException as _HTTPException
+
+    from finecorpus.web.kb_routes import register_kb_routes
+
+    def get_engine() -> "EngineContext":
+        """Return the active engine, or fail closed with 503 if unconfigured."""
+        eng = app.state.engine
+        if eng is None:
+            raise _HTTPException(status_code=503, detail="KB engine not configured.")
+        return eng
+
+    register_kb_routes(app, templates, get_engine, require_session)
 
     return app
 

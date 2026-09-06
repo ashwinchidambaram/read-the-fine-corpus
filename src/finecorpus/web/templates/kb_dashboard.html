@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — {{ kb_id }}{% endblock %}
+{% block content %}
+<section class="card">
+  <header class="topbar"><h1>Dashboard — “{{ kb_id }}”</h1></header>
+
+  <h2>Usage</h2>
+  <table class="metrics" data-testid="kb-metrics">
+    <tr><td>Retrieval requests</td><td>{{ "%.0f"|format(metrics.retrieval_requests) }}</td></tr>
+    <tr><td>Retrieval errors</td><td>{{ "%.0f"|format(metrics.retrieval_errors) }}</td></tr>
+    <tr><td>Documents ingested</td><td>{{ "%.0f"|format(metrics.ingestion_docs) }}</td></tr>
+    <tr><td>Promotions</td><td>{{ "%.0f"|format(metrics.promotions) }}</td></tr>
+    <tr><td>Rollbacks</td><td>{{ "%.0f"|format(metrics.rollbacks) }}</td></tr>
+  </table>
+
+  <h2>Spend attribution</h2>
+  <p class="spend-total" data-testid="spend-total">
+    Total ingestion spend: ${{ "%.4f"|format(metrics.ingestion_cost_usd) }}
+  </p>
+  {% if metrics.spend_by_operation %}
+  <table class="spend" data-testid="spend-by-operation">
+    <thead><tr><th>Operation</th><th>USD</th></tr></thead>
+    <tbody>
+    {% for op, usd in metrics.spend_by_operation.items() %}
+      <tr><td>{{ op }}</td><td>${{ "%.4f"|format(usd) }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+  <p><a href="/kb/{{ kb_id }}/endpoint">Back to the knowledge base</a></p>
+</section>
+{% endblock %}

@@ -1,0 +1,125 @@
+{% extends "base.html" %}
+{% block title %}Review plan — {{ mode|capitalize }} mode{% endblock %}
+{% block content %}
+<section class="card">
+  <header class="topbar">
+    <h1>Recommended plan for “{{ kb_id }}”</h1>
+    <span class="mode-badge" data-testid="mode-badge">{{ mode|capitalize }} mode</span>
+  </header>
+
+  {% if mode == "easy" %}
+  <p class="muted">
+    Here is what we recommend, in plain language. Every value was chosen for you — expand
+    “why” to see the reasoning. Approve to continue, or switch to Proficient mode to edit
+    any value.
+  </p>
+  {% else %}
+  <p class="muted">
+    Every value the recommender set is shown below and is editable. Change anything, then
+    save. Values you leave alone keep the recommended setting.
+  </p>
+  {% endif %}
+
+  <form method="post" action="/kb/{{ kb_id }}/plan?mode={{ mode }}">
+    <input type="hidden" name="mode" value="{{ mode }}" />
+
+    <h2>Configuration</h2>
+    <table class="fields" data-testid="config-fields">
+      <thead>
+        <tr><th>Setting</th><th>Value</th><th>Why (recommender)</th></tr>
+      </thead>
+      <tbody>
+      {% for f in fields %}
+        <tr data-pointer="{{ f.pointer }}">
+          <td>{{ f.label }}</td>
+          <td>
+            {% if mode == "proficient" %}
+              {% if f.kind == "bool" %}
+                <select name="{{ field_key(f.pointer) }}" data-testid="input-{{ f.pointer }}">
+                  <option value="true" {% if f.value %}selected{% endif %}>true</option>
+                  <option value="false" {% if not f.value %}selected{% endif %}>false</option>
+                </select>
+              {% elif f.kind == "number" %}
+                <input type="number" step="any" name="{{ field_key(f.pointer) }}"
+                       value="{{ f.value_str }}" data-testid="input-{{ f.pointer }}" />
+              {% else %}
+                <input type="text" name="{{ field_key(f.pointer) }}"
+                       value="{{ f.value_str }}" data-testid="input-{{ f.pointer }}" />
+              {% endif %}
+            {% else %}
+              <span class="value">{{ f.value_str }}</span>
+            {% endif %}
+          </td>
+          <td class="why">
+            {% if f.rationale %}
+            <details><summary>why{% if f.basis %} ({{ f.basis }}){% endif %}</summary>
+              <p>{{ f.rationale }}</p>
+            </details>
+            {% else %}<span class="muted">—</span>{% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+
+    {% if spreadsheet_triage %}
+    <h2>Spreadsheets (M-023)</h2>
+    <p class="muted">
+      Each spreadsheet was classified automatically. In Proficient mode you can override the
+      classification.
+    </p>
+    <table class="triage" data-testid="spreadsheet-triage">
+      <thead><tr><th>Document</th><th>Classification</th><th>Source</th><th>Disposition</th></tr></thead>
+      <tbody>
+      {% for t in spreadsheet_triage %}
+        <tr>
+          <td>{{ t.document_id }}</td>
+          <td>
+            {% if mode == "proficient" %}
+              <select name="triage.{{ t.document_id }}" data-testid="triage-select-{{ t.document_id }}">
+                {% for k in ["report", "database", "model"] %}
+                <option value="{{ k }}" {% if t.kind == k %}selected{% endif %}>{{ k }}</option>
+                {% endfor %}
+              </select>
+            {% else %}
+              {{ t.kind }}
+            {% endif %}
+          </td>
+          <td data-testid="triage-source-{{ t.document_id }}">{{ t.source }}</td>
+          <td>{{ t.disposition }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+
+    {% if class_drafts %}
+    <h2>Describe your content (optional, but the most valuable input)</h2>
+    <p class="muted">
+      For each kind of content we found, we drafted a short description. Edit it to say what
+      the content is and what people need from it. You are editing a draft, not a blank box.
+    </p>
+    <div class="class-descriptions" data-testid="class-descriptions">
+      {% for cls, draft in class_drafts.items() %}
+      <label class="class-desc">
+        <span class="class-name">{{ cls }}</span>
+        <textarea name="desc.{{ cls }}" rows="2" data-testid="draft-{{ cls }}">{{ draft }}</textarea>
+      </label>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    <button type="submit">
+      {% if mode == "easy" %}Approve and preview{% else %}Save changes and preview{% endif %}
+    </button>
+  </form>
+
+  <p class="switch">
+    {% if mode == "easy" %}
+    <a href="/kb/{{ kb_id }}/plan?mode=proficient" data-testid="switch-proficient">Edit these values (Proficient mode)</a>
+    {% else %}
+    <a href="/kb/{{ kb_id }}/plan?mode=easy" data-testid="switch-easy">Back to plain-language summary (Easy mode)</a>
+    {% endif %}
+  </p>
+</section>
+{% endblock %}

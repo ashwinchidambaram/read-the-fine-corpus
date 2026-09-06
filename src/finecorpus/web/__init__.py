@@ -1,8 +1,10 @@
 """Server-rendered web application for Read The Fine Corpus (Phase 6).
 
 FastAPI + Jinja2 + HTMX, with a pluggable authentication seam. This package is
-a top-layer entry surface (sibling of ``finecorpus.cli``): it may import the
-core library but must not be imported by it.
+a top-layer entry surface: it may import the core library (config, services,
+retrieval, pipeline, …). It sits just below ``finecorpus.cli`` in the import
+layers (C-5) so the ``corpus web`` subcommand can launch it (``create_app``);
+it must not import ``finecorpus.cli`` in return.
 
 Public API::
 

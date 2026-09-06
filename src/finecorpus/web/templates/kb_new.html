@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}Create a knowledge base — {{ mode|capitalize }} mode{% endblock %}
+{% block content %}
+<section class="card">
+  <header class="topbar">
+    <h1>Create a knowledge base</h1>
+    <span class="mode-badge" data-testid="mode-badge">{{ mode|capitalize }} mode</span>
+  </header>
+
+  {% if mode == "easy" %}
+  <p class="muted">
+    Point us at your documents and give this knowledge base a name. We will read the
+    documents and recommend everything else — you just review and approve.
+  </p>
+  {% else %}
+  <p class="muted">
+    Create the knowledge base. On the next screen every recommended value is shown and
+    editable.
+  </p>
+  {% endif %}
+
+  <form method="post" action="/kb/new">
+    <input type="hidden" name="mode" value="{{ mode }}" />
+    <label>Knowledge base name
+      <input type="text" name="kb_id" required placeholder="my-handbook" />
+    </label>
+    <label>Documents folder
+      <input type="text" name="source_dir" required placeholder="/path/to/documents" />
+    </label>
+    {% if mode == "proficient" %}
+    <label>Workspace
+      <input type="text" name="workspace_id" value="default" />
+    </label>
+    {% else %}
+    <input type="hidden" name="workspace_id" value="default" />
+    {% endif %}
+    <button type="submit">Create and analyse documents</button>
+  </form>
+
+  <p class="switch">
+    {% if mode == "easy" %}
+    <a href="/kb/new?mode=proficient">Switch to Proficient mode</a>
+    {% else %}
+    <a href="/kb/new?mode=easy">Switch to Easy mode</a>
+    {% endif %}
+  </p>
+</section>
+{% endblock %}

@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Your endpoint — {{ mode|capitalize }} mode{% endblock %}
+{% block content %}
+<section class="card">
+  <header class="topbar">
+    <h1>“{{ kb_id }}” is live</h1>
+    <span class="mode-badge" data-testid="mode-badge">{{ mode|capitalize }} mode</span>
+  </header>
+
+  {% if status and status.ready %}
+  <p class="success" data-testid="endpoint-ready">
+    Your knowledge base is ready to answer questions.
+  </p>
+  {% else %}
+  <p class="muted" data-testid="endpoint-pending">The knowledge base is not ready yet.</p>
+  {% endif %}
+
+  <h2>Query endpoint</h2>
+  <p>Send questions to this URL:</p>
+  <pre class="endpoint" data-testid="endpoint-path">POST {{ endpoint_path }}</pre>
+  {% if status %}
+  <ul class="muted">
+    <li>Embedding model: {{ status.embedding_model or "—" }}</li>
+    <li>Dimensions: {{ status.embedding_dimensions or "—" }}</li>
+  </ul>
+  {% endif %}
+
+  <h2>Try it</h2>
+  <form hx-post="/kb/{{ kb_id }}/test-query" hx-target="#results" hx-swap="innerHTML"
+        method="post" action="/kb/{{ kb_id }}/test-query">
+    <input type="hidden" name="mode" value="{{ mode }}" />
+    <label>Ask a question
+      <input type="text" name="query" required placeholder="What is the refund policy?" />
+    </label>
+    <button type="submit" data-testid="test-query-button">Ask</button>
+  </form>
+  <div id="results"></div>
+
+  <nav class="actions">
+    <a class="button secondary" href="/kb/{{ kb_id }}/dashboard">Dashboard</a>
+    <a class="button secondary" href="/kb/{{ kb_id }}/eval">Evaluation</a>
+    <a class="button secondary" href="/kb/{{ kb_id }}/delete">Manage documents</a>
+  </nav>
+</section>
+{% endblock %}
