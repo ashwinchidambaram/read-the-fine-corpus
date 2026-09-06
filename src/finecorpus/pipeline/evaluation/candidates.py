@@ -66,6 +66,7 @@ from __future__ import annotations
 
 import copy
 import itertools
+import logging
 import random
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -77,6 +78,8 @@ from finecorpus.contracts.ingestion_config import (
     RetrievalStrategy,
 )
 from finecorpus.contracts.inventory import InventoryItem
+
+_log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Media-type → stratum mapping
@@ -213,39 +216,61 @@ def sample_corpus(
     stratum_names = sorted(strata.keys())  # stable iteration order
     stratum_sizes = {k: len(strata[k]) for k in stratum_names}
     total_sized = sum(stratum_sizes.values())
+    n_active_strata = len(stratum_names)
 
-    # Compute raw float quotas, then round to integers preserving total=target
-    raw_quotas: dict[str, float] = {
-        k: (stratum_sizes[k] / total_sized) * target for k in stratum_names
-    }
-    # Integer floor quotas
-    floor_quotas: dict[str, int] = {k: max(1, int(raw_quotas[k])) for k in stratum_names}
-    # Cap each stratum quota at its actual size
-    floor_quotas = {k: min(floor_quotas[k], stratum_sizes[k]) for k in stratum_names}
+    # --- Shuffle each stratum with the seeded RNG before quota selection ---
+    shuffled_strata: dict[str, list[InventoryItem]] = {}
+    for k in stratum_names:
+        items = list(strata[k])
+        rng.shuffle(items)
+        shuffled_strata[k] = items
 
-    allocated = sum(floor_quotas.values())
-    remainder = target - allocated
-
-    # Distribute remaining slots to strata with the largest fractional parts
-    if remainder > 0:
-        fractional_parts = sorted(
-            stratum_names,
-            key=lambda k: -(raw_quotas[k] - int(raw_quotas[k])),
-        )
-        for k in fractional_parts:
-            if remainder <= 0:
+    if n_active_strata > target:
+        # Special case: more active strata than the target allows.
+        # Applying floor-1 per stratum would exceed the target, violating the
+        # strict-subset invariant.  Instead, do a round-robin one-per-stratum
+        # pass (deterministic by stratum_names sort order) until we reach the
+        # target.  The stratum order is stable (sorted), and within each
+        # stratum we take the first item from the already-shuffled list.
+        floor_quotas: dict[str, int] = {k: 0 for k in stratum_names}
+        slots_remaining = target
+        for k in stratum_names:
+            if slots_remaining <= 0:
                 break
-            slack = stratum_sizes[k] - floor_quotas[k]
-            if slack > 0:
-                floor_quotas[k] += 1
-                remainder -= 1
+            floor_quotas[k] = 1
+            slots_remaining -= 1
+    else:
+        # Normal path: proportional allocation with floor 1 per stratum.
+        # Compute raw float quotas, then round to integers preserving total=target.
+        raw_quotas: dict[str, float] = {
+            k: (stratum_sizes[k] / total_sized) * target for k in stratum_names
+        }
+        # Integer floor quotas (at least 1 per stratum)
+        floor_quotas = {k: max(1, int(raw_quotas[k])) for k in stratum_names}
+        # Cap each stratum quota at its actual size
+        floor_quotas = {k: min(floor_quotas[k], stratum_sizes[k]) for k in stratum_names}
 
-    # --- Sample from each stratum ---
+        allocated = sum(floor_quotas.values())
+        remainder = target - allocated
+
+        # Distribute remaining slots to strata with the largest fractional parts
+        if remainder > 0:
+            fractional_parts = sorted(
+                stratum_names,
+                key=lambda k: -(raw_quotas[k] - int(raw_quotas[k])),
+            )
+            for k in fractional_parts:
+                if remainder <= 0:
+                    break
+                slack = stratum_sizes[k] - floor_quotas[k]
+                if slack > 0:
+                    floor_quotas[k] += 1
+                    remainder -= 1
+
+    # --- Sample from each stratum using the pre-shuffled lists ---
     sampled: list[InventoryItem] = []
     for k in stratum_names:
-        stratum_items = list(strata[k])
-        rng.shuffle(stratum_items)
-        sampled.extend(stratum_items[: floor_quotas[k]])
+        sampled.extend(shuffled_strata[k][: floor_quotas[k]])
 
     # Return in deterministic document_id order
     sampled.sort(key=lambda d: d.document_id)
@@ -454,7 +479,12 @@ def enumerate_candidates(
         label = _make_label(strategy, max_tokens, overlap, retrieval)
         try:
             config = _apply_chunking_variant(base_config, strategy, max_tokens, overlap, retrieval)
-        except Exception:  # noqa: BLE001 — skip invalid configs silently
+        except Exception as exc:  # noqa: BLE001 — one bad variant must not abort enumeration
+            _log.warning(
+                "enumerate_candidates: skipping grid point %r — failed to construct config: %s",
+                label,
+                exc,
+            )
             continue
         variants.append(
             SweepCandidate(

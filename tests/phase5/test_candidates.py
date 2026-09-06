@@ -314,6 +314,59 @@ class TestSampleCorpusDeterministicStratified:
         result = sample_corpus(docs, min_docs=50, sample_factor=1, seed=1)
         assert len(result) == 50
 
+    # --- Ruling 1 regression tests ---
+
+    def test_low_target_does_not_over_sample(self) -> None:
+        """6 populated strata, target=3 → exactly 3 docs returned (strict subset)."""
+        # 6 strata × 3 docs each = 18 docs total; target = min(3*1, 18) = 3
+        media_types = [
+            "application/pdf",  # pdf
+            "text/html",  # html
+            "text/plain",  # text
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # office
+            "text/csv",  # spreadsheet
+            "image/png",  # other
+        ]
+        docs: list[InventoryItem] = []
+        for i, mt in enumerate(media_types):
+            for j in range(3):
+                docs.append(_make_item(f"stratum-{i:02d}-doc-{j:02d}", mt))
+        # 18 total, target = 3*1 = 3 → must return exactly 3
+        result = sample_corpus(docs, min_docs=3, sample_factor=1, seed=42)
+        assert len(result) == 3, (
+            f"Expected exactly 3 documents (target), got {len(result)} — "
+            "floor-1 per stratum must not apply when n_active_strata > target"
+        )
+
+    def test_low_target_deterministic_across_calls(self) -> None:
+        """6 strata, target=3 → same 3 docs returned on repeated calls with same seed."""
+        media_types = [
+            "application/pdf",
+            "text/html",
+            "text/plain",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "text/csv",
+            "image/png",
+        ]
+        docs: list[InventoryItem] = []
+        for i, mt in enumerate(media_types):
+            for j in range(3):
+                docs.append(_make_item(f"det-stratum-{i:02d}-doc-{j:02d}", mt))
+        result_a = sample_corpus(docs, min_docs=3, sample_factor=1, seed=77)
+        result_b = sample_corpus(docs, min_docs=3, sample_factor=1, seed=77)
+        assert [d.document_id for d in result_a] == [d.document_id for d in result_b], (
+            "Repeated calls with same seed must return identical results"
+        )
+
+    def test_default_params_large_corpus_returns_correct_count(self) -> None:
+        """Default-like params (target >> strata) return exactly target docs."""
+        # 3 strata, target = 100 — existing behavior must be preserved
+        docs = _make_corpus(300)  # 300 docs, 3 strata cycling
+        result = sample_corpus(docs, min_docs=100, sample_factor=1, seed=42)
+        assert len(result) == 100, (
+            f"Expected 100 documents (min_docs*sample_factor), got {len(result)}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # enumerate_candidates — budget capping (D-07)
