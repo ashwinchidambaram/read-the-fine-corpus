@@ -50,6 +50,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+from finecorpus.contracts.eval_set import ConfidenceLevel
 from finecorpus.pipeline.artifact_store import ArtifactStore, ArtifactStoreError
 
 # ---------------------------------------------------------------------------
@@ -143,6 +144,66 @@ def generate_report(
         exclusions_md=exclusions_md,
         findings_json=findings_json,
         exclusions_json=exclusions_json,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Confidence banner (§9.2, §19 criterion 3) — shared provisional-status surface
+# ---------------------------------------------------------------------------
+
+
+def render_confidence_banner(
+    *,
+    confidence_level: ConfidenceLevel,
+    n_total: int,
+    n_unreviewed: int,
+) -> str:
+    """Render a prominent multi-line confidence banner for an eval set (§9.2).
+
+    Provisional status must be inescapable on any surface that renders eval
+    results (§9.2, §19 criterion 3).  This helper is the single, dependency-free
+    source of the banner text, imported by the CLI (``corpus eval status``,
+    ``corpus eval sweep``) and by acceptance tests.
+
+    Args:
+        confidence_level: The set-level :class:`ConfidenceLevel`.
+        n_total: Total number of questions in the set.
+        n_unreviewed: Number of unreviewed (provisional) questions in the set.
+
+    Returns:
+        A prominent multi-line banner string.
+
+        When ``confidence_level`` is :attr:`ConfidenceLevel.provisional` OR any
+        question is unreviewed (``n_unreviewed > 0``), the banner contains the
+        word ``PROVISIONAL`` in uppercase, states the unreviewed count, and warns
+        that scores are NOT authoritative.  For a fully reviewed set the banner is
+        a calm "reviewed" confirmation.
+    """
+    is_provisional = confidence_level == ConfidenceLevel.provisional or n_unreviewed > 0
+
+    bar = "=" * 72
+    if is_provisional:
+        return "\n".join(
+            [
+                bar,
+                "  *** PROVISIONAL EVAL SET — SCORES ARE NOT AUTHORITATIVE ***",
+                bar,
+                f"  {n_unreviewed} of {n_total} question(s) are UNREVIEWED.",
+                "  This eval set is PROVISIONAL: any score computed against it",
+                "  reflects unreviewed, machine-generated questions and MUST NOT",
+                "  be treated as an authoritative measure of retrieval quality.",
+                "  Review the questions (corpus eval review) to raise confidence.",
+                bar,
+            ]
+        )
+
+    return "\n".join(
+        [
+            bar,
+            f"  Confidence: {confidence_level.value.upper()} — all {n_total} question(s) reviewed.",
+            "  Scores computed against this set are authoritative.",
+            bar,
+        ]
     )
 
 

@@ -17,6 +17,7 @@ from unittest.mock import patch
 
 import pytest
 
+from conftest import qdrant_integration_mark
 from finecorpus.contracts.eval_set import (
     ConfidenceLevel,
     EvalQuestion,
@@ -555,12 +556,102 @@ class TestProvisionalConfidencePropagates:
 # Run at phase close with: uv run pytest -m qdrant_integration tests/phase5/
 
 
-@pytest.mark.skip(reason="integration: requires Qdrant + Postgres containers — run at phase close")
+@qdrant_integration_mark
 def test_score_eval_set_real_qdrant():
-    """Integration test: score_eval_set against a live Qdrant collection.
+    """Integration: score_eval_set against a live Qdrant collection + Postgres.
 
-    Follows the pattern from tests/index/test_integration.py.
-    Skipped by default; activate at phase close with:
+    Exercises the PRODUCTION scoring path end-to-end on real infrastructure (no
+    FakeAdapter): build a shadow collection, upsert a real provenance-complete
+    point, promote its alias in Postgres, then score an eval set whose expected
+    segment is that point's chunk_id.  Because the retrieval path resolves the
+    alias from Postgres and searches real Qdrant, a recall of 1.0 proves the
+    real adapter + real retrieval + real scoring agree (guards the fake-vs-real
+    trap for the sweep/drift scoring core).
+
+    Run at phase close with:
         uv run pytest -m qdrant_integration tests/phase5/test_eval_scoring.py
     """
-    pass  # Full implementation deferred to phase-close overlay.
+    from sqlalchemy.orm import Session  # noqa: PLC0415
+
+    from finecorpus.contracts.chunk_id import derive_chunk_id  # noqa: PLC0415
+    from finecorpus.contracts.eval_set import (  # noqa: PLC0415
+        EvalQuestion,
+        GenerationMethod,
+        QuestionType,
+        ReviewStatus,
+    )
+    from finecorpus.control.metadata import (  # noqa: PLC0415
+        AliasRepository,
+        create_tables,
+    )
+    from finecorpus.control.metadata import create_engine as mk_engine  # noqa: PLC0415
+    from finecorpus.index.adapter import ModelIdentity  # noqa: PLC0415
+    from finecorpus.index.lifecycle import create_shadow, promote  # noqa: PLC0415
+    from finecorpus.index.qdrant.backend import QdrantAdapter  # noqa: PLC0415
+
+    # Helpers reused from the index integration suite (real point builder).
+    from tests.index.test_integration import (  # noqa: PLC0415
+        POSTGRES_DSN,
+        QDRANT_URL,
+        _make_chunk_point,
+        _unique_kb,
+    )
+
+    kb_id = _unique_kb()
+    ws_id = "ws_eval_integration"
+    model = ModelIdentity(
+        provider="fake", model="fake-embed-v1", dimensions=4, config_version="cfg_v1"
+    )
+    adapter = QdrantAdapter(url=QDRANT_URL, timeout=10)
+    engine = mk_engine(POSTGRES_DSN)
+    create_tables(engine)
+
+    try:
+        with Session(engine) as session:
+            ctx = create_shadow(adapter, kb_id, ws_id, build_id=1, model_identity=model)
+            doc_id = "doc_eval_001"
+            adapter.upsert_points(
+                ctx.shadow_collection,
+                [_make_chunk_point(doc_id, 0, "the answer chunk", kb_id, ws_id, model)],
+            )
+            repo = AliasRepository(session)
+            if repo.get(alias_name(kb_id)) is None:
+                repo.create(alias=alias_name(kb_id), kb_id=kb_id, workspace_id=ws_id)
+                session.commit()
+            promote(adapter, session, ctx, expected_min_chunks=1)
+
+            # The expected segment is the seeded point's real chunk_id.
+            expected_chunk_id = derive_chunk_id(
+                document_id=doc_id,
+                content_hash="abc123",
+                config_version="cfg_v1",
+                segment_path="intro",
+                chunk_index=0,
+            )
+            questions = [
+                EvalQuestion(
+                    question_id="q-int-001",
+                    text="What is the answer chunk about?",
+                    generation_method=GenerationMethod.generated_factual,
+                    review_status=ReviewStatus.reviewed_kept,
+                    source_segment_ids=[expected_chunk_id],
+                    source_unknown=False,
+                    question_type=QuestionType.factual_lookup,
+                    expected_segment_ids=[expected_chunk_id],
+                )
+            ]
+
+            result = score_eval_set(
+                questions,
+                kb_id=kb_id,
+                adapter=adapter,
+                provider=FakeProvider(dimensions=4, model_id="fake-embed-v1"),
+                session=session,
+                k=5,
+            )
+
+            # Single-point collection → the expected chunk is retrieved → recall 1.0.
+            assert result.n_scored == 1
+            assert result.recall == pytest.approx(1.0)
+    finally:
+        engine.dispose()
