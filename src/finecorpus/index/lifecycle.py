@@ -1460,16 +1460,20 @@ def restore_from_snapshot(
             f"restore_snapshot failed for snapshot '{ref.snapshot_id}' -> '{new_coll}': {exc}"
         ) from exc
 
-    # Set the unreplayed marker — blocks promote() until we clear it
+    # Set the unreplayed marker — blocks promote() until we clear it.
+    # M-087 (erasure-integrity): the marker is the ONLY thing that keeps a
+    # freshly-restored collection out of promote() until tombstones are replayed.
+    # If we cannot record it, the collection would be silently promotable with
+    # un-replayed deletions — an erasure-integrity gap.  Fail the restore closed
+    # rather than warn-and-proceed.
     try:
         adapter.set_collection_metadata(new_coll, {_RESTORED_UNREPLAYED_MARKER_KEY: "true"})
     except Exception as exc:
-        logger.warning(
-            "restore_from_snapshot: failed to set unreplayed marker on '%s': %s "
-            "(promote() will NOT be blocked — safety degraded)",
-            new_coll,
-            exc,
-        )
+        raise SnapshotLifecycleError(
+            f"restore_from_snapshot: failed to set unreplayed marker on '{new_coll}': {exc}. "
+            "Restore aborted — a collection that cannot record the unreplayed marker "
+            "must not become promotable (M-087 erasure-integrity)."
+        ) from exc
 
     # ------------------------------------------------------------------
     # Step 2: Replay all unreplayed tombstones for this KB

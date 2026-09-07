@@ -151,3 +151,50 @@ def test_no_network_beyond_recorded_interactions() -> None:
     conn = _authed(RecordedHTTPClient([]))
     with pytest.raises(UnmatchedRequestError):
         conn.list_documents()
+
+
+def test_anonymous_link_maps_to_anyone_token_which_is_NOT_special_cased_public() -> None:
+    """Pin the intended semantics of the SharePoint anonymous-link mapping (MINOR-2).
+
+    An anonymous sharing link (``link.scope == "anonymous"``) maps to the literal
+    principal token ``"anyone"`` in ``principals_read``.
+
+    FINDING (pinned here, not papered over): this token is an ORDINARY,
+    opaque principal string.  Nothing downstream — not the pipeline
+    (plan/assess/build), the §14.3 permission gate, the index backends, nor the
+    retrieval matcher — special-cases ``"anyone"`` as genuinely-public.  At read
+    time the retrieval filter requires ``tenancy.permission_principals`` to
+    *contain the authenticated principal's principal_id* (retrieval/service.py
+    ``_build_payload_filter``); it does NOT treat ``permission_mode`` /
+    ``public_to_kb`` off the back of an ``"anyone"`` token, and no principal's
+    ``principal_id`` is literally ``"anyone"``.
+
+    Net effect: an anonymous-link SharePoint doc becomes UNreadable to normal
+    principals (fail-CLOSED — not a data-leak, but genuinely-public content is
+    not discoverable via the ``"anyone"`` token alone).  This test pins that
+    behaviour so any future change to public semantics is a deliberate, tested
+    decision rather than an accident.
+    """
+    from finecorpus.connectors.sharepoint import _principals
+
+    # Anonymous link -> "anyone".
+    anon = {"link": {"scope": "anonymous"}}
+    assert _principals(anon) == ["anyone"], (
+        "an anonymous sharing link must map to the 'anyone' token"
+    )
+
+    # A non-anonymous (organization/direct) link must NOT emit "anyone".
+    org = {"link": {"scope": "organization"}}
+    assert "anyone" not in _principals(org)
+
+    # Pin: "anyone" is a plain principal token, not a public sentinel recognised
+    # anywhere in the permission model.  The retrieval matcher only ever tests
+    # membership of the reader's principal_id in permission_principals; there is
+    # no "anyone"/public bypass.  If this ever becomes public-by-token, the
+    # assertion below must be updated deliberately.
+    from finecorpus.contracts.shared.blocks import PermissionMode
+
+    assert not hasattr(PermissionMode, "anyone")
+    assert "anyone" not in {m.value for m in PermissionMode}, (
+        "'anyone' must not silently become a PermissionMode value"
+    )

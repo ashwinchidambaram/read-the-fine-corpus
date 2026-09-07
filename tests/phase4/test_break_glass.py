@@ -706,3 +706,123 @@ class TestAuditFailureFailsClosed:
             "audit persistence failure must fail closed, not serve content"
         )
         assert not response.results, "no content may be served without a durable audit record"
+
+
+class TestBreakGlassRouteReadRoundtrip:
+    """F-1: the grant issued through the REST route MUST be found at read time.
+
+    The route derives the admin identity from a validated key and stores it as
+    ``granting_admin_id``; the retrieval read path validates the grant via
+    ``active_grant_for(kb_id, principal.principal_id)``.  These MUST use the
+    SAME stable identity (``principal_id`` = key_id), even when the admin's
+    human ``name`` differs from its ``principal_id``.
+
+    Fail-then-pass: with the old code (route stored ``principal.name``), the
+    read-time lookup keyed on ``principal_id`` never matches and the read fails
+    closed with PERMISSION_DENIED.  After the fix (route stores
+    ``principal.principal_id``), the read is AUTHORIZED.
+    """
+
+    def test_route_issued_grant_matches_read_when_name_differs_from_principal_id(
+        self,
+    ) -> None:
+        from contextlib import contextmanager
+
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from sqlalchemy.pool import StaticPool
+
+        from finecorpus.control.auth import ApiKeyRepository
+        from finecorpus.services.control_routes import break_glass as bg_routes
+
+        # Dedicated thread-safe engine: the TestClient runs the route in a
+        # separate thread, so the shared module-scoped SQLite engine cannot be
+        # reused here.  The route factory and the retrieval read share it.
+        engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        create_tables(engine)
+
+        @contextmanager
+        def factory():  # type: ignore[no-untyped-def]
+            s = Session(engine)
+            try:
+                yield s
+                s.commit()
+            finally:
+                s.close()
+
+        # Issue an admin key.  key_id (= principal_id) is a random hex token and
+        # is therefore GUARANTEED to differ from the human principal_name.
+        with factory() as s:
+            plaintext, key_record = ApiKeyRepository(s).issue(
+                principal_name="Root Admin (Incident Response)",
+                role=Role.admin,
+                scope_kind=ScopeKind.global_,
+                created_by="test",
+            )
+            # Read the identity fields while the record is still session-bound
+            # (it detaches once the factory context closes).
+            admin_principal_id = key_record.key_id
+            admin_name = key_record.principal_name
+        assert admin_name != admin_principal_id, (
+            "test precondition: the admin's display name must differ from its principal_id"
+        )
+
+        # Issue the grant through the REST route (exercises _require_admin_id).
+        bg_routes._session_factory = factory  # noqa: SLF001
+        app = FastAPI()
+        app.include_router(bg_routes.router)
+        client = TestClient(app)
+        resp = client.post(
+            "/admin/break-glass/grant",
+            json={"target_kb_id": KB_A, "reason": "F-1 roundtrip: route->read"},
+            headers={"X-API-Key": plaintext},
+        )
+        assert resp.status_code == 200, resp.text
+        grant_body = resp.json()
+        grant_id = grant_body["grant_id"]
+
+        # The route must store the STABLE identity (principal_id), not the name.
+        assert grant_body["granting_admin_id"] == admin_principal_id, (
+            "route must store principal_id as granting_admin_id (F-1), not the human name"
+        )
+        assert grant_body["granting_admin_id"] != admin_name
+
+        # Now perform a break-glass retrieval read with a Principal whose
+        # principal_id == the key's key_id and whose name differs.  This is the
+        # exact identity the read path looks up via active_grant_for.
+        read_principal = Principal(
+            principal_id=admin_principal_id,
+            name=admin_name,
+            role=Role.admin,
+            scope_kind=ScopeKind.global_,
+            workspace_id=None,
+            kb_id=None,
+        )
+
+        adapter = FakeAdapter()
+        adapter.seed_collection(alias_name(KB_A), COLL_A, [_make_chunk("chk-a-001", KB_A)])
+        alias_records = {alias_name(KB_A): _make_alias_record(KB_A, WS_A, COLL_A)}
+
+        with Session(engine) as read_session:
+            response = _run_service_query(
+                kb_id=KB_A,
+                adapter=adapter,
+                alias_records=alias_records,
+                session=read_session,
+                principal=read_principal,
+                auth_enabled=True,
+                break_glass_grant_id=grant_id,
+            )
+
+        # AUTHORIZED: grant found, content served.  This FAILS with the old
+        # `.name` code (grant keyed on name, lookup keyed on principal_id ->
+        # PERMISSION_DENIED) and PASSES after the F-1 fix.
+        assert response.result_status == ResultStatus.matches, (
+            f"route-issued grant must be found at read time; got {response.error}"
+        )
+        assert response.break_glass_read_ref is not None
+        assert any(r.chunk_id == "chk-a-001" for r in response.results)
