@@ -335,15 +335,33 @@ class TestExtraForbid:
 
 
 class TestM032M033M034FlagFields:
-    """M-032/M-033/M-034 flag fields exist with correct defaults."""
+    """M-032/M-034 flag fields exist with correct defaults.
+
+    M-033 (diff_preview_required) is NOT on TransformationSettings: it lives only on
+    Tier3Settings, the field Build reads/enforces (§7.2). The duplicated dead copy on
+    TransformationSettings was removed, so it must be rejected here (extra="forbid").
+    """
 
     def test_m032_retain_original_ref_default_false(self) -> None:
         t = _make_transformation()
         assert t.retain_original_ref is False
 
-    def test_m033_diff_preview_required_default_false(self) -> None:
+    def test_m033_diff_preview_required_not_on_transformation_settings(self) -> None:
+        """The dead duplicate was removed — TransformationSettings has no such field."""
         t = _make_transformation()
-        assert t.diff_preview_required is False
+        assert not hasattr(t, "diff_preview_required")
+
+    def test_m033_diff_preview_required_rejected_as_extra_key(self) -> None:
+        """extra='forbid' rejects the removed field (it lives on Tier3Settings only)."""
+        with pytest.raises(ValidationError):
+            TransformationSettings(
+                tier1_enabled=True,
+                tier1_operations=[],
+                tier2_enabled=False,
+                tier2_operations=[],
+                tier3_enabled=False,
+                diff_preview_required=False,  # type: ignore[call-arg]
+            )
 
     def test_m034_mark_rewritten_chunks_default_false(self) -> None:
         t = _make_transformation()
@@ -357,11 +375,12 @@ class TestM032M033M034FlagFields:
     def test_flag_fields_in_canonical_json(self) -> None:
         config = _make_minimal_config()
         result = json.loads(to_canonical_json(config))
-        # The default_rule transformation should carry the flag fields
+        # The default_rule transformation should carry the remaining flag fields
         tr = result["default_rule"]["transformation"]
         assert "retain_original_ref" in tr
-        assert "diff_preview_required" in tr
         assert "mark_rewritten_chunks" in tr
+        # M-033 removed from TransformationSettings (lives on Tier3Settings only)
+        assert "diff_preview_required" not in tr
 
 
 # ---------------------------------------------------------------------------

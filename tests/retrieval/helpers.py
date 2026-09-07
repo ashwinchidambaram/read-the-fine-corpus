@@ -467,6 +467,7 @@ def make_chunk_payload(
     score: float = 0.9,
     source_document_id: str = "doc-001",
     permission_principals: list[str] | None = None,
+    original_text: str | None = None,
 ) -> dict[str, Any]:
     """Build a Qdrant point dict with a full payload (ready for FakeAdapter.seed_collection).
 
@@ -499,17 +500,22 @@ def make_chunk_payload(
     if permission_principals is not None:
         tenancy["permission_principals"] = list(permission_principals)
 
+    payload: dict[str, Any] = {
+        "chunk_id": chunk_id,
+        "text": text,
+        "tenancy": tenancy,
+        "provenance": make_provenance_payload(
+            source_document_id=source_document_id,
+        ),
+    }
+    if original_text is not None:
+        # D-14 / §7.2 C-R7: Tier-3 chunks carry the canonical original alongside `text`.
+        payload["original_text"] = original_text
+
     return {
         "id": chunk_id,
         "score": score,
-        "payload": {
-            "chunk_id": chunk_id,
-            "text": text,
-            "tenancy": tenancy,
-            "provenance": make_provenance_payload(
-                source_document_id=source_document_id,
-            ),
-        },
+        "payload": payload,
     }
 
 

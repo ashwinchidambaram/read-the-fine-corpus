@@ -8,7 +8,18 @@ byte-identical to the Tier-1-normalized canonical source unless a Tier 3 transfo
 is recorded. Tier 2 augmentation is stored in separate fields. Its ID is deterministic
 under §10.5.
 
+When a Tier 3 (tier=3, changed_text=True) transformation rewrote the chunk, ``text`` holds
+the REWRITTEN form and ``original_text`` retains the canonical Tier-1 text so the original
+is visible at citation time (§7.2 C-R7, D-14). ``original_text`` is None for every non-Tier-3
+chunk.
+
 Chunk identity derivation lives in finecorpus.contracts.chunk_id.
+
+Version history:
+- 1.0.0: Initial contract.
+- 1.1.0: MINOR bump — added ``original_text: str | None`` (D-14, §7.2 C-R7). Populated only
+  when a Tier 3 rewrite changed the chunk text; None otherwise. Nullable/defaulted, so consumers
+  built for 1.0.0 still validate 1.1.0 chunks.
 """
 
 from __future__ import annotations
@@ -94,6 +105,9 @@ class Chunk(BaseModel):
     - Provenance complete for every chunk — non-null Provenance, every subfield present (§8, §12).
     - text is byte-identical to the span of the Tier-1-normalized canonical source unless
       a tier=3, changed_text=True transformation is recorded (§7.2, §12).
+    - original_text is non-None iff a tier=3, changed_text=True transformation rewrote the
+      chunk; it holds the canonical Tier-1 text so the original is visible at citation time
+      (§7.2 C-R7, D-14). It is None for every non-Tier-3 chunk.
     - Tier 2 separation: all augmentation is in augmentation/embedding_input, never in text (§7.2).
     - Deterministic ID: chunk_id derives solely from document_id, content_hash, config_version,
       segment_path, chunk_index — no randomness, no sequence, no wall-clock (§10.5).
@@ -130,6 +144,15 @@ class Chunk(BaseModel):
             "canonical source unless a tier=3, changed_text=True transformation is recorded. "
             "This is what the caller receives."
         )
+    )
+    original_text: str | None = Field(
+        default=None,
+        description=(
+            "The canonical Tier-1 text this chunk was rewritten FROM (§7.2 C-R7, D-14). "
+            "Populated ONLY when a tier=3, changed_text=True transformation rewrote the chunk "
+            "(``text`` then holds the rewritten form). None for every non-Tier-3 chunk. "
+            "Surfaced at citation time so the original is always visible alongside the rewrite."
+        ),
     )
     augmentation: Augmentation = Field(
         description=(

@@ -17,6 +17,10 @@ Version history:
   reference), ErrorCode.RATE_LIMITED (§11.3 HTTP 429), ExplainCandidate.permission_resolved_at
   (D-17 tenancy staleness surface). All additions are nullable/defaulted; consumers at 1.1
   still validate successfully.
+- 1.3.0: MINOR bump — added RetrievalResult.original_text (§7.2 C-R7, D-14): the canonical
+  Tier-1 text a Tier-3-rewritten chunk was rewritten from, surfaced at citation time so the
+  original is always visible alongside the rewrite. Nullable/defaulted; 1.1+ consumers still
+  validate successfully.
 """
 
 from __future__ import annotations
@@ -162,7 +166,18 @@ class RetrievalResult(BaseModel):
 
     chunk_id: str = Field(description="The chunk's deterministic ID (chunk.md).")
     text: str = Field(
-        description=("The served chunk text (the Tier-1-normalized canonical text; chunk.md).")
+        description=(
+            "The served chunk text (the Tier-1-normalized canonical text; chunk.md). "
+            "For a Tier-3-rewritten chunk this is the REWRITTEN form."
+        )
+    )
+    original_text: str | None = Field(
+        default=None,
+        description=(
+            "The canonical Tier-1 text this chunk was rewritten FROM (§7.2 C-R7, D-14). "
+            "Non-null ONLY for a Tier-3-rewritten chunk, so the original is visible at "
+            "citation time alongside the rewritten `text`. None for every non-Tier-3 chunk."
+        ),
     )
     provenance: Provenance = Field(
         description=(

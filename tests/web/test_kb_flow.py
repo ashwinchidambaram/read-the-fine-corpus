@@ -226,7 +226,6 @@ def test_proficient_renders_every_recommender_field_as_input(
                 "tier3_enabled": False,
                 "tier3_settings": None,
                 "retain_original_ref": False,
-                "diff_preview_required": False,
                 "mark_rewritten_chunks": False,
             },
             "chunking": {

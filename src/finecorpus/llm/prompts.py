@@ -381,9 +381,7 @@ def build_rewriting_prompt(
 ) -> tuple[str, str]:
     """Return ``(system_message, user_message)`` for Tier 3 rewriting.
 
-    Note: the ``run_operation`` call for rewriting raises
-    ``Tier3NotImplementedError`` in Phase 3.  This prompt builder exists
-    so that the operation is fully specified; it will be wired in Phase 7.
+    Wired into ``run_rewriting`` (operations.py) in Phase 7.
 
     The ``rewrite_instructions`` are platform-generated (never user free-text)
     and are placed in the SYSTEM message as part of the instruction frame.

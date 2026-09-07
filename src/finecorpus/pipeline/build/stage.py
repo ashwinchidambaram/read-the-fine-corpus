@@ -146,7 +146,9 @@ _BUILD_RESULT_SCHEMA_VERSION = "1.0.0"
 _UPSERT_BATCH_SIZE = 100
 
 # Chunk schema version stamped on every chunk payload.
-_CHUNK_SCHEMA_VERSION = "1.0.0"
+# 1.1.0: MINOR bump — added Chunk.original_text (D-14, §7.2 C-R7). Populated only for
+# Tier-3-rewritten chunks; None otherwise. SUPPORTED_CHUNK stays at min_minor=0 (MINOR-compatible).
+_CHUNK_SCHEMA_VERSION = "1.1.0"
 
 
 # ---------------------------------------------------------------------------
@@ -366,8 +368,9 @@ def _process_segment_set(
     doc_build_id: int,
     llm_client_factory: Any | None,
     dry_run: bool,
+    tier3_clients: dict[Any, Any] | None = None,
 ) -> tuple[int, list[dict[str, Any]], list[dict[str, Any]]]:
-    """Process one SegmentSet: tier1 + chunk + tier2 + embed + upsert.
+    """Process one SegmentSet: tier1 + chunk + tier2 + (tier3) + embed + upsert.
 
     Args:
         segment_set_dict: Raw SegmentSet dict from the batch.
@@ -379,6 +382,14 @@ def _process_segment_set(
         llm_client_factory: Callable(content_hash, segment_path) -> AugmentationClient | None.
             None means no tier2 augmentation.
         dry_run: When True, skip embedding and upsert; return chunks inline.
+        tier3_clients: Optional map of ``segment_class`` -> ``Tier3RewriteClient``.
+            A segment is rewritten with the client for ITS resolved class rule's
+            ``segment_class`` — never a different class's client (MAJOR-1: each
+            tier-3 chunk's ``TransformationRecord.model_ref`` equals its own class
+            rule's configured ``tier3_settings.model_ref``).  ``original_text``
+            retains the canonical Tier-1 slice and a tier=3, changed_text=True
+            TransformationRecord is recorded (§7.2, D-14).  None/empty means Tier 3
+            is off for every class — chunks are byte-identical (T-04).
 
     Returns:
         (chunk_count, skipped_info_list, inline_chunks)
@@ -490,9 +501,59 @@ def _process_segment_set(
         ):
             seg_llm_client = llm_client_factory(content_hash, seg.segment_path)
 
+        # ------------------------------------------------------------------
+        # Tier 3 is per-class opt-in (§7.2, M-035 forbids it on default_rule).
+        # It applies ONLY when the class rule enables it AND a rewrite client
+        # for THIS segment's resolved class was injected.  When off, span.text
+        # flows through byte-identical (T-04).
+        #
+        # MAJOR-1: the client is selected per the segment's ACTUAL resolved
+        # class rule (keyed by rule.segment_class), so every tier-3 chunk's
+        # TransformationRecord.model_ref equals its own class rule's configured
+        # tier3_settings.model_ref — never the first tier3-enabled rule's.
+        # ------------------------------------------------------------------
+        seg_tier3_client = None
+        if rule.transformation.tier3_enabled and tier3_clients:
+            seg_tier3_client = tier3_clients.get(rule.segment_class)
+        tier3_active = seg_tier3_client is not None
+        diff_preview_required = bool(
+            rule.transformation.tier3_settings is not None
+            and rule.transformation.tier3_settings.diff_preview_required
+        )
+
         for span in spans:
             # --------------------------------------------------------------
-            # Tier 2: Augmentation (does NOT touch span.text — T-04)
+            # Tier 3: Full rewriting (§7.2).  The canonical Tier-1 span text is
+            # retained as original_text; the served text becomes the rewrite.
+            # --------------------------------------------------------------
+            original_text: str | None = None
+            served_text = span.text
+            tier3_records: list[TransformationRecord] = []
+            diff_preview: str | None = None
+
+            if tier3_active and seg_tier3_client is not None:
+                rewrite = seg_tier3_client.rewrite(span.text, class_description)
+                original_text = span.text  # D-14: canonical Tier-1 text retained
+                served_text = rewrite.rewritten_text
+                tier3_records = [rewrite.record]
+                # §7.2 MUST (MAJOR-2): when diff_preview_required, the diff is
+                # generated and PERSISTED for EVERY tier-3 rewrite — on the commit
+                # (non-dry-run) path as well as dry-run. A rewrite may not commit
+                # without a recorded diff. If the diff cannot be produced, fail loud.
+                if diff_preview_required:
+                    from finecorpus.pipeline.build.diff_preview import render_tier3_diff
+
+                    diff_preview = render_tier3_diff(original_text, served_text)
+                    if not diff_preview:
+                        raise RuntimeError(
+                            "Tier 3 diff_preview_required=True but the diff could not be "
+                            f"produced for chunk in document {document_id}, segment "
+                            f"{seg.segment_path}. Refusing to commit an unpreviewed rewrite "
+                            "(§7.2 MUST)."
+                        )
+
+            # --------------------------------------------------------------
+            # Tier 2: Augmentation (does NOT touch served text)
             # --------------------------------------------------------------
             augmentation = Augmentation()
             tier2_aug_records: list[TransformationRecord] = []
@@ -512,13 +573,13 @@ def _process_segment_set(
                     # call_count is tracked at factory level; just note it
                     pass
 
-            # Compose embedding input (framing augmentation around chunk text)
+            # Compose embedding input (framing augmentation around the served text)
             embedding_input, tier2_compose_records = compose_embedding_input(
-                augmentation, span.text
+                augmentation, served_text
             )
 
-            # All transformation records in pipeline order
-            all_records = tier1_records + tier2_aug_records + tier2_compose_records
+            # All transformation records in pipeline order (tier1 → tier3 → tier2)
+            all_records = tier1_records + tier3_records + tier2_aug_records + tier2_compose_records
 
             # --------------------------------------------------------------
             # IDs and provenance
@@ -559,45 +620,61 @@ def _process_segment_set(
                 ),
             }
 
+            # extra payload fields; original_text is only stored for Tier-3 chunks
+            # (None for non-Tier-3 chunks keeps the payload byte-identical — T-04).
+            extra_payload: dict[str, Any] = {
+                "schema_version": _CHUNK_SCHEMA_VERSION,
+                "chunk_index": span.chunk_index,
+                "token_count": span.token_count,
+                "embedding_input": embedding_input,
+                # Char offsets within segment, for explain mode
+                "chunk_char_start": span.char_start,
+                "chunk_char_end": span.char_end,
+            }
+            if original_text is not None:
+                # D-14 / §7.2 C-R7: original visible at citation time.
+                extra_payload["original_text"] = original_text
+            if diff_preview is not None:
+                # §7.2 MUST (MAJOR-2): persist the diff on the COMMIT path so every
+                # required-diff tier-3 rewrite is auditable/reviewable after the fact.
+                # A tier-3 chunk cannot be committed without this when required.
+                extra_payload["diff_preview"] = diff_preview
+
             payload = build_point_payload(
                 chunk_id=chunk_id,
                 provenance=provenance_dict,
                 tenancy=tenancy_dict,
-                text=span.text,  # T-04: chunk text is the pure canonical slice
+                # served_text == span.text unless Tier 3 rewrote it (T-04 unaffected off-tier3).
+                text=served_text,
                 embedding_ref=embedding_ref_dict,
                 augmentation=augmentation_dict,
-                extra={
-                    "schema_version": _CHUNK_SCHEMA_VERSION,
-                    "chunk_index": span.chunk_index,
-                    "token_count": span.token_count,
-                    "embedding_input": embedding_input,
-                    # Char offsets within segment, for explain mode
-                    "chunk_char_start": span.char_start,
-                    "chunk_char_end": span.char_end,
-                },
+                extra=extra_payload,
             )
 
             if dry_run:
                 # Emit chunk inline for preview
-                inline_chunks.append(
-                    {
-                        "chunk_id": chunk_id,
-                        "point_id": str(point_id),
-                        "text": span.text,
-                        "embedding_input": embedding_input,
-                        "augmentation": augmentation_dict,
-                        "provenance": provenance_dict,
-                        "chunk_index": span.chunk_index,
-                        "token_count": span.token_count,
-                        "document_id": document_id,
-                        "segment_path": seg.segment_path,
-                        # Position offsets within canonical text (for T-04 position-exact check)
-                        "char_start": span.char_start,
-                        "char_end": span.char_end,
-                        # Canonical text (tier-1 output) for T-04 position-exact comparison
-                        "canonical_text": canonical_text,
-                    }
-                )
+                inline_chunk: dict[str, Any] = {
+                    "chunk_id": chunk_id,
+                    "point_id": str(point_id),
+                    "text": served_text,
+                    "original_text": original_text,
+                    "embedding_input": embedding_input,
+                    "augmentation": augmentation_dict,
+                    "provenance": provenance_dict,
+                    "chunk_index": span.chunk_index,
+                    "token_count": span.token_count,
+                    "document_id": document_id,
+                    "segment_path": seg.segment_path,
+                    # Position offsets within canonical text (for T-04 position-exact check)
+                    "char_start": span.char_start,
+                    "char_end": span.char_end,
+                    # Canonical text (tier-1 output) for T-04 position-exact comparison
+                    "canonical_text": canonical_text,
+                }
+                if diff_preview is not None:
+                    # §7.2 / §7.4: diff preview surfaced when diff_preview_required.
+                    inline_chunk["diff_preview"] = diff_preview
+                inline_chunks.append(inline_chunk)
             else:
                 texts_buffer.append(embedding_input)
                 chunk_meta_buffer.append(
@@ -685,6 +762,7 @@ class BuildStage(Stage):
         dry_run: bool = False,
         llm_provider: Any | None = None,
         llm_op_config: Any | None = None,
+        tier3_op_config: Any | None = None,
     ) -> None:
         self._run_started_at = run_started_at or datetime.now(tz=UTC)
         self._provider = embedding_provider
@@ -697,6 +775,9 @@ class BuildStage(Stage):
         self._dry_run = dry_run
         self._llm_provider = llm_provider
         self._llm_op_config = llm_op_config
+        # Optional ResolvedOpConfig for the Tier 3 rewriting operation. When None,
+        # the augmentation op_config is reused with the tier3 model_ref applied.
+        self._tier3_op_config = tier3_op_config
 
     def _produce(self, input_data: dict[str, Any] | None) -> dict[str, Any]:
         """Produce a BuildResult artifact.
@@ -845,6 +926,12 @@ class BuildStage(Stage):
                 run_dir=run_dir,
             )
 
+        # Build the per-class-rule Tier 3 rewrite clients if any class opts in (§7.2).
+        # Tier 3 is per-class opt-in; when no class enables it OR no LLM provider is
+        # injected, the map is empty → chunks byte-identical (T-04 unaffected).
+        # MAJOR-1: keyed by segment_class so each class stamps its own model_ref.
+        tier3_clients = self._build_tier3_clients(ingestion_config)
+
         for seg_set_dict in segment_batch.segment_sets:
             doc_id = seg_set_dict.get("document_id", "")
 
@@ -863,6 +950,7 @@ class BuildStage(Stage):
                 doc_build_id=self._build_id,
                 llm_client_factory=llm_factory,
                 dry_run=self._dry_run,
+                tier3_clients=tier3_clients,
             )
 
             if chunk_count == 0:
@@ -883,9 +971,11 @@ class BuildStage(Stage):
             total_input_tokens = counting_provider.total_input_tokens
             total_embed_calls = counting_provider.total_embed_calls
 
-        # Collect LLM call count
+        # Collect LLM call count (Tier 2 table descriptions + Tier 3 rewrites)
         if llm_factory is not None:
             llm_total_calls = llm_factory.total_call_count
+        for _client in tier3_clients.values():
+            llm_total_calls += _client.call_count
 
         # Validate shadow (skip in dry_run)
         validation_passed = True  # dry_run always "passes"
@@ -996,6 +1086,82 @@ class BuildStage(Stage):
                 "Has the Decompose stage run for this run_id?"
             )
         return json.loads(path.read_text(encoding="utf-8"))
+
+    def _build_tier3_clients(self, ingestion_config: IngestionConfig) -> dict[Any, Any]:
+        """Build a per-class-rule map of Tier3RewriteClients (§7.2).
+
+        Returns a dict keyed by ``segment_class`` -> ``Tier3RewriteClient``. It is
+        EMPTY when:
+        - no LLM provider was injected, OR
+        - no class rule (default_rule is forbidden by M-035) enables tier3, OR
+        - no op_config is available to run Tier 3 safely.
+
+        MAJOR-1: each tier3-enabled class rule gets its OWN client built from THAT
+        rule's ``tier3_settings.model_ref`` (§14.2: a name, never a secret). At
+        rewrite time the segment's resolved class rule selects its own client, so
+        every tier-3 chunk's ``TransformationRecord.model_ref`` matches its class's
+        configured model_ref — a build with two tier3-enabled classes with different
+        model_refs stamps each class's chunks with the correct per-class identity.
+
+        A dedicated ``tier3_op_config`` may be injected; otherwise the augmentation
+        op_config is reused with each class's tier3 model_ref substituted. When Tier 3
+        is off for every class the map is empty — chunks stay byte-identical (T-04).
+        """
+        clients: dict[Any, Any] = {}
+        if self._llm_provider is None:
+            return clients
+
+        from finecorpus.llm.operations import ResolvedOpConfig
+        from finecorpus.pipeline.build.rewrite_client import Tier3RewriteClient
+
+        for rule in ingestion_config.class_rules:
+            if not (
+                rule.transformation.tier3_enabled and rule.transformation.tier3_settings is not None
+            ):
+                continue
+
+            settings = rule.transformation.tier3_settings
+            model_ref = settings.model_ref
+
+            if self._tier3_op_config is not None:
+                # A dedicated tier3 op_config still routes through the per-class model_ref
+                # so each class's provenance is stamped with its own model identity.
+                base = self._tier3_op_config
+                op_config = ResolvedOpConfig(
+                    provider_id=base.provider_id,
+                    model_id=model_ref,
+                    temperature=base.temperature,
+                    max_output_tokens=base.max_output_tokens,
+                    max_retries=base.max_retries,
+                )
+            elif self._llm_op_config is not None:
+                # Reuse the augmentation op_config but rewrite the model id to this
+                # class rule's tier3 model_ref.
+                base = self._llm_op_config
+                op_config = ResolvedOpConfig(
+                    provider_id=base.provider_id,
+                    model_id=model_ref,
+                    temperature=base.temperature,
+                    max_output_tokens=base.max_output_tokens,
+                    max_retries=base.max_retries,
+                )
+            else:
+                # No op_config at all — cannot run Tier 3 safely; skip (byte-identical).
+                logger.warning(
+                    "build: class rule %s enables Tier 3 but no llm_op_config/tier3_op_config "
+                    "was provided; skipping Tier 3 rewriting for this class (chunks stay "
+                    "byte-identical).",
+                    rule.segment_class,
+                )
+                continue
+
+            clients[rule.segment_class] = Tier3RewriteClient(
+                provider=self._llm_provider,
+                op_config=op_config,
+                model_ref=model_ref,
+            )
+
+        return clients
 
 
 # ---------------------------------------------------------------------------

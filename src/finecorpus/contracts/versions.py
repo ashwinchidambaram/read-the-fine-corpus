@@ -149,9 +149,12 @@ History:
   ExplainCandidate.permission_resolved_at (all nullable/defaulted; MINOR-compatible).
   SpecRange stays at min_minor=1 (MINOR: backward-compatible addition); consumers
   built for 1.1.0+ accept 1.2.0.
+- 1.3: added RetrievalResult.original_text (§7.2 C-R7, D-14; nullable/defaulted).
+  SpecRange stays at min_minor=1 (MINOR: backward-compatible addition); consumers
+  built for 1.1.0+ accept 1.3.0.
 """
 
-RETRIEVAL_RESPONSE_SCHEMA_VERSION = "1.2.0"
+RETRIEVAL_RESPONSE_SCHEMA_VERSION = "1.3.0"
 """Producer stamp for RetrievalResponse. Bump here when the contract MINOR/MAJOR changes."""
 
 

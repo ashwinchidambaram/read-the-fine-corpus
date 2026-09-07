@@ -99,7 +99,6 @@ def reference_ingestion_config(embedding: EmbeddingConfig) -> dict[str, Any]:
         tier3_enabled=False,
         tier3_settings=None,
         retain_original_ref=False,
-        diff_preview_required=False,
         mark_rewritten_chunks=False,
     )
     return {

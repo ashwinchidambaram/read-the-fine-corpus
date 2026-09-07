@@ -21,7 +21,6 @@ from finecorpus.llm.operations import (
     ClassificationInput,
     ClassificationOutput,
     ContentType,
-    OperationNotImplementedError,
     QuestionGenInput,
     QuestionGenSegment,
     QuestionType,
@@ -291,7 +290,7 @@ class TestSchemaValidation:
 
 
 class TestDeferredOperations:
-    """question_generation is implemented in Phase 5; rewriting raises NotImplementedError."""
+    """question_generation (Phase 5) and rewriting (Phase 7 / Tier 3) are both implemented."""
 
     def test_question_generation_implemented_phase5(self) -> None:
         """run_question_generation is now implemented in Phase 5 — returns QuestionGenOutput."""
@@ -308,15 +307,20 @@ class TestDeferredOperations:
         assert isinstance(result, QuestionGenOutput)
         assert len(result.questions) >= 1
 
-    def test_rewriting_raises(self) -> None:
+    def test_rewriting_implemented_phase7(self) -> None:
+        """run_rewriting is implemented in Phase 7 (Tier 3) — returns a valid RewriteOutput."""
+        from finecorpus.llm.operations import RewriteOutput
+
         provider = FakeLLMProvider()
         inp = RewriteInput(
             original_text="Original text.",
             rewrite_instructions="Rewrite for clarity.",
         )
-        with pytest.raises(OperationNotImplementedError) as exc_info:
-            run_rewriting(provider, DEFAULT_OP_CONFIG, inp)
-        assert "Phase 7" in str(exc_info.value)
+        # Phase 7: no longer raises — returns a valid RewriteOutput
+        result = run_rewriting(provider, DEFAULT_OP_CONFIG, inp)
+        assert isinstance(result, RewriteOutput)
+        assert result.rewritten_text
+        assert result.diff_summary
 
     def test_wrong_input_type_raises_type_error(self) -> None:
         provider = FakeLLMProvider()
