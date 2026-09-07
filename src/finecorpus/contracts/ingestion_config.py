@@ -250,10 +250,14 @@ class TransformationSettings(BaseModel):
     - tier3_enabled=True requires tier3_settings.opt_in_ack=True.
     - tier3_enabled=False requires tier3_settings=None.
 
-    M-032/M-033/M-034 flag fields (contract shape; behavior is Phase 7):
+    M-032/M-034 flag fields (contract shape; behavior is Phase 7):
     - retain_original_ref: whether the original-retained reference must be preserved.
-    - diff_preview_required: whether a diff preview must be confirmed before accepting.
     - mark_rewritten_chunks: whether rewritten chunks carry a provenance flag.
+
+    M-033 (diff_preview_required) is NOT duplicated here: it lives exclusively on
+    ``Tier3Settings.diff_preview_required``, which is the field the Build stage reads
+    and enforces (§7.2). A second copy on this model would be dead — Build never read
+    it — so it was removed to keep a single source of truth for the diff-preview gate.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -289,14 +293,8 @@ class TransformationSettings(BaseModel):
             "Contract field only — behavior implemented in Phase 7."
         ),
     )
-    # M-033: diff-preview-required (contract shape; behavior Phase 7)
-    diff_preview_required: bool = Field(
-        default=False,
-        description=(
-            "M-033: whether a diff preview must be confirmed before accepting Tier 3 output. "
-            "Contract field only — behavior implemented in Phase 7."
-        ),
-    )
+    # M-033 (diff_preview_required) intentionally NOT on this model — it lives on
+    # Tier3Settings.diff_preview_required, the single field Build reads/enforces (§7.2).
     # M-034: rewritten-chunk flag (contract shape; behavior Phase 7)
     mark_rewritten_chunks: bool = Field(
         default=False,

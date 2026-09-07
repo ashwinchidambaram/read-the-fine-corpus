@@ -13,9 +13,9 @@ Operations implemented in Phase 3 (Phase 3 = augmentation + classification):
 - ``augmentation`` — AugmentationInput / AugmentationOutput
 - ``classification`` — ClassificationInput / ClassificationOutput
 
-Operations deferred to later phases:
-- ``question_generation`` — Phase 5 — raises ``OperationNotImplementedError``
-- ``rewriting`` — Phase 7 — raises ``OperationNotImplementedError``
+Operations added in later phases:
+- ``question_generation`` — Phase 5 — ``run_question_generation``
+- ``rewriting`` — Phase 7 (Tier 3) — ``run_rewriting``
 
 Prompt injection observations
 ------------------------------
@@ -42,6 +42,7 @@ from finecorpus.llm.prompts import (
     build_augmentation_prompt,
     build_classification_prompt,
     build_question_generation_prompt,
+    build_rewriting_prompt,
     check_for_injection_suspicion,
 )
 
@@ -417,12 +418,77 @@ def run_rewriting(
     op_config: ResolvedOpConfig,
     input_model: RewriteInput,
 ) -> RewriteOutput:
-    """Tier 3 rewriting — raises OperationNotImplementedError (Phase 7).
+    """Execute the Tier 3 rewriting operation (§7.2, M-067 enforcement point).
 
-    Loud stub: callers that attempt this in Phase 3 get a clear error message
-    with the target phase, not a silent no-op.
+    Rewrites a chunk's canonical (Tier-1) text into a more retrievable form.
+    The ORIGINAL text is always retained by the caller — this operation only
+    produces the rewritten form plus a human-readable diff summary; it never
+    overwrites the original (§7.2 "Original always retained, never overwritten").
+
+    Content-as-data (M-067, §7.2, §4.4):
+    - ``rewrite_instructions`` are PLATFORM-generated (never user free-text) and
+      are placed in the SYSTEM message instruction frame.
+    - ``original_text`` is untrusted corpus content and is placed in the USER
+      message inside ``<document_content>`` data delimiters (via ``prompts.py``).
+      Adversarial document content therefore cannot become rewrite instructions:
+      the model is told the delimited region is data to rewrite, not instructions
+      to follow.
+
+    The rewritten text carries the ``untrusted_ingested`` trust level (D-19) —
+    a model rewriting untrusted material produces material that is still
+    untrusted.  The caller is responsible for stamping that trust level on the
+    resulting chunk; this operation does not change it.
+
+    Parameters
+    ----------
+    provider:
+        A concrete ``LLMProvider`` — typically built by ``registry.py``.
+    op_config:
+        Fully-resolved operation config (temperature, max_output_tokens, etc.).
+    input_model:
+        ``RewriteInput`` carrying ``original_text``, platform-generated
+        ``rewrite_instructions``, and optional ``class_description``.
+
+    Returns
+    -------
+    RewriteOutput
+        Schema-validated output with ``rewritten_text`` and ``diff_summary``.
+
+    Raises
+    ------
+    LLMProviderUnavailableError
+        After ``op_config.max_retries`` failed attempts (schema-validation
+        failure counts as a provider error per §4.3).
+    LLMProviderError
+        Non-retryable provider error.
     """
-    raise OperationNotImplementedError("rewriting", available_in="Phase 7")
+    system, user = build_rewriting_prompt(
+        original_text=input_model.original_text,
+        rewrite_instructions=input_model.rewrite_instructions,
+        class_description=input_model.class_description,
+    )
+
+    output = _call_with_retry(
+        provider=provider,
+        op_config=op_config,
+        system=system,
+        user=user,
+        schema=RewriteOutput,
+        operation_name="rewriting",
+    )
+
+    # §14.1 / §4.4: check the free-text diff_summary for injection-shaped content.
+    # Logged as a security observation only; never acted on, never re-fed to a model.
+    if check_for_injection_suspicion(output.diff_summary):
+        logger.warning(
+            "LLM security observation: rewriting 'diff_summary' field contains "
+            "injection-shaped content. Stored for provenance; NOT re-fed to model. "
+            "provider=%s model=%s",
+            op_config.provider_id,
+            op_config.model_id,
+        )
+
+    return output
 
 
 # ---------------------------------------------------------------------------

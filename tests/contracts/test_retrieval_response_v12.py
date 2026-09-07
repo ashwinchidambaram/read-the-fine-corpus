@@ -98,8 +98,8 @@ def _make_result() -> dict:
 
 class TestProducerStamp:
     def test_stamp_value(self) -> None:
-        """RETRIEVAL_RESPONSE_SCHEMA_VERSION must be 1.2.0."""
-        assert RETRIEVAL_RESPONSE_SCHEMA_VERSION == "1.2.0"
+        """RETRIEVAL_RESPONSE_SCHEMA_VERSION must be 1.3.0 (bumped for original_text, D-14)."""
+        assert RETRIEVAL_RESPONSE_SCHEMA_VERSION == "1.3.0"
 
     def test_consumer_range_accepts_120(self) -> None:
         """SpecRange(major=1, min_minor=1) must accept 1.2.0."""

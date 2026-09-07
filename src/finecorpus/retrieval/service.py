@@ -881,6 +881,8 @@ def query(
                 RetrievalResult(
                     chunk_id=sr.chunk_id,
                     text=text,
+                    # D-14 / §7.2 C-R7: for Tier-3 chunks, surface the original at citation time.
+                    original_text=payload.get("original_text"),
                     provenance=provenance,
                     score=sr.score,
                     scores=Scores(raw=sr.score),
@@ -1149,6 +1151,8 @@ def query(
             RetrievalResult(
                 chunk_id=sr.chunk_id,
                 text=text,
+                # D-14 / §7.2 C-R7: for Tier-3 chunks, surface the original at citation time.
+                original_text=payload.get("original_text"),
                 provenance=provenance,
                 score=sr.score,
                 scores=Scores(raw=sr.score),

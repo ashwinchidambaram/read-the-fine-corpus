@@ -1025,3 +1025,59 @@ class TestMismatchCacheGuarantee:
         assert len(embed_calls) == 0, "embed_batch must NOT be called on model mismatch"
         # Cache must still be empty — no vector was stored (no embed happened)
         assert fresh_cache.size == 0, "Cache must remain empty after a mismatch (no embed ran)"
+
+
+# ---------------------------------------------------------------------------
+# MINOR-2: end-to-end original_text surfacing through retrieval.service.query()
+# ---------------------------------------------------------------------------
+
+
+class TestOriginalTextEndToEnd:
+    """A Tier-3 chunk stored with original_text must surface BOTH the rewritten
+    text and the canonical original_text through the real query() path — driving
+    the service, not a directly-constructed RetrievalResult (D-14, §7.2 C-R7)."""
+
+    def test_query_surfaces_text_and_original_text(
+        self,
+        provider: FakeProvider,
+        alias_record: FakeAliasRecord,
+        fresh_cache: QueryEmbeddingCache,
+    ) -> None:
+        adapter = FakeAdapter()
+        adapter.seed_collection(
+            alias=ALIAS,
+            coll=COLL,
+            points=[
+                make_chunk_payload(
+                    chunk_id="chk_t3",
+                    text="Rewritten, self-contained form.",
+                    original_text="The original canonical Tier-1 slice.",
+                    kb_id=KB_ID,
+                    score=0.95,
+                ),
+                make_chunk_payload(
+                    chunk_id="chk_plain",
+                    text="A non-tier-3 chunk.",
+                    kb_id=KB_ID,
+                    score=0.80,
+                ),
+            ],
+        )
+
+        result = _run_query(
+            provider=provider,
+            adapter=adapter,
+            alias_record=alias_record,
+            cache=fresh_cache,
+        )
+
+        by_id = {r.chunk_id: r for r in result.results}  # type: ignore[union-attr]
+        assert "chk_t3" in by_id, "expected the tier-3 chunk in the query results"
+
+        t3 = by_id["chk_t3"]
+        assert t3.text == "Rewritten, self-contained form."
+        assert t3.original_text == "The original canonical Tier-1 slice."
+
+        # Non-tier-3 chunk: original_text is None (byte-identical served text).
+        plain = by_id["chk_plain"]
+        assert plain.original_text is None
