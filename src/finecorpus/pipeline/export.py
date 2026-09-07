@@ -209,52 +209,36 @@ def export_kb(
 
     chunk_count = 0
     batch_size = 500
-    offset = 0
     batch_num = 0
 
     try:
-        # Use Qdrant client directly to scroll the live collection.
-        # The IndexAdapter ABC does not expose a scroll method; we access the
-        # underlying Qdrant client via the adapter's private attribute.
-        # If the adapter does not expose _client, fall back to a no-op stub.
-        qdrant_client = getattr(adapter, "_client", None)
-        if qdrant_client is None:
-            logger.warning(
-                "Adapter does not expose _client; chunk scroll skipped. "
-                "Export will contain no chunk files."
-            )
-        else:
-            next_offset: Any = None
-            while True:
-                try:
-                    results, next_offset = qdrant_client.scroll(
-                        collection_name=collection,
-                        limit=batch_size,
-                        offset=next_offset,
-                        with_payload=True,
-                        with_vectors=False,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.error("Qdrant scroll error at offset %s: %s", next_offset, exc)
-                    break
+        # Iterate the live collection through the first-class adapter API
+        # (D-41).  Previously this reached into the adapter's private
+        # ``_client`` and called ``qdrant_client.scroll`` directly, coupling
+        # export to the Qdrant backend.  ``scroll_all`` is backend-agnostic
+        # (works on Qdrant, pgvector, and the test FakeAdapter) and applies the
+        # metadata-sentinel exclusion internally.
+        batch_records: list[dict[str, Any]] = []
 
-                if not results:
-                    break
+        def _flush_batch(records: list[dict[str, Any]], num: int) -> None:
+            batch_path = chunks_dir / f"chunks_{num:06d}.jsonl"
+            with open(batch_path, "w", encoding="utf-8") as fh:
+                for payload in records:
+                    fh.write(json.dumps(payload, default=str) + "\n")
+            rel = f"chunks/chunks_{num:06d}.jsonl"
+            file_hashes[rel] = _sha256_file(batch_path)
 
-                batch_path = chunks_dir / f"chunks_{batch_num:06d}.jsonl"
-                with open(batch_path, "w", encoding="utf-8") as fh:
-                    for point in results:
-                        payload = point.payload or {}
-                        fh.write(json.dumps(payload, default=str) + "\n")
-                        chunk_count += 1
-
-                rel = f"chunks/chunks_{batch_num:06d}.jsonl"
-                file_hashes[rel] = _sha256_file(batch_path)
+        for result in adapter.scroll_all(collection):
+            batch_records.append(result.payload or {})
+            chunk_count += 1
+            if len(batch_records) >= batch_size:
+                _flush_batch(batch_records, batch_num)
                 batch_num += 1
-                offset += len(results)
+                batch_records = []
 
-                if next_offset is None:
-                    break
+        if batch_records:
+            _flush_batch(batch_records, batch_num)
+            batch_num += 1
 
     except Exception as exc:  # noqa: BLE001
         logger.error("Chunk export failed: %s", exc)

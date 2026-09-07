@@ -318,6 +318,37 @@ class FakeAdapter:
                 break
         return results
 
+    def scroll_all(
+        self,
+        collection: str,
+        payload_filter: dict[str, Any] | None = None,
+        *,
+        batch_size: int = 500,
+    ) -> Any:
+        """Iterate over every point in a collection, optionally filtered (D-41).
+
+        Mirrors the real adapters: yields ``SearchResult`` for each matching
+        point; ``score`` is a sentinel (scroll does not score).  Enforces the
+        same tenancy/payload filter as ``search`` via ``_matches_filter`` so
+        tests can rely on filtered scroll excluding cross-tenant points.
+        """
+        if collection not in self.collections:
+            from finecorpus.index.adapter import CollectionNotFoundError
+
+            raise CollectionNotFoundError(f"Collection '{collection}' does not exist")
+
+        points = self.collections.get(collection, {}).get("points", [])
+        for pt in points:
+            pt_payload = pt.get("payload", {})
+            if payload_filter and not self._matches_filter(pt_payload, payload_filter):
+                continue
+            yield SearchResult(
+                point_id=str(pt.get("id", "")),
+                chunk_id=pt_payload.get("chunk_id", "chk_fake"),
+                score=0.0,
+                payload=pt_payload,
+            )
+
     def count_points(self, collection: str) -> int:
         return len(self.collections.get(collection, {}).get("points", []))
 

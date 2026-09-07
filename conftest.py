@@ -48,6 +48,13 @@ def pytest_configure(config: pytest.Config) -> None:
         "(auto-skipped when services are unreachable). "
         "Run with: pytest -m qdrant_integration",
     )
+    config.addinivalue_line(
+        "markers",
+        "pgvector_integration: index-adapter integration tests against a live "
+        "PostgreSQL with the pgvector extension. Both a named mark (selectable via "
+        "-m pgvector_integration) and a skipif (auto-skipped when Postgres+pgvector "
+        "is unreachable). Run with: pytest -m pgvector_integration",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -116,4 +123,51 @@ def qdrant_integration_mark(obj):  # type: ignore[no-untyped-def]
     """
     obj = pytest.mark.qdrant_integration(obj)
     obj = pytest.mark.skipif(not _SERVICES_UP, reason=_SKIP_REASON)(obj)
+    return obj
+
+
+# ---------------------------------------------------------------------------
+# Shared pgvector_integration composite mark (Phase 7 WU-B)
+# ---------------------------------------------------------------------------
+
+# The default compose Postgres image may not ship the pgvector extension; these
+# tests skip cleanly when Postgres is unreachable OR ``CREATE EXTENSION vector``
+# is unavailable.  The orchestrator runs the overlay with a pgvector-enabled
+# image at phase close.
+PGVECTOR_DSN = "postgresql://finecorpus:finecorpus@localhost:5432/finecorpus"
+
+
+def _pgvector_reachable() -> bool:
+    """Return True only when Postgres is reachable AND pgvector can be enabled."""
+    try:
+        import psycopg  # noqa: PLC0415
+
+        with psycopg.connect(PGVECTOR_DSN, connect_timeout=2, autocommit=True) as conn:
+            conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+        return True
+    except Exception:
+        return False
+
+
+_PGVECTOR_UP = _pgvector_reachable()
+
+_PGVECTOR_SKIP_REASON = (
+    "PostgreSQL with the pgvector extension not reachable at localhost — skipping "
+    "pgvector integration tests. Start a pgvector-enabled Postgres (e.g. the "
+    "pgvector/pgvector image) and ensure CREATE EXTENSION vector succeeds."
+)
+
+
+def pgvector_integration_mark(obj):  # type: ignore[no-untyped-def]
+    """Composite decorator: pgvector_integration named mark + pgvector-up skipif.
+
+    Apply to test classes/functions that require a live Postgres with pgvector::
+
+        from conftest import pgvector_integration_mark
+
+        @pgvector_integration_mark
+        class TestPgVector: ...
+    """
+    obj = pytest.mark.pgvector_integration(obj)
+    obj = pytest.mark.skipif(not _PGVECTOR_UP, reason=_PGVECTOR_SKIP_REASON)(obj)
     return obj
