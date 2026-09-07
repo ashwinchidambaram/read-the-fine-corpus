@@ -1,0 +1,57 @@
+{{- /*
+Maps to compose service: minio-init (minio/mc one-shot).
+Creates the default bucket after MinIO is reachable. Runs as a Helm
+post-install/post-upgrade hook so it fires once per release and is retried
+until MinIO is up. No public-internet access: it only talks to the in-cluster
+MinIO Service.
+*/ -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "finecorpus.fullname" . }}-minio-init
+  labels:
+    {{- include "finecorpus.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio-init
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 10
+  template:
+    metadata:
+      labels:
+        {{- include "finecorpus.labels" . | nindent 8 }}
+        app.kubernetes.io/component: minio-init
+    spec:
+      restartPolicy: OnFailure
+      {{- include "finecorpus.imagePullSecrets" . | nindent 6 }}
+      containers:
+        - name: mc
+          image: {{ include "finecorpus.image" (dict "img" .Values.minio.mcImage "global" .Values.global) }}
+          imagePullPolicy: {{ .Values.minio.mcImage.pullPolicy }}
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "finecorpus.secretName" . }}
+                  key: MINIO_ROOT_USER
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "finecorpus.secretName" . }}
+                  key: MINIO_ROOT_PASSWORD
+            - name: MINIO_BUCKET
+              value: {{ .Values.minio.bucket | quote }}
+            - name: MINIO_ENDPOINT
+              value: "http://{{ include "finecorpus.fullname" . }}-minio:{{ .Values.minio.service.apiPort }}"
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -e
+              until mc alias set local "$MINIO_ENDPOINT" "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"; do
+                echo "waiting for minio..."; sleep 3;
+              done
+              mc mb --ignore-existing "local/$MINIO_BUCKET"
+              echo "bucket ready: $MINIO_BUCKET"

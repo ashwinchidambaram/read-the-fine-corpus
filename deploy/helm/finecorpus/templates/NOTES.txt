@@ -1,0 +1,25 @@
+Read The Fine Corpus (release: {{ .Release.Name }}) is installed.
+
+Services deployed:
+  - postgres          (StatefulSet, ClusterIP, internal only)
+  - qdrant            (StatefulSet, ClusterIP — C-2: never exposed beyond the cluster)
+  - minio             (StatefulSet, ClusterIP: S3 :{{ .Values.minio.service.apiPort }}, console :{{ .Values.minio.service.consolePort }})
+  - retrieval-api     (Deployment, Service :{{ .Values.retrievalApi.service.port }})
+  - control-api       (Deployment, Service :{{ .Values.controlApi.service.port }})
+  - embedding-service (Deployment, Service :{{ .Values.embeddingService.service.port }})
+  - ingest-worker     (Deployment, no Service — heartbeat liveness)
+
+Air-gap mode: {{ if .Values.airgap }}ENABLED (M-013) — outbound HTTP is blocked in-app
+via RTFC_AIRGAP + platform.airgap; all providers asserted local at render time.
+See docs/deployment/air-gapped.md.{{ else }}disabled. To run fully air-gapped
+(no egress), set airgap=true, supply local providers, and mirror images to a
+private registry (global.imageRegistry). See docs/deployment/air-gapped.md.{{ end }}
+
+Reach retrieval-api locally:
+  kubectl port-forward svc/{{ include "finecorpus.fullname" . }}-retrieval-api {{ .Values.retrievalApi.service.port }}:{{ .Values.retrievalApi.service.port }}
+  curl http://localhost:{{ .Values.retrievalApi.service.port }}/healthz
+
+TRUST BOUNDARY (M-068, §14.1): this platform serves RETRIEVAL and CANNOT
+guarantee the safety of downstream generation. Retrieved chunks are labelled
+`trust_level: untrusted_ingested`. The CALLER owns that boundary. See
+docs/security/trust-boundary.md.

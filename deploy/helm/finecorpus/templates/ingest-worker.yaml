@@ -1,0 +1,69 @@
+{{- /*
+Maps to compose service: ingest-worker (SERVICE=ingest-worker, plain Python loop).
+No HTTP server, so NO Service. Liveness/readiness via the heartbeat file the
+loop touches each iteration (mirrors the compose exec healthcheck).
+Also gets MinIO env (the only app service that touches object storage).
+*/ -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "finecorpus.fullname" . }}-ingest-worker
+  labels:
+    {{- include "finecorpus.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ingest-worker
+spec:
+  replicas: {{ .Values.ingestWorker.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "finecorpus.labels" . | nindent 6 }}
+      app.kubernetes.io/component: ingest-worker
+  template:
+    metadata:
+      labels:
+        {{- include "finecorpus.labels" . | nindent 8 }}
+        app.kubernetes.io/component: ingest-worker
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- include "finecorpus.imagePullSecrets" . | nindent 6 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: ingest-worker
+          image: {{ include "finecorpus.image" (dict "img" .Values.app.image "global" .Values.global) }}
+          imagePullPolicy: {{ .Values.app.image.pullPolicy }}
+          env:
+            - name: SERVICE
+              value: ingest-worker
+            {{- include "finecorpus.appEnv" . | nindent 12 }}
+            {{- include "finecorpus.minioEnv" . | nindent 12 }}
+          # Mirrors compose healthcheck: heartbeat file freshness (<90s).
+          livenessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - "import pathlib,time; p=pathlib.Path('/tmp/worker-heartbeat'); assert p.exists() and (time.time()-p.stat().st_mtime)<90"
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: config
+              mountPath: /app/config
+              readOnly: true
+          resources:
+            {{- toYaml .Values.ingestWorker.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "finecorpus.fullname" . }}-config

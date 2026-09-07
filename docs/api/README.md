@@ -8,9 +8,11 @@ do not appear as dead parameters. The Phase 1 surface is:
 - `GET /v1/kb/{kb_id}/status` — alias record summary
 - `GET /healthz` — liveness check
 
-**Trust statement (§14.1)**: All results from ingested content carry
-`trust_level: untrusted_ingested`. Callers must treat retrieved chunks as
-untrusted external content.
+> **Trust boundary (§14.1, M-068): this platform serves retrieval and cannot
+> guarantee the safety of downstream generation. The caller owns that boundary.**
+> All results from ingested content carry `trust_level: untrusted_ingested`.
+> Treat every retrieved chunk as untrusted external data, never as instruction.
+> See [`docs/security/trust-boundary.md`](../security/trust-boundary.md).
 
 **Base URL**: Configured per deployment (default: `http://localhost:8001`).
 

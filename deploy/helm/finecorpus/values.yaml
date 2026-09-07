@@ -1,0 +1,239 @@
+# Read The Fine Corpus — Helm values
+#
+# SECRETS: never commit real credentials here. Every credential below is a
+# PLACEHOLDER. Supply real values at install time via one of:
+#   helm install rtfc deploy/helm/finecorpus \
+#     --set secrets.postgresPassword=... \
+#     --set secrets.minioRootPassword=...
+#   -- OR --
+#   helm install rtfc deploy/helm/finecorpus -f my-secrets.yaml   # gitignored
+#   -- OR --
+#   secrets.existingSecret=<name>   # reference an out-of-band / sealed Secret
+#
+# See docs/deployment/air-gapped.md for the air-gapped install path.
+
+# ---------------------------------------------------------------------------
+# Global image settings — AIR-GAP (M-013)
+# ---------------------------------------------------------------------------
+# All images below are FULLY PINNED. No image uses an implicit ":latest".
+# For an air-gapped install, mirror every image to your private registry and
+# set global.imageRegistry to that registry's host (e.g. registry.internal:5000).
+# Each image may additionally be pinned by digest (image.digest) for supply-chain
+# integrity; when set, the digest wins over the tag.
+global:
+  # Prepended to every image `repository` when set (e.g. "registry.internal:5000").
+  # Leave "" to pull from the repository as written (public/default registries).
+  imageRegistry: ""
+  # imagePullSecrets applied to every pod (e.g. credentials for a private mirror).
+  imagePullSecrets: []
+  #  - name: regcred
+
+# ---------------------------------------------------------------------------
+# Air-gap toggle (M-013, §4.3, §7.2)
+# ---------------------------------------------------------------------------
+# When true:
+#   * config.platform.airgap is forced to true in the generated corpus.yaml,
+#     which sets FINECORPUS_PLATFORM__AIRGAP semantics — the app blocks all
+#     outbound HTTP before any provider call (src/finecorpus/llm/registry.py
+#     _is_airgap_active). RTFC_AIRGAP=true is ALSO injected as an env var on
+#     every app pod as belt-and-suspenders.
+#   * a values-time assertion (templates/_helpers.tpl) FAILS the render if any
+#     configured provider is not local (is_local: true), so a cloud provider
+#     can never be wired into an air-gapped install by accident.
+# This is NOT a degraded mode — it is a first-class supported configuration (§4.3).
+airgap: false
+
+# ---------------------------------------------------------------------------
+# corpus.yaml — application config (§4.6 "config as one file")
+# ---------------------------------------------------------------------------
+# Rendered verbatim into a ConfigMap and mounted at /app/corpus.yaml; the app
+# reads it via FINECORPUS_CONFIG_PATH. Secrets are NEVER placed here — they are
+# supplied as env vars (see `secrets:` and the per-service env wiring).
+#
+# `providers` is the list the air-gap assertion checks. Each entry declares
+# whether it is local. In air-gap mode EVERY entry MUST have isLocal: true.
+config:
+  platform:
+    instanceName: "rtfc"
+    logLevel: "info"
+    # airgap is driven by the top-level `airgap:` toggle above; do not set here.
+  # Declared model providers. Used both to render corpus.yaml provider blocks
+  # and to enforce the air-gap "all providers local" invariant.
+  # Example local provider (Ollama) for an air-gapped install:
+  # providers:
+  #   - name: ollama-local
+  #     kind: ollama
+  #     isLocal: true
+  #     baseUrl: "http://ollama:11434"
+  providers: []
+  # Free-form extra corpus.yaml content merged under the top-level document.
+  # Use this to supply chunking, retrieval, pipeline tuning, etc. verbatim.
+  extra: {}
+
+# ---------------------------------------------------------------------------
+# Secrets (PLACEHOLDERS — override at install time; never commit real values)
+# ---------------------------------------------------------------------------
+secrets:
+  # If set, the chart creates NO Secret and instead references this pre-existing
+  # one (recommended with sealed-secrets / external-secrets). It MUST contain
+  # keys: POSTGRES_PASSWORD, MINIO_ROOT_USER, MINIO_ROOT_PASSWORD, plus any
+  # provider API keys your config references.
+  existingSecret: ""
+  postgresPassword: "CHANGE_ME"
+  minioRootUser: "minioadmin"
+  minioRootPassword: "CHANGE_ME"
+  # Provider API keys (cloud providers only; leave empty in air-gap mode).
+  # key -> value; each becomes an env var of the same name on app pods.
+  providerApiKeys: {}
+  #   OPENAI_API_KEY: "CHANGE_ME"
+
+# Shared connection settings (non-secret parts).
+postgresql:
+  auth:
+    database: finecorpus
+    username: finecorpus
+  # StatefulSet — Postgres is stateful (PVC-backed).
+  image:
+    repository: postgres
+    tag: "16"
+    digest: ""            # e.g. "sha256:..." — wins over tag when set
+    pullPolicy: IfNotPresent
+  service:
+    port: 5432
+  persistence:
+    enabled: true
+    size: 10Gi
+    storageClass: ""      # "" = cluster default
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+qdrant:
+  # C-2: NO Service of type other than ClusterIP, NO ingress — the vector DB is
+  # reachable only inside the cluster by retrieval-api and ingest-worker.
+  image:
+    repository: qdrant/qdrant
+    tag: "v1.19.0"
+    digest: ""
+    pullPolicy: IfNotPresent
+  service:
+    httpPort: 6333
+    grpcPort: 6334
+  persistence:
+    enabled: true
+    size: 20Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 4Gi
+
+minio:
+  image:
+    repository: minio/minio
+    tag: "RELEASE.2025-09-07T16-13-09Z"
+    digest: ""
+    pullPolicy: IfNotPresent
+  # mc client image used by the one-shot bucket-init Job (mirrors compose minio-init).
+  mcImage:
+    repository: minio/mc
+    tag: "RELEASE.2025-08-13T08-35-41Z"
+    digest: ""
+    pullPolicy: IfNotPresent
+  bucket: finecorpus
+  service:
+    apiPort: 9000
+    consolePort: 9001
+  persistence:
+    enabled: true
+    size: 20Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+
+# ---------------------------------------------------------------------------
+# Application services (all built from the same image; SERVICE selects entry)
+# ---------------------------------------------------------------------------
+# One image, four services (mirrors the Dockerfile SERVICE arg + entrypoint).
+# repository/tag/digest are shared unless a service overrides image.*.
+app:
+  image:
+    repository: rtfc/finecorpus
+    tag: "0.1.0"          # NOT "latest": pin every deploy.
+    digest: ""            # e.g. "sha256:..." — wins over tag when set.
+    pullPolicy: IfNotPresent
+
+retrievalApi:
+  replicaCount: 1
+  service:
+    type: ClusterIP
+    port: 8080
+    targetPort: 8000
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+controlApi:
+  replicaCount: 1
+  service:
+    type: ClusterIP
+    port: 8081
+    targetPort: 8000
+  resources:
+    requests:
+      cpu: 250m
+      memory: 256Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
+embeddingService:
+  replicaCount: 1
+  service:
+    type: ClusterIP
+    port: 8082
+    targetPort: 8000
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 4Gi
+
+ingestWorker:
+  replicaCount: 1
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 4Gi
+
+# Common pod hardening applied to all app pods.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1001
+  runAsGroup: 1001
+  fsGroup: 1001
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

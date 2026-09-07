@@ -1,0 +1,35 @@
+apiVersion: v2
+name: finecorpus
+description: >-
+  Read The Fine Corpus (RTFC) — a self-hosted retrieval platform. This chart
+  deploys the full stack (postgres, qdrant, minio, retrieval-api, control-api,
+  embedding-service, ingest-worker) that the reference docker-compose stack runs,
+  and supports fully air-gapped (no-egress) operation (M-013, §4.3).
+type: application
+
+# Chart version — bump on any chart change.
+version: 0.1.0
+
+# The upstream RTFC application version this chart tracks. Overridable per-image
+# in values.yaml (image.tag / image.digest) so it can be pinned & mirrored.
+appVersion: "0.1.0"
+
+keywords:
+  - rag
+  - retrieval
+  - qdrant
+  - self-hosted
+  - air-gapped
+
+home: https://example.invalid/read-the-fine-corpus
+sources:
+  - https://example.invalid/read-the-fine-corpus
+
+maintainers:
+  - name: RTFC maintainers
+
+annotations:
+  # This chart has no dependency on any chart repository, image registry, or
+  # network resource that must be reached at `helm install` time. See
+  # docs/deployment/air-gapped.md.
+  rtfc.dev/air-gap-ready: "true"

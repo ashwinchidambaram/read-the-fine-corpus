@@ -1,0 +1,73 @@
+{{- /* Maps to compose service: retrieval-api (SERVICE=retrieval-api, uvicorn :8000) */ -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "finecorpus.fullname" . }}-retrieval-api
+  labels:
+    {{- include "finecorpus.labels" . | nindent 4 }}
+    app.kubernetes.io/component: retrieval-api
+spec:
+  type: {{ .Values.retrievalApi.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.retrievalApi.service.port }}
+      targetPort: {{ .Values.retrievalApi.service.targetPort }}
+  selector:
+    {{- include "finecorpus.labels" . | nindent 4 }}
+    app.kubernetes.io/component: retrieval-api
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "finecorpus.fullname" . }}-retrieval-api
+  labels:
+    {{- include "finecorpus.labels" . | nindent 4 }}
+    app.kubernetes.io/component: retrieval-api
+spec:
+  replicas: {{ .Values.retrievalApi.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "finecorpus.labels" . | nindent 6 }}
+      app.kubernetes.io/component: retrieval-api
+  template:
+    metadata:
+      labels:
+        {{- include "finecorpus.labels" . | nindent 8 }}
+        app.kubernetes.io/component: retrieval-api
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+    spec:
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- include "finecorpus.imagePullSecrets" . | nindent 6 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: retrieval-api
+          image: {{ include "finecorpus.image" (dict "img" .Values.app.image "global" .Values.global) }}
+          imagePullPolicy: {{ .Values.app.image.pullPolicy }}
+          env:
+            - name: SERVICE
+              value: retrieval-api
+            {{- include "finecorpus.appEnv" . | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8000
+          {{- include "finecorpus.httpProbes" . | nindent 10 }}
+          volumeMounts:
+            - name: config
+              mountPath: /app/config
+              readOnly: true
+          resources:
+            {{- toYaml .Values.retrievalApi.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "finecorpus.fullname" . }}-config
