@@ -55,6 +55,11 @@ def pytest_configure(config: pytest.Config) -> None:
         "-m pgvector_integration) and a skipif (auto-skipped when Postgres+pgvector "
         "is unreachable). Run with: pytest -m pgvector_integration",
     )
+    config.addinivalue_line(
+        "markers",
+        "perf: §4.5 performance benchmark smoke tests (FAKE-mode harness, loose "
+        "thresholds). Fast + deterministic; run in CI. Run with: pytest -m perf",
+    )
 
 
 # ---------------------------------------------------------------------------
