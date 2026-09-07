@@ -299,13 +299,11 @@ def _build_adapter_provider(config: Any) -> tuple[Any, Any]:
     """
     try:
         from finecorpus.embedding.registry import build_provider_from_config  # noqa: PLC0415
-        from finecorpus.index.qdrant import QdrantAdapter  # noqa: PLC0415
+        from finecorpus.index.factory import build_adapter_from_config  # noqa: PLC0415
 
         provider = build_provider_from_config(config)
-        adapter = QdrantAdapter(
-            url=config.storage.qdrant.url,
-            api_key=config.storage.qdrant.api_key,
-        )
+        # Backend selected by storage.index_backend (qdrant default; pgvector opt-in).
+        adapter = build_adapter_from_config(config)
         return adapter, provider
     except Exception as exc:  # noqa: BLE001
         logger.warning(

@@ -80,17 +80,14 @@ class EngineContext:
 
         from finecorpus.control.metadata import create_engine as _control_create_engine
         from finecorpus.embedding.registry import build_provider_from_config
-        from finecorpus.index.qdrant import QdrantAdapter
+        from finecorpus.index.factory import build_adapter_from_config
 
         # Control-plane session factory (same DSN source as the CLI/worker).
         sa_engine = _control_create_engine(config.storage.postgres.url or "sqlite:///:memory:")
         session_local = sessionmaker(bind=sa_engine)
 
-        # Index adapter (Qdrant) — same construction as _build_adapter_provider.
-        adapter = QdrantAdapter(
-            url=config.storage.qdrant.url,
-            api_key=config.storage.qdrant.api_key,
-        )
+        # Index adapter selected by storage.index_backend (qdrant default; pgvector opt-in).
+        adapter = build_adapter_from_config(config)
 
         # Embedding provider from config (same registry entry point).
         provider = build_provider_from_config(config)

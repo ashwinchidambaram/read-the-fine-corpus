@@ -17,35 +17,33 @@ import pytest
 # ---------------------------------------------------------------------------
 
 
-class _FakeScrollPoint:
-    def __init__(self, payload: dict):
-        self.payload = payload
-        self.id = payload.get("chunk_id", "unknown")
+class _FakeAdapter:
+    """Minimal adapter exposing the first-class ``scroll_all`` API (D-41).
 
-
-class _FakeQdrantClient:
-    """Minimal fake Qdrant client that supports scroll."""
+    Export no longer reaches into a private ``_client``; it iterates the live
+    collection via ``adapter.scroll_all(...)``.  This fake yields the seeded
+    payloads as ``SearchResult`` objects, matching the real adapters.
+    """
 
     def __init__(self, points: list[dict]):
         self._points = points
 
-    def scroll(
+    def scroll_all(
         self,
-        collection_name: str,
-        limit: int = 10,
-        offset: Any = None,
-        with_payload: bool = True,
-        with_vectors: bool = False,
-    ):
-        start = 0 if offset is None else int(offset)
-        batch = self._points[start : start + limit]
-        next_offset = start + limit if (start + limit) < len(self._points) else None
-        return [_FakeScrollPoint(p) for p in batch], next_offset
+        collection: str,
+        payload_filter: dict | None = None,
+        *,
+        batch_size: int = 500,
+    ) -> Any:
+        from finecorpus.index.adapter import SearchResult
 
-
-class _FakeAdapter:
-    def __init__(self, points: list[dict]):
-        self._client = _FakeQdrantClient(points)
+        for p in self._points:
+            yield SearchResult(
+                point_id=p.get("chunk_id", "unknown"),
+                chunk_id=p.get("chunk_id", "unknown"),
+                score=0.0,
+                payload=p,
+            )
 
 
 # ---------------------------------------------------------------------------

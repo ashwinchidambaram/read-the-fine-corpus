@@ -66,6 +66,20 @@ class CacheBackend(StrEnum):
     postgres = "postgres"
 
 
+class IndexBackend(StrEnum):
+    """Supported vector-index backends (§4.4).
+
+    Qdrant is the reference/default backend.  ``pgvector`` proves the
+    ``IndexAdapter`` abstraction is not Qdrant-locked (Phase 7, WU-B): it runs
+    the vector index inside PostgreSQL via the pgvector extension, reusing the
+    existing ``storage.postgres`` DSN.  Selecting ``pgvector`` does NOT change
+    the control-plane DB; it only changes which backend serves the vector index.
+    """
+
+    qdrant = "qdrant"
+    pgvector = "pgvector"
+
+
 class RetrievalStrategy(StrEnum):
     """Retrieval strategy options (§11.2)."""
 
@@ -270,6 +284,15 @@ class CacheStorageConfig(BaseModel):
 class StorageConfig(BaseModel):
     """All storage-backend settings (§4.1, §4.4, §10.2, §11.3)."""
 
+    index_backend: IndexBackend = Field(
+        default=IndexBackend.qdrant,
+        description=(
+            "§4.4 — Which vector-index backend serves the index: ``qdrant`` "
+            "(default; no behaviour change for existing deployments) or "
+            "``pgvector`` (index inside PostgreSQL via the pgvector extension, "
+            "reusing ``storage.postgres``).  The control-plane DB is unaffected."
+        ),
+    )
     postgres: PostgresConfig = Field(default_factory=PostgresConfig)
     qdrant: QdrantConfig = Field(default_factory=QdrantConfig)
     object_store: ObjectStoreConfig = Field(default_factory=ObjectStoreConfig)

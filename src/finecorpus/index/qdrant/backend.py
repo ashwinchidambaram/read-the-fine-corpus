@@ -11,6 +11,7 @@ Spec references: §4.4, §4.2 C-2/C-3, index-lifecycle.md §2, §4.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -496,6 +497,68 @@ class QdrantAdapter(IndexAdapter):
         ]
 
     # search_hybrid is inherited from IndexAdapter and raises UnsupportedCapabilityError.
+
+    # ------------------------------------------------------------------
+    # Scroll (D-41 — first-class point iteration; replaces _client access)
+    # ------------------------------------------------------------------
+
+    def scroll_all(
+        self,
+        collection: str,
+        payload_filter: dict[str, Any] | None = None,
+        *,
+        batch_size: int = 500,
+    ) -> Iterator[SearchResult]:
+        """Iterate over every point in a collection via Qdrant scroll (D-41).
+
+        Wraps ``QdrantClient.scroll`` with internal pagination and yields a flat
+        stream of ``SearchResult``.  The metadata sentinel point is excluded.
+        ``score`` is a sentinel (0.0) — scroll does not score points.
+        """
+        if not self.collection_exists(collection):
+            raise CollectionNotFoundError(f"Collection '{collection}' does not exist")
+
+        # Combine the caller filter with the sentinel-exclusion clause so the
+        # metadata sentinel never leaks into scroll results (matches search).
+        sentinel_exclusion = qm.Filter(
+            must_not=[
+                qm.FieldCondition(
+                    key="_is_metadata_sentinel",
+                    match=qm.MatchValue(value=True),
+                )
+            ]
+        )
+        if payload_filter:
+            user_filter = _dict_to_qdrant_filter(payload_filter)
+            scroll_filter: qm.Filter = qm.Filter(must=[user_filter, sentinel_exclusion])
+        else:
+            scroll_filter = sentinel_exclusion
+
+        next_offset: Any = None
+        while True:
+            try:
+                points, next_offset = self._client.scroll(
+                    collection_name=collection,
+                    scroll_filter=scroll_filter,
+                    limit=batch_size,
+                    offset=next_offset,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+            except Exception as exc:
+                raise IndexError(f"Scroll of collection '{collection}' failed: {exc}") from exc
+
+            for p in points:
+                payload = dict(p.payload) if p.payload else {}
+                yield SearchResult(
+                    point_id=str(p.id),
+                    chunk_id=payload.get("chunk_id", str(p.id)),
+                    score=0.0,
+                    payload=payload,
+                )
+
+            if next_offset is None:
+                break
 
     # ------------------------------------------------------------------
     # Point count

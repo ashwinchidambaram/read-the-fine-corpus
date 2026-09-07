@@ -13,6 +13,7 @@ Phase 1 capabilities:
 from __future__ import annotations
 
 import abc
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -632,6 +633,51 @@ class IndexAdapter(abc.ABC):
             backend=self.__class__.__name__,
             detail=caps.hybrid_search_unavailable_reason,
         )
+
+    # ------------------------------------------------------------------
+    # Point iteration (scroll)
+    # ------------------------------------------------------------------
+
+    @abc.abstractmethod
+    def scroll_all(
+        self,
+        collection: str,
+        payload_filter: dict[str, Any] | None = None,
+        *,
+        batch_size: int = 500,
+    ) -> Iterator[SearchResult]:
+        """Iterate over every point in a collection, optionally filtered (D-41).
+
+        This is the first-class, backend-agnostic way to enumerate all points in
+        a collection without scoring — used by KB export (``pipeline/export.py``)
+        and any other caller that needs to walk the full point set.  It replaces
+        the previous pattern of reaching into the adapter's private ``_client``
+        (a layering/coupling gap tracked as D-41).
+
+        Iteration is lazy and paginated internally (``batch_size`` controls the
+        backend fetch batch).  ``SearchResult.score`` is not meaningful here and
+        MUST NOT be relied upon by callers — scroll does not score points; a
+        sentinel value (e.g. ``0.0``) is returned.
+
+        The ``payload_filter`` uses the same flat dotted-key dict format as
+        ``search`` (see ``_build_tenancy_filter``); when supplied it is applied
+        server-side so cross-tenant / off-filter points are never yielded.
+
+        Internal metadata sentinels (if any) MUST be excluded from the results.
+
+        Args:
+            collection: Raw collection name to iterate.
+            payload_filter: Optional flat dotted-key filter dict; only points
+                matching every clause are yielded.
+            batch_size: Backend fetch page size (implementation detail; callers
+                receive a flat iterator regardless).
+
+        Yields:
+            ``SearchResult`` for each matching point (score is a sentinel).
+
+        Raises:
+            CollectionNotFoundError: If the collection does not exist.
+        """
 
     # ------------------------------------------------------------------
     # Point count (for validation gates)

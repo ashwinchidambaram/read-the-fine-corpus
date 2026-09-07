@@ -17,6 +17,7 @@ dependencies = [
     "mcp>=2.1.1",
     "openai>=3.8.0",
     "openpyxl>=3.1",
+    "pgvector>=0.5.0",
     "prometheus-client>=0.26.0",
     "psycopg[binary]>=3.3.5",
     "pydantic>=2.13.5",
@@ -95,6 +96,7 @@ type = "forbidden"
 source_modules = [
     "finecorpus.index.adapter",
     "finecorpus.index.qdrant",
+    "finecorpus.index.pgvector",
 ]
 forbidden_modules = [
     "finecorpus.control",
