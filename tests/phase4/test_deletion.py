@@ -38,6 +38,7 @@ from finecorpus.index.lifecycle import (
     BuildContext,
     BuildState,
     RestoredUnreplayedError,
+    SnapshotLifecycleError,
     create_shadow,
     promote,
     restore_from_snapshot,
@@ -661,3 +662,40 @@ def test_restore_from_snapshot_replay_and_marker() -> None:
         # The tombstone should have a replay record for the restored collection
         unreplayed = tomb_repo.unreplayed_for(KB_ID, restored_coll)
         assert len(unreplayed) == 0, "all tombstones must be replayed"
+
+
+def test_restore_fails_closed_when_marker_write_fails_m087(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MINOR-1 / M-087: if the unreplayed marker cannot be recorded after a
+    restore, restore_from_snapshot must FAIL (raise) rather than warn-and-proceed.
+
+    The marker is the only structural gate keeping a freshly-restored collection
+    out of promote() until tombstones are replayed; a restore that cannot record
+    it must not silently yield a promotable collection.
+    """
+    engine = _make_engine()
+    SessionLocal = _make_session_factory(engine)
+    adapter = FakeAdapter()
+
+    with SessionLocal() as session:
+        ctx = _ingest_and_promote(
+            adapter, session, KB_ID, WS_ID, build_id=1, doc_ids=[DOC_ID, DOC_ID_2]
+        )
+        snap_ref = adapter.snapshot_collection(ctx.shadow_collection)
+
+        # Make the unreplayed-marker write fail.  (restore_snapshot itself must
+        # already have succeeded, so only fail set_collection_metadata.)
+        def _boom(collection: str, metadata: dict[str, Any]) -> None:
+            raise RuntimeError("simulated metadata backend failure")
+
+        monkeypatch.setattr(adapter, "set_collection_metadata", _boom, raising=True)
+
+        with pytest.raises(SnapshotLifecycleError, match="unreplayed marker"):
+            restore_from_snapshot(
+                adapter=adapter,
+                session=session,
+                kb_id=KB_ID,
+                ref=snap_ref,
+                new_build_id=2,
+            )

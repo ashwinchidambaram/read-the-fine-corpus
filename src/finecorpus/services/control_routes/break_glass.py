@@ -62,6 +62,13 @@ def _require_admin_id(
     Identity comes exclusively from a validated admin-role API key — never
     from a client-set header (spoofable-field bypass, fixed in PR #37).
 
+    Returns the STABLE identity — ``principal.principal_id`` (= key_id) — NOT
+    the human-readable ``principal.name``.  The retrieval read path validates a
+    break-glass grant via ``active_grant_for(kb_id, principal.principal_id)``
+    (retrieval/service.py), so the grant MUST be issued keyed on the same
+    stable identity or every break-glass read fails closed (F-1).  ``name`` is
+    a non-unique display label and is only surfaced in logs for readability.
+
     Raises:
         HTTPException 401/403: missing/invalid key or non-admin role.
     """
@@ -82,7 +89,14 @@ def _require_admin_id(
                 status_code=403,
                 detail="Admin role required for break-glass routes.",
             ) from None
-        return principal.name
+        logger.info(
+            "Break-glass admin authenticated: name=%s principal_id=%s",
+            principal.name,
+            principal.principal_id,
+        )
+        # F-1: stored grant identity and read-time lookup key must be the same
+        # stable identity — principal_id (= key_id), never the human name.
+        return principal.principal_id
     except HTTPException:
         raise
     except Exception:  # noqa: BLE001
