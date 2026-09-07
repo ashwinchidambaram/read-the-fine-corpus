@@ -457,10 +457,14 @@ class PgVectorAdapter(IndexAdapter):
         # ``<=>`` is pgvector's cosine-distance operator (0 = identical, 2 =
         # opposite).  Score = 1 - distance so higher = more similar (matching the
         # direction of Qdrant's cosine similarity score).
+        # The query vector is cast to ``vector`` explicitly (``%s::vector``); a
+        # plain Python list otherwise binds as ``double precision[]`` and the
+        # ``<=>`` operator has no ``vector <=> double precision[]`` overload.
+        # (Mirrors the upsert path's ``%s::vector``.)
         sql = (
-            f"SELECT point_id, payload, 1 - (embedding <=> %s) AS score "
+            f"SELECT point_id, payload, 1 - (embedding <=> %s::vector) AS score "
             f"FROM {name} {where_clause} "
-            "ORDER BY embedding <=> %s LIMIT %s"
+            "ORDER BY embedding <=> %s::vector LIMIT %s"
         )
         query_params = [query_vector, *params, query_vector, int(top_k)]
         try:
@@ -471,7 +475,11 @@ class PgVectorAdapter(IndexAdapter):
             with self._conn.transaction():
                 with self._conn.cursor() as cur:
                     # Scaled candidate pool; scoped to this transaction only.
-                    cur.execute("SET LOCAL hnsw.ef_search = %s", (ef_search,))
+                    # NOTE: Postgres SET does not accept bound parameters ("syntax
+                    # error at or near $1"), so the value is inlined — safe because
+                    # ``ef_search`` is a computed, clamped ``int`` (never user input),
+                    # re-coerced with int() here as belt-and-braces.
+                    cur.execute(f"SET LOCAL hnsw.ef_search = {int(ef_search)}")
                     # Iterative scan materially improves filtered recall on
                     # pgvector >= 0.8.  Guard so an older pgvector that does not
                     # recognise the GUC does not abort the search.

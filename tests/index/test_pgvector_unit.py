@@ -153,9 +153,12 @@ def test_search_sets_hnsw_ef_search_scaled_to_top_k(
     )
     assert results == []
 
-    ef_sets = [params for sql, params in log if "hnsw.ef_search" in sql and "SET LOCAL" in sql]
-    assert ef_sets, f"expected a SET LOCAL hnsw.ef_search; got statements: {log}"
-    assert ef_sets[0] == (expected_ef,)
+    # Postgres SET does not accept bound parameters, so ef_search is INLINED in
+    # the statement text (verified against live pgvector — a bound `%s` raises
+    # "syntax error at or near $1"). Assert the inlined value, not a param tuple.
+    ef_stmts = [sql for sql, _params in log if "hnsw.ef_search" in sql and "SET LOCAL" in sql]
+    assert ef_stmts, f"expected a SET LOCAL hnsw.ef_search; got statements: {log}"
+    assert f"SET LOCAL hnsw.ef_search = {expected_ef}" in ef_stmts[0]
 
 
 def test_search_issues_iterative_scan_guarded(monkeypatch: pytest.MonkeyPatch) -> None:
