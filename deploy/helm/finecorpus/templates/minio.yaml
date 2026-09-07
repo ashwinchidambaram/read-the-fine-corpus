@@ -1,0 +1,107 @@
+{{- /*
+Maps to compose services: minio (minio/minio, StatefulSet + PVC) and
+minio-init (minio/mc one-shot bucket create). The S3 API (9000) stays
+internal (ClusterIP); the console (9001) is a separate ClusterIP port.
+*/ -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "finecorpus.fullname" . }}-minio
+  labels:
+    {{- include "finecorpus.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - name: s3
+      port: {{ .Values.minio.service.apiPort }}
+      targetPort: 9000
+    - name: console
+      port: {{ .Values.minio.service.consolePort }}
+      targetPort: 9001
+  selector:
+    {{- include "finecorpus.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "finecorpus.fullname" . }}-minio
+  labels:
+    {{- include "finecorpus.labels" . | nindent 4 }}
+    app.kubernetes.io/component: minio
+spec:
+  serviceName: {{ include "finecorpus.fullname" . }}-minio
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "finecorpus.labels" . | nindent 6 }}
+      app.kubernetes.io/component: minio
+  template:
+    metadata:
+      labels:
+        {{- include "finecorpus.labels" . | nindent 8 }}
+        app.kubernetes.io/component: minio
+    spec:
+      {{- include "finecorpus.imagePullSecrets" . | nindent 6 }}
+      containers:
+        - name: minio
+          image: {{ include "finecorpus.image" (dict "img" .Values.minio.image "global" .Values.global) }}
+          imagePullPolicy: {{ .Values.minio.image.pullPolicy }}
+          args: ["server", "/data", "--console-address", ":9001"]
+          ports:
+            - name: s3
+              containerPort: 9000
+            - name: console
+              containerPort: 9001
+          env:
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "finecorpus.secretName" . }}
+                  key: MINIO_ROOT_USER
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "finecorpus.secretName" . }}
+                  key: MINIO_ROOT_PASSWORD
+          # Mirrors compose healthcheck: MinIO liveness/readiness on /minio/health.
+          readinessProbe:
+            httpGet:
+              path: /minio/health/ready
+              port: 9000
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
+          livenessProbe:
+            httpGet:
+              path: /minio/health/live
+              port: 9000
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 5
+          volumeMounts:
+            - name: minio-data
+              mountPath: /data
+          resources:
+            {{- toYaml .Values.minio.resources | nindent 12 }}
+  {{- if .Values.minio.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: minio-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.minio.persistence.storageClass }}
+        storageClassName: {{ .Values.minio.persistence.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.minio.persistence.size }}
+  {{- else }}
+      volumes:
+        - name: minio-data
+          emptyDir: {}
+  {{- end }}

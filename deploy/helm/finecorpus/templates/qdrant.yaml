@@ -1,0 +1,96 @@
+{{- /*
+Maps to compose service: qdrant (qdrant/qdrant:v1.19.0, StatefulSet + PVC).
+C-2: ClusterIP only, no ingress, no NodePort — reachable ONLY inside the
+cluster by retrieval-api and ingest-worker. The vector DB is never exposed
+beyond the internal network (spec §4.2, docs/architecture/overview.md).
+*/ -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "finecorpus.fullname" . }}-qdrant
+  labels:
+    {{- include "finecorpus.labels" . | nindent 4 }}
+    app.kubernetes.io/component: qdrant
+spec:
+  type: ClusterIP
+  clusterIP: None
+  ports:
+    - name: http
+      port: {{ .Values.qdrant.service.httpPort }}
+      targetPort: 6333
+    - name: grpc
+      port: {{ .Values.qdrant.service.grpcPort }}
+      targetPort: 6334
+  selector:
+    {{- include "finecorpus.labels" . | nindent 4 }}
+    app.kubernetes.io/component: qdrant
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "finecorpus.fullname" . }}-qdrant
+  labels:
+    {{- include "finecorpus.labels" . | nindent 4 }}
+    app.kubernetes.io/component: qdrant
+spec:
+  serviceName: {{ include "finecorpus.fullname" . }}-qdrant
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "finecorpus.labels" . | nindent 6 }}
+      app.kubernetes.io/component: qdrant
+  template:
+    metadata:
+      labels:
+        {{- include "finecorpus.labels" . | nindent 8 }}
+        app.kubernetes.io/component: qdrant
+    spec:
+      {{- include "finecorpus.imagePullSecrets" . | nindent 6 }}
+      containers:
+        - name: qdrant
+          image: {{ include "finecorpus.image" (dict "img" .Values.qdrant.image "global" .Values.global) }}
+          imagePullPolicy: {{ .Values.qdrant.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 6333
+            - name: grpc
+              containerPort: 6334
+          # Mirrors compose healthcheck: probe /healthz on the REST port.
+          # The official qdrant image has no curl/wget, so use a TCP-socket
+          # readiness probe (equivalent liveness signal).
+          readinessProbe:
+            tcpSocket:
+              port: 6333
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
+          livenessProbe:
+            tcpSocket:
+              port: 6333
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 5
+          volumeMounts:
+            - name: qdrant-data
+              mountPath: /qdrant/storage
+          resources:
+            {{- toYaml .Values.qdrant.resources | nindent 12 }}
+  {{- if .Values.qdrant.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: qdrant-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.qdrant.persistence.storageClass }}
+        storageClassName: {{ .Values.qdrant.persistence.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.qdrant.persistence.size }}
+  {{- else }}
+      volumes:
+        - name: qdrant-data
+          emptyDir: {}
+  {{- end }}

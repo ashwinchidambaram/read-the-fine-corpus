@@ -5,6 +5,8 @@ This wiki is versioned with the code; behaviour changes and their docs change in
 ## Sections
 
 - **[architecture/](architecture/)** — System design, components, and data flow
+- **[deployment/](deployment/)** — Deployment targets, including the Helm chart and air-gapped install (M-013)
+- **[security/](security/)** — Trust boundary (M-068), untrusted-content handling
 - **[pipeline/](pipeline/)** — Pipeline stage abstraction, ArtifactStore, orchestrator, per-stage docs
 - **[contracts/](contracts/)** — Data contracts, schemas, and API specifications
 - **[configuration/](configuration/)** — Configuration options and environment setup
