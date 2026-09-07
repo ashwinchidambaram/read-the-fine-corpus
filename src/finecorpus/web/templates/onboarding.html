@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Get started — Read The Fine Corpus{% endblock %}
+{% block content %}
+<section class="card">
+  <header class="topbar">
+    <h1>Get started</h1>
+    <form method="post" action="/logout" class="logout-form">
+      <button type="submit" class="secondary">Sign out</button>
+    </form>
+  </header>
+  <p>Welcome, <strong>{{ username }}</strong>. This takes about five steps — no
+  documentation needed. We pick sensible defaults; you can change anything later
+  in Proficient mode.</p>
+
+  <ol class="onboarding-steps" data-testid="onboarding-steps">
+    {% for title, blurb, href in steps %}
+    <li class="onboarding-step">
+      <span class="step-index">{{ loop.index }}</span>
+      <div>
+        <strong>{{ title }}</strong>
+        <div class="muted">{{ blurb }}</div>
+      </div>
+    </li>
+    {% endfor %}
+  </ol>
+
+  <nav class="actions">
+    <a class="button" href="/kb/new?mode=easy" data-testid="onboarding-start">Start — create a knowledge base</a>
+  </nav>
+  <p class="muted">Prefer full control from the start?
+    <a href="/kb/new?mode=proficient">Create in Proficient mode</a>.</p>
+</section>
+{% endblock %}

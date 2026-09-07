@@ -240,6 +240,32 @@ def create_app(
             {"username": session.username, "version": finecorpus.__version__},
         )
 
+    @app.get("/onboarding", response_class=HTMLResponse)
+    def onboarding(
+        request: Request,
+        session: Annotated[Session, Depends(require_session)],
+    ) -> Response:
+        """First-run guided path (§19 Phase 6 onboarding).
+
+        A plain-language walkthrough that links the existing Easy-mode KB steps
+        (create → plan → preview → ingest → endpoint) so a non-technical user
+        reaches a working retrieval endpoint without reading documentation. It
+        does not duplicate any KB logic — each step links to the real
+        ``kb_routes`` handler; ``/kb/new`` (step 1) is the entry point.
+        """
+        steps = [
+            ("Create a knowledge base", "Point it at your documents.", "/kb/new"),
+            ("Review the plan", "We pick good defaults; you can peek at why.", None),
+            ("Preview", "See sample chunks before anything is stored.", None),
+            ("Ingest", "We show the cost in plain dollars first.", None),
+            ("Query your endpoint", "Ask a question and get sourced answers.", None),
+        ]
+        return templates.TemplateResponse(
+            request,
+            "onboarding.html",
+            {"username": session.username, "steps": steps},
+        )
+
     # -- KB flow routes (Easy/Proficient over the same engine) --------------
 
     from fastapi import HTTPException as _HTTPException
